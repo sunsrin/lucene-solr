@@ -23,6 +23,7 @@ import java.util.List;
 import org.apache.lucene.index.DocValues;
 import org.apache.lucene.index.LeafReaderContext;
 import org.apache.lucene.index.MultiDocValues;
+import org.apache.lucene.index.OrdinalMap;
 import org.apache.lucene.index.SortedDocValues;
 import org.apache.lucene.index.SortedSetDocValues;
 import org.apache.lucene.search.DocIdSet;
@@ -33,6 +34,7 @@ import org.apache.lucene.util.UnicodeUtil;
 import org.apache.solr.common.SolrException;
 import org.apache.solr.schema.SchemaField;
 import org.apache.solr.search.Filter;
+import org.apache.solr.uninverting.FieldCacheImpl;
 
 /**
  * Grabs values from {@link DocValues}.
@@ -42,7 +44,7 @@ class FacetFieldProcessorByArrayDV extends FacetFieldProcessorByArray {
 
   boolean multiValuedField;
   SortedSetDocValues si;  // only used for term lookups (for both single and multi-valued)
-  MultiDocValues.OrdinalMap ordinalMap = null; // maps per-segment ords to global ords
+  OrdinalMap ordinalMap = null; // maps per-segment ords to global ords
 
   FacetFieldProcessorByArrayDV(FacetContext fcontext, FacetField freq, SchemaField sf) {
     super(fcontext, freq, sf);
@@ -57,8 +59,9 @@ class FacetFieldProcessorByArrayDV extends FacetFieldProcessorByArray {
         ordinalMap = ((MultiDocValues.MultiSortedSetDocValues)si).mapping;
       }
     } else {
+      // multi-valued view
       SortedDocValues single = FieldUtil.getSortedDocValues(fcontext.qcontext, sf, null);
-      si = DocValues.singleton(single);  // multi-valued view
+      si = DocValues.singleton(single);
       if (single instanceof MultiDocValues.MultiSortedDocValues) {
         ordinalMap = ((MultiDocValues.MultiSortedDocValues)single).mapping;
       }
@@ -183,11 +186,33 @@ class FacetFieldProcessorByArrayDV extends FacetFieldProcessorByArray {
     int segMax = singleDv.getValueCount() + 1;
     final int[] counts = getCountArr( segMax );
 
+    /** alternate trial implementations
+     // ord
+     // FieldUtil.visitOrds(singleDv, disi,  (doc,ord)->{counts[ord+1]++;} );
+
+    FieldUtil.OrdValues ordValues = FieldUtil.getOrdValues(singleDv, disi);
+    while (ordValues.nextDoc() != DocIdSetIterator.NO_MORE_DOCS) {
+      counts[ ordValues.getOrd() + 1]++;
+    }
+     **/
+
+
+    // calculate segment-local counts
     int doc;
-    while ((doc = disi.nextDoc()) != DocIdSetIterator.NO_MORE_DOCS) {
-      counts[ singleDv.getOrd(doc) + 1 ]++;
+    if (singleDv instanceof FieldCacheImpl.SortedDocValuesImpl.Iter) {
+      FieldCacheImpl.SortedDocValuesImpl.Iter fc = (FieldCacheImpl.SortedDocValuesImpl.Iter) singleDv;
+      while ((doc = disi.nextDoc()) != DocIdSetIterator.NO_MORE_DOCS) {
+        counts[fc.getOrd(doc) + 1]++;
+      }
+    } else {
+      while ((doc = disi.nextDoc()) != DocIdSetIterator.NO_MORE_DOCS) {
+        if (singleDv.advanceExact(doc)) {
+          counts[singleDv.ordValue() + 1]++;
+        }
+      }
     }
 
+    // convert segment-local counts to global counts
     for (int i=1; i<segMax; i++) {
       int segCount = counts[i];
       if (segCount > 0) {
@@ -203,11 +228,12 @@ class FacetFieldProcessorByArrayDV extends FacetFieldProcessorByArray {
 
     int doc;
     while ((doc = disi.nextDoc()) != DocIdSetIterator.NO_MORE_DOCS) {
-      multiDv.setDocument(doc);
-      for(;;) {
-        int segOrd = (int)multiDv.nextOrd();
-        if (segOrd < 0) break;
-        counts[segOrd]++;
+      if (multiDv.advanceExact(doc)) {
+        for(;;) {
+          int segOrd = (int)multiDv.nextOrd();
+          if (segOrd < 0) break;
+          counts[segOrd]++;
+        }
       }
     }
 
@@ -235,30 +261,47 @@ class FacetFieldProcessorByArrayDV extends FacetFieldProcessorByArray {
   private void collectDocs(SortedDocValues singleDv, DocIdSetIterator disi, LongValues toGlobal) throws IOException {
     int doc;
     while ((doc = disi.nextDoc()) != DocIdSetIterator.NO_MORE_DOCS) {
-      int segOrd = singleDv.getOrd(doc);
-      if (segOrd < 0) continue;
-      collect(doc, segOrd, toGlobal);
+      if (singleDv.advanceExact(doc)) {
+        int segOrd = singleDv.ordValue();
+        collect(doc, segOrd, toGlobal);
+      }
     }
   }
 
   private void collectCounts(SortedDocValues singleDv, DocIdSetIterator disi, LongValues toGlobal) throws IOException {
     int doc;
-    while ((doc = disi.nextDoc()) != DocIdSetIterator.NO_MORE_DOCS) {
-      int segOrd = singleDv.getOrd(doc);
-      if (segOrd < 0) continue;
-      int ord = (int)toGlobal.get(segOrd);
-      countAcc.incrementCount(ord, 1);
+    if (singleDv instanceof FieldCacheImpl.SortedDocValuesImpl.Iter) {
+
+      FieldCacheImpl.SortedDocValuesImpl.Iter fc = (FieldCacheImpl.SortedDocValuesImpl.Iter)singleDv;
+      while ((doc = disi.nextDoc()) != DocIdSetIterator.NO_MORE_DOCS) {
+        int segOrd = fc.getOrd(doc);
+        if (segOrd < 0) continue;
+        int ord = (int)toGlobal.get(segOrd);
+        countAcc.incrementCount(ord, 1);
+      }
+
+    } else {
+
+      while ((doc = disi.nextDoc()) != DocIdSetIterator.NO_MORE_DOCS) {
+        if (singleDv.advanceExact(doc)) {
+          int segOrd = singleDv.ordValue();
+          int ord = (int) toGlobal.get(segOrd);
+          countAcc.incrementCount(ord, 1);
+        }
+      }
+
     }
   }
 
   private void collectDocs(SortedSetDocValues multiDv, DocIdSetIterator disi, LongValues toGlobal) throws IOException {
     int doc;
     while ((doc = disi.nextDoc()) != DocIdSetIterator.NO_MORE_DOCS) {
-      multiDv.setDocument(doc);
-      for(;;) {
-        int segOrd = (int)multiDv.nextOrd();
-        if (segOrd < 0) break;
-        collect(doc, segOrd, toGlobal);
+      if (multiDv.advanceExact(doc)) {
+        for(;;) {
+          int segOrd = (int)multiDv.nextOrd();
+          if (segOrd < 0) break;
+          collect(doc, segOrd, toGlobal);
+        }
       }
     }
   }
@@ -266,12 +309,13 @@ class FacetFieldProcessorByArrayDV extends FacetFieldProcessorByArray {
   private void collectCounts(SortedSetDocValues multiDv, DocIdSetIterator disi, LongValues toGlobal) throws IOException {
     int doc;
     while ((doc = disi.nextDoc()) != DocIdSetIterator.NO_MORE_DOCS) {
-      multiDv.setDocument(doc);
-      for(;;) {
-        int segOrd = (int)multiDv.nextOrd();
-        if (segOrd < 0) break;
-        int ord = (int)toGlobal.get(segOrd);
-        countAcc.incrementCount(ord, 1);
+      if (multiDv.advanceExact(doc)) {
+        for(;;) {
+          int segOrd = (int)multiDv.nextOrd();
+          if (segOrd < 0) break;
+          int ord = (int)toGlobal.get(segOrd);
+          countAcc.incrementCount(ord, 1);
+        }
       }
     }
   }
@@ -283,10 +327,10 @@ class FacetFieldProcessorByArrayDV extends FacetFieldProcessorByArray {
     if (arrIdx >= 0 && arrIdx < nTerms) {
       countAcc.incrementCount(arrIdx, 1);
       if (collectAcc != null) {
-        collectAcc.collect(doc, arrIdx);
+        collectAcc.collect(doc, arrIdx, slotContext);
       }
       if (allBucketsAcc != null) {
-        allBucketsAcc.collect(doc, arrIdx);
+        allBucketsAcc.collect(doc, arrIdx, slotContext);
       }
     }
   }

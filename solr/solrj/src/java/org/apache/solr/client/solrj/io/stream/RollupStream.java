@@ -40,6 +40,9 @@ import org.apache.solr.client.solrj.io.stream.expr.StreamFactory;
 import org.apache.solr.client.solrj.io.stream.metrics.Bucket;
 import org.apache.solr.client.solrj.io.stream.metrics.Metric;
 
+/**
+ * @since 6.0.0
+ */
 public class RollupStream extends TupleStream implements Expressible {
 
   private static final long serialVersionUID = 1;
@@ -72,9 +75,7 @@ public class RollupStream extends TupleStream implements Expressible {
     if(1 != streamExpressions.size()){
       throw new IOException(String.format(Locale.ROOT,"Invalid expression %s - expecting a single stream but found %d",expression, streamExpressions.size()));
     }
-    if(0 == metricExpressions.size()){
-      throw new IOException(String.format(Locale.ROOT,"Invalid expression %s - expecting at least 1 metric but found %d",expression, metricExpressions.size()));
-    }
+
     if(null == overExpression || !(overExpression.getParameter() instanceof StreamExpressionValue)){
       throw new IOException(String.format(Locale.ROOT,"Invalid expression %s - expecting single 'over' parameter listing fields to rollup by but didn't find one",expression));
     }
@@ -247,12 +248,14 @@ public class RollupStream extends TupleStream implements Expressible {
           t = new Tuple(map);
         }
 
-        currentMetrics = new Metric[metrics.length];
         currentKey = hashKey;
-        for(int i=0; i<metrics.length; i++) {
-          Metric bucketMetric = metrics[i].newInstance();
-          bucketMetric.update(tuple);
-          currentMetrics[i]  = bucketMetric;
+        if (metrics != null) {
+          currentMetrics = new Metric[metrics.length];
+          for(int i=0; i<metrics.length; i++) {
+            Metric bucketMetric = metrics[i].newInstance();
+            bucketMetric.update(tuple);
+            currentMetrics[i]  = bucketMetric;
+          }
         }
 
         if(t != null) {

@@ -20,7 +20,6 @@ package org.apache.lucene.analysis.miscellaneous;
 import java.util.Map;
 
 import org.apache.lucene.analysis.TokenStream;
-import org.apache.lucene.analysis.miscellaneous.TrimFilter;
 import org.apache.lucene.analysis.util.TokenFilterFactory;
 
 /**
@@ -34,6 +33,8 @@ import org.apache.lucene.analysis.util.TokenFilterFactory;
  * &lt;/fieldType&gt;</pre>
  *
  * @see TrimFilter
+ *
+ * @since 3.1
  */
 public class TrimFilterFactory extends TokenFilterFactory {
   
@@ -46,8 +47,12 @@ public class TrimFilterFactory extends TokenFilterFactory {
   }
   
   @Override
-  public TrimFilter create(TokenStream input) {
-    final TrimFilter filter = new TrimFilter(input);
-    return filter;
+  public TokenStream create(TokenStream input) {
+    return new TrimFilter(input);
+  }
+
+  @Override
+  public TokenStream normalize(TokenStream input) {
+    return create(input);
   }
 }

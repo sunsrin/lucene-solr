@@ -21,6 +21,7 @@ import java.lang.invoke.MethodHandles;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.time.Instant;
 import java.util.Locale;
 import java.util.concurrent.ExecutionException;
 
@@ -28,12 +29,11 @@ import com.google.common.cache.Cache;
 import com.google.common.cache.CacheBuilder;
 import org.apache.solr.cloud.CloudConfigSetService;
 import org.apache.solr.cloud.ZkController;
+import org.apache.solr.cloud.ZkSolrResourceLoader;
 import org.apache.solr.common.SolrException;
 import org.apache.solr.common.util.NamedList;
 import org.apache.solr.schema.IndexSchema;
 import org.apache.solr.schema.IndexSchemaFactory;
-import org.joda.time.format.DateTimeFormat;
-import org.joda.time.format.DateTimeFormatter;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -43,7 +43,7 @@ import org.slf4j.LoggerFactory;
  */
 public abstract class ConfigSetService {
 
-  private static final Logger logger = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
+  private static final Logger log = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
   public static ConfigSetService createConfigSetService(NodeConfig nodeConfig, SolrResourceLoader loader, ZkController zkController) {
     if (zkController != null)
       return new CloudConfigSetService(loader, zkController);
@@ -74,15 +74,26 @@ public abstract class ConfigSetService {
     SolrResourceLoader coreLoader = createCoreResourceLoader(dcore);
 
     try {
+
+      // ConfigSet properties are loaded from ConfigSetProperties.DEFAULT_FILENAME file.
+      // ConfigSet flags are loaded from the metadata of the ZK node of the configset.
+      NamedList properties = createConfigSetProperties(dcore, coreLoader);
+      NamedList flags = getConfigSetFlags(dcore, coreLoader);
+
+      boolean trusted =
+          (coreLoader instanceof ZkSolrResourceLoader
+              && flags != null
+              && flags.get("trusted") != null
+              && !flags.getBooleanArg("trusted")
+              ) ? false: true;
+
       SolrConfig solrConfig = createSolrConfig(dcore, coreLoader);
       IndexSchema schema = createIndexSchema(dcore, solrConfig);
-      NamedList properties = createConfigSetProperties(dcore, coreLoader);
-      return new ConfigSet(configName(dcore), solrConfig, schema, properties);
-    }
-    catch (Exception e) {
+      return new ConfigSet(configName(dcore), solrConfig, schema, properties, trusted);
+    } catch (Exception e) {
       throw new SolrException(SolrException.ErrorCode.SERVER_ERROR,
-                              "Could not load conf for core " + dcore.getName() + 
-                              ": " + e.getMessage(), e);
+          "Could not load conf for core " + dcore.getName() +
+              ": " + e.getMessage(), e);
     }
 
   }
@@ -115,6 +126,18 @@ public abstract class ConfigSetService {
    */
   protected NamedList createConfigSetProperties(CoreDescriptor cd, SolrResourceLoader loader) {
     return ConfigSetProperties.readFromResourceLoader(loader, cd.getConfigSetPropertiesName());
+  }
+
+  protected NamedList getConfigSetFlags(CoreDescriptor cd, SolrResourceLoader loader) {
+    if (loader instanceof ZkSolrResourceLoader) {
+      try {
+        return ConfigSetProperties.readFromResourceLoader(loader, ".");
+      } catch (Exception ex) {
+        return null;
+      }
+    } else {
+      return null;
+    }
   }
 
   /**
@@ -188,12 +211,10 @@ public abstract class ConfigSetService {
       super(loader, configSetBase);
     }
 
-    public static final DateTimeFormatter cacheKeyFormatter = DateTimeFormat.forPattern("yyyyMMddHHmmss");
-
     public static String cacheName(Path schemaFile) throws IOException {
       long lastModified = Files.getLastModifiedTime(schemaFile).toMillis();
       return String.format(Locale.ROOT, "%s:%s",
-                            schemaFile.toString(), cacheKeyFormatter.print(lastModified));
+                            schemaFile.toString(), Instant.ofEpochMilli(lastModified).toString());
     }
 
     @Override
@@ -204,15 +225,15 @@ public abstract class ConfigSetService {
         try {
           String cachedName = cacheName(schemaFile);
           return schemaCache.get(cachedName, () -> {
-            logger.info("Creating new index schema for core {}", cd.getName());
+            log.info("Creating new index schema for core {}", cd.getName());
             return IndexSchemaFactory.buildIndexSchema(cd.getSchemaName(), solrConfig);
           });
         } catch (ExecutionException e) {
           throw new SolrException(SolrException.ErrorCode.SERVER_ERROR,
               "Error creating index schema for core " + cd.getName(), e);
         } catch (IOException e) {
-          logger.warn("Couldn't get last modified time for schema file {}: {}", schemaFile, e.getMessage());
-          logger.warn("Will not use schema cache");
+          log.warn("Couldn't get last modified time for schema file {}: {}", schemaFile, e.getMessage());
+          log.warn("Will not use schema cache");
         }
       }
       return IndexSchemaFactory.buildIndexSchema(cd.getSchemaName(), solrConfig);

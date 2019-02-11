@@ -24,14 +24,20 @@ import java.util.Random;
 import java.util.Set;
 import java.util.Timer;
 import java.util.TimerTask;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
+import org.apache.solr.cloud.ZkController;
 import org.apache.solr.common.NonExistentCoreException;
 import org.apache.solr.common.SolrException;
 import org.apache.solr.common.SolrException.ErrorCode;
 import org.apache.solr.common.util.Pair;
 import org.apache.solr.core.CoreContainer;
+import org.apache.solr.core.SolrCore;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -59,7 +65,7 @@ public class TestInjection {
   private static final Logger log = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
   
   private static final Pattern ENABLED_PERCENT = Pattern.compile("(true|false)(?:\\:(\\d+))?$", Pattern.CASE_INSENSITIVE);
-
+  
   private static final String LUCENE_TEST_CASE_FQN = "org.apache.lucene.util.LuceneTestCase";
 
   /** 
@@ -98,23 +104,50 @@ public class TestInjection {
     }
   }
   
-  public static String nonGracefullClose = null;
+  public volatile static String nonGracefullClose = null;
 
-  public static String failReplicaRequests = null;
+  public volatile static String failReplicaRequests = null;
   
-  public static String failUpdateRequests = null;
+  public volatile static String failUpdateRequests = null;
 
-  public static String nonExistentCoreExceptionAfterUnload = null;
+  public volatile static String nonExistentCoreExceptionAfterUnload = null;
 
-  public static String updateLogReplayRandomPause = null;
+  public volatile static String updateLogReplayRandomPause = null;
   
-  public static String updateRandomPause = null;
+  public volatile static String updateRandomPause = null;
 
-  public static String randomDelayInCoreCreation = null;
+  public volatile static String prepRecoveryOpPauseForever = null;
+
+  public volatile static String randomDelayInCoreCreation = null;
   
-  public static int randomDelayMaxInCoreCreationInSec = 10;
+  public volatile static int randomDelayMaxInCoreCreationInSec = 10;
+
+  public volatile static String splitFailureBeforeReplicaCreation = null;
+
+  public volatile static String splitFailureAfterReplicaCreation = null;
+
+  public volatile static CountDownLatch splitLatch = null;
+
+  public volatile static String waitForReplicasInSync = "true:60";
+
+  public volatile static String failIndexFingerprintRequests = null;
+
+  public volatile static String wrongIndexFingerprint = null;
   
-  private static Set<Timer> timers = Collections.synchronizedSet(new HashSet<Timer>());
+  private volatile static Set<Timer> timers = Collections.synchronizedSet(new HashSet<Timer>());
+
+  private volatile static AtomicInteger countPrepRecoveryOpPauseForever = new AtomicInteger(0);
+
+  public volatile static Integer delayBeforeSlaveCommitRefresh=null;
+
+  public volatile static boolean uifOutOfMemoryError = false;
+
+  private volatile static CountDownLatch notifyPauseForeverDone = new CountDownLatch(1);
+  
+  public static void notifyPauseForeverDone() {
+    notifyPauseForeverDone.countDown();
+    notifyPauseForeverDone = new CountDownLatch(1);
+  }
 
   public static void reset() {
     nonGracefullClose = null;
@@ -124,10 +157,51 @@ public class TestInjection {
     updateLogReplayRandomPause = null;
     updateRandomPause = null;
     randomDelayInCoreCreation = null;
-
+    splitFailureBeforeReplicaCreation = null;
+    splitFailureAfterReplicaCreation = null;
+    splitLatch = null;
+    prepRecoveryOpPauseForever = null;
+    countPrepRecoveryOpPauseForever = new AtomicInteger(0);
+    waitForReplicasInSync = "true:60";
+    failIndexFingerprintRequests = null;
+    wrongIndexFingerprint = null;
+    delayBeforeSlaveCommitRefresh = null;
+    uifOutOfMemoryError = false;
+    notifyPauseForeverDone();
+    newSearcherHooks.clear();
     for (Timer timer : timers) {
       timer.cancel();
     }
+  }
+
+  public static boolean injectWrongIndexFingerprint() {
+    if (wrongIndexFingerprint != null)  {
+      Random rand = random();
+      if (null == rand) return true;
+
+      Pair<Boolean,Integer> pair = parseValue(wrongIndexFingerprint);
+      boolean enabled = pair.first();
+      int chanceIn100 = pair.second();
+      if (enabled && rand.nextInt(100) >= (100 - chanceIn100)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  public static boolean injectFailIndexFingerprintRequests()  {
+    if (failIndexFingerprintRequests != null) {
+      Random rand = random();
+      if (null == rand) return true;
+
+      Pair<Boolean,Integer> pair = parseValue(failIndexFingerprintRequests);
+      boolean enabled = pair.first();
+      int chanceIn100 = pair.second();
+      if (enabled && rand.nextInt(100) >= (100 - chanceIn100)) {
+        throw new SolrException(ErrorCode.SERVER_ERROR, "Random test index fingerprint fail");
+      }
+    }
+    return true;
   }
   
   public static boolean injectRandomDelayInCoreCreation() {
@@ -273,7 +347,13 @@ public class TestInjection {
       boolean enabled = pair.first();
       int chanceIn100 = pair.second();
       if (enabled && rand.nextInt(100) >= (100 - chanceIn100)) {
-        long rndTime = rand.nextInt(1000);
+        long rndTime;
+        if (rand.nextInt(10) > 2) {
+          rndTime = rand.nextInt(300);
+        } else {
+          rndTime = rand.nextInt(1000);
+        }
+       
         log.info("inject random update delay of {}ms", rndTime);
         try {
           Thread.sleep(rndTime);
@@ -285,10 +365,83 @@ public class TestInjection {
 
     return true;
   }
+
+  public static boolean injectPrepRecoveryOpPauseForever() {
+    String val = prepRecoveryOpPauseForever;
+    if (val != null)  {
+      Random rand = random();
+      if (null == rand) return true;
+      Pair<Boolean,Integer> pair = parseValue(val);
+      boolean enabled = pair.first();
+      int chanceIn100 = pair.second();
+      // Prevent for continuous pause forever
+      if (enabled && rand.nextInt(100) >= (100 - chanceIn100) && countPrepRecoveryOpPauseForever.get() < 1) {
+        countPrepRecoveryOpPauseForever.incrementAndGet();
+        log.info("inject pause forever for prep recovery op");
+        
+        try {
+          notifyPauseForeverDone.await();
+        } catch (InterruptedException e) {
+          Thread.currentThread().interrupt();
+        }
+      } else {
+        countPrepRecoveryOpPauseForever.set(0);
+      }
+    }
+
+    return true;
+  }
+
+  private static boolean injectSplitFailure(String probability, String label) {
+    if (probability != null)  {
+      Random rand = random();
+      if (null == rand) return true;
+
+      Pair<Boolean,Integer> pair = parseValue(probability);
+      boolean enabled = pair.first();
+      int chanceIn100 = pair.second();
+      if (enabled && rand.nextInt(100) >= (100 - chanceIn100)) {
+        log.info("Injecting failure: " + label);
+        throw new SolrException(ErrorCode.SERVER_ERROR, "Error: " + label);
+      }
+    }
+    return true;
+  }
+
+  public static boolean injectSplitFailureBeforeReplicaCreation() {
+    return injectSplitFailure(splitFailureBeforeReplicaCreation, "before creating replica for sub-shard");
+  }
+
+  public static boolean injectSplitFailureAfterReplicaCreation() {
+    return injectSplitFailure(splitFailureAfterReplicaCreation, "after creating replica for sub-shard");
+  }
+
+  public static boolean injectSplitLatch() {
+    if (splitLatch != null) {
+      try {
+        log.info("Waiting in ReplicaMutator for up to 60s");
+        return splitLatch.await(60, TimeUnit.SECONDS);
+      } catch (InterruptedException e) {
+        Thread.currentThread().interrupt();
+      }
+    }
+    return true;
+  }
+
+  public static boolean waitForInSyncWithLeader(SolrCore core, ZkController zkController, String collection, String shardId) {
+    // NOTE: this method should do *NOTHING* unless LUCENE_TEST_CASE is non-null
+    
+    if (waitForReplicasInSync == null) return true;
+    
+    return true; // No-Op: see SOLR-12313
+  }
   
-  private static Pair<Boolean,Integer> parseValue(String raw) {
+  private static Pair<Boolean,Integer> parseValue(final String raw) {
+    if (raw == null) return new Pair<>(false, 0);
     Matcher m = ENABLED_PERCENT.matcher(raw);
-    if (!m.matches()) throw new RuntimeException("No match, probably bad syntax: " + raw);
+    if (!m.matches()) {
+      throw new RuntimeException("No match, probably bad syntax: " + raw);
+    }
     String val = m.group(1);
     String percent = "100";
     if (m.groupCount() == 2) {
@@ -297,4 +450,43 @@ public class TestInjection {
     return new Pair<>(Boolean.parseBoolean(val), Integer.parseInt(percent));
   }
 
+  public static boolean injectDelayBeforeSlaveCommitRefresh() {
+    if (delayBeforeSlaveCommitRefresh!=null) {
+      try {
+        log.info("Pausing IndexFetcher for {}ms", delayBeforeSlaveCommitRefresh);
+        Thread.sleep(delayBeforeSlaveCommitRefresh);
+      } catch (InterruptedException e) {
+        Thread.currentThread().interrupt();
+      }
+    }
+    return true;
+  }
+
+  public static boolean injectUIFOutOfMemoryError() {
+    if (uifOutOfMemoryError ) {
+      throw new OutOfMemoryError("Test Injection");
+    }
+    return true;
+  }
+
+  static Set<Hook> newSearcherHooks = ConcurrentHashMap.newKeySet();
+  
+  public interface Hook {
+    public void newSearcher(String collectionName);
+    public void waitForSearcher(String collection, int cnt, int timeoutms, boolean failOnTimeout) throws InterruptedException;
+  }
+  
+  public static boolean newSearcherHook(Hook hook) {
+    newSearcherHooks.add(hook);
+    return true;
+  }
+
+  public static boolean injectSearcherHooks(String collectionName) {
+    for (Hook hook : newSearcherHooks) {
+      hook.newSearcher(collectionName);
+    }
+    return true;
+  }
+  
+  
 }

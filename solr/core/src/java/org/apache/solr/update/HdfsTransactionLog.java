@@ -20,8 +20,10 @@ import java.io.IOException;
 import java.lang.invoke.MethodHandles;
 import java.util.Collection;
 import java.util.HashMap;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.TreeMap;
 
 import org.apache.hadoop.fs.FSDataInputStream;
 import org.apache.hadoop.fs.FSDataOutputStream;
@@ -128,6 +130,7 @@ public class HdfsTransactionLog extends TransactionLog {
       success = true;
 
       assert ObjectReleaseTracker.track(this);
+      log.debug("Opening new tlog {}", this);
       
     } catch (IOException e) {
       throw new SolrException(SolrException.ErrorCode.SERVER_ERROR, e);
@@ -163,20 +166,6 @@ public class HdfsTransactionLog extends TransactionLog {
     }
     return true;
   }
-  
-  // This could mess with any readers or reverse readers that are open, or anything that might try to do a log lookup.
-  // This should only be used to roll back buffered updates, not actually applied updates.
-  @Override
-  public void rollback(long pos) throws IOException {
-    synchronized (this) {
-      assert snapshot_size == pos;
-      ensureFlushed();
-      // TODO: how do we rollback with hdfs?? We need HDFS-3107
-      fos.setWritten(pos);
-      assert fos.size() == pos;
-      numRecords = snapshot_numRecords;
-    }
-  }
 
   private void readHeader(FastInputStream fis) throws IOException {
     // read existing header
@@ -185,8 +174,9 @@ public class HdfsTransactionLog extends TransactionLog {
     fis = fis != null ? fis : new FSDataFastInputStream(fs.open(tlogFile), 0);
     Map header = null;
     try {
-      LogCodec codec = new LogCodec(resolver);
-      header = (Map) codec.unmarshal(fis);
+      try (LogCodec codec = new LogCodec(resolver)) {
+        header = (Map) codec.unmarshal(fis);
+      }
       
       fis.readInt(); // skip size
     } finally {
@@ -206,7 +196,7 @@ public class HdfsTransactionLog extends TransactionLog {
   }
 
   @Override
-  public long writeCommit(CommitUpdateCommand cmd, int flags) {
+  public long writeCommit(CommitUpdateCommand cmd) {
     LogCodec codec = new LogCodec(resolver);
     synchronized (this) {
       try {
@@ -219,7 +209,7 @@ public class HdfsTransactionLog extends TransactionLog {
         
         codec.init(fos);
         codec.writeTag(JavaBinCodec.ARR, 3);
-        codec.writeInt(UpdateLog.COMMIT | flags);  // should just take one byte
+        codec.writeInt(UpdateLog.COMMIT);  // should just take one byte
         codec.writeLong(cmd.getVersion());
         codec.writeStr(END_MESSAGE);  // ensure these bytes are (almost) last in the file
 
@@ -255,8 +245,9 @@ public class HdfsTransactionLog extends TransactionLog {
           pos);
       try {
         dis.seek(pos);
-        LogCodec codec = new LogCodec(resolver);
-        return codec.readVal(new FastInputStream(dis));
+        try (LogCodec codec = new LogCodec(resolver)) {
+          return codec.readVal(new FastInputStream(dis));
+        }
       } finally {
         dis.close();
       }
@@ -334,7 +325,7 @@ public class HdfsTransactionLog extends TransactionLog {
   public void close() {
     try {
       if (debug) {
-        log.debug("Closing tlog" + this);
+        log.debug("Closing tlog {}", this);
       }
 
       doCloseOutput();
@@ -365,6 +356,10 @@ public class HdfsTransactionLog extends TransactionLog {
   @Override
   public LogReader getReader(long startingPos) {
     return new HDFSLogReader(startingPos);
+  }
+
+  public LogReader getSortedReader(long startingPos) {
+    return new HDFSSortedLogReader(startingPos);
   }
 
   /** Returns a single threaded reverse reader */
@@ -474,6 +469,50 @@ public class HdfsTransactionLog extends TransactionLog {
       return getLogSize();
     }
 
+  }
+
+  public class HDFSSortedLogReader extends HDFSLogReader{
+    private long startingPos;
+    private boolean inOrder = true;
+    private TreeMap<Long, Long> versionToPos;
+    Iterator<Long> iterator;
+
+    public HDFSSortedLogReader(long startingPos) {
+      super(startingPos);
+      this.startingPos = startingPos;
+    }
+
+    @Override
+    public Object next() throws IOException, InterruptedException {
+      if (versionToPos == null) {
+        versionToPos = new TreeMap<>();
+        Object o;
+        long pos = startingPos;
+
+        long lastVersion = Long.MIN_VALUE;
+        while ( (o = super.next()) != null) {
+          List entry = (List) o;
+          long version = (Long) entry.get(UpdateLog.VERSION_IDX);
+          version = Math.abs(version);
+          versionToPos.put(version, pos);
+          pos = currentPos();
+
+          if (version < lastVersion) inOrder = false;
+          lastVersion = version;
+        }
+        fis.seek(startingPos);
+      }
+
+      if (inOrder) {
+        return super.next();
+      } else {
+        if (iterator == null) iterator = versionToPos.values().iterator();
+        if (!iterator.hasNext()) return null;
+        long pos = iterator.next();
+        if (pos != currentPos()) fis.seek(pos);
+        return super.next();
+      }
+    }
   }
 
   public class HDFSReverseReader extends ReverseReader {

@@ -320,7 +320,7 @@ public class TestTimeLimitingCollector extends LuceneTestCase {
   }
   
   // counting collector that can slow down at collect().
-  private class MyHitCollector extends SimpleCollector {
+  private static class MyHitCollector extends SimpleCollector {
     private final BitSet bits = new BitSet();
     private int slowdown = 0;
     private int lastDocCollected = -1;
@@ -342,7 +342,7 @@ public class TestTimeLimitingCollector extends LuceneTestCase {
     }
 
     @Override
-    public void setScorer(Scorer scorer) throws IOException {
+    public void setScorer(Scorable scorer) throws IOException {
       // scorer is not needed
     }
     
@@ -367,8 +367,8 @@ public class TestTimeLimitingCollector extends LuceneTestCase {
     }
     
     @Override
-    public boolean needsScores() {
-      return false;
+    public ScoreMode scoreMode() {
+      return ScoreMode.COMPLETE;
     }
 
   }

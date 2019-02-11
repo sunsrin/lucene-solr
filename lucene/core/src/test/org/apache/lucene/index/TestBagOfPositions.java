@@ -28,6 +28,7 @@ import org.apache.lucene.analysis.MockAnalyzer;
 import org.apache.lucene.document.Document;
 import org.apache.lucene.document.Field;
 import org.apache.lucene.document.FieldType;
+import org.apache.lucene.document.TextField;
 import org.apache.lucene.store.Directory;
 import org.apache.lucene.util.BytesRef;
 import org.apache.lucene.util.LuceneTestCase.SuppressCodecs;
@@ -39,7 +40,7 @@ import org.apache.lucene.util.TestUtil;
  * totalTermFreq of its integer value, and checks that the totalTermFreq is correct. 
  */
 // TODO: somehow factor this with BagOfPostings? it's almost the same
-@SuppressCodecs({"Direct", "Memory"}) // at night this makes like 200k/300k docs and will make Direct's heart beat!
+@SuppressCodecs({"Direct"}) // at night this makes like 200k/300k docs and will make Direct's heart beat!
 public class TestBagOfPositions extends LuceneTestCase {
   public void test() throws Exception {
     List<String> postingsList = new ArrayList<>();
@@ -77,8 +78,7 @@ public class TestBagOfPositions extends LuceneTestCase {
       System.out.println("threadCount=" + threadCount);
     }
     
-    Field prototype = newTextField("field", "", Field.Store.NO);
-    FieldType fieldType = new FieldType(prototype.fieldType());
+    FieldType fieldType = new FieldType(TextField.TYPE_NOT_STORED);
     if (random().nextBoolean()) {
       fieldType.setOmitNorms(true);
     }

@@ -19,6 +19,7 @@ package org.apache.lucene.index;
 
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -28,6 +29,9 @@ import java.util.Random;
 import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Consumer;
+import java.util.stream.Collectors;
+import java.util.stream.IntStream;
 
 import org.apache.lucene.analysis.Analyzer;
 import org.apache.lucene.analysis.MockAnalyzer;
@@ -37,14 +41,19 @@ import org.apache.lucene.analysis.Tokenizer;
 import org.apache.lucene.analysis.tokenattributes.CharTermAttribute;
 import org.apache.lucene.analysis.tokenattributes.OffsetAttribute;
 import org.apache.lucene.analysis.tokenattributes.PayloadAttribute;
+import org.apache.lucene.codecs.FilterCodec;
+import org.apache.lucene.codecs.PointsFormat;
+import org.apache.lucene.codecs.PointsReader;
+import org.apache.lucene.codecs.PointsWriter;
 import org.apache.lucene.document.BinaryDocValuesField;
 import org.apache.lucene.document.BinaryPoint;
 import org.apache.lucene.document.Document;
 import org.apache.lucene.document.DoubleDocValuesField;
-import org.apache.lucene.document.Field.Store;
 import org.apache.lucene.document.Field;
+import org.apache.lucene.document.Field.Store;
 import org.apache.lucene.document.FieldType;
 import org.apache.lucene.document.FloatDocValuesField;
+import org.apache.lucene.document.IntPoint;
 import org.apache.lucene.document.NumericDocValuesField;
 import org.apache.lucene.document.SortedDocValuesField;
 import org.apache.lucene.document.SortedNumericDocValuesField;
@@ -53,7 +62,6 @@ import org.apache.lucene.document.StoredField;
 import org.apache.lucene.document.StringField;
 import org.apache.lucene.document.TextField;
 import org.apache.lucene.search.CollectionStatistics;
-import org.apache.lucene.search.EarlyTerminatingSortingCollector;
 import org.apache.lucene.search.FieldDoc;
 import org.apache.lucene.search.IndexSearcher;
 import org.apache.lucene.search.MatchAllDocsQuery;
@@ -61,6 +69,8 @@ import org.apache.lucene.search.Query;
 import org.apache.lucene.search.ScoreDoc;
 import org.apache.lucene.search.Sort;
 import org.apache.lucene.search.SortField;
+import org.apache.lucene.search.SortedNumericSortField;
+import org.apache.lucene.search.SortedSetSortField;
 import org.apache.lucene.search.TermQuery;
 import org.apache.lucene.search.TermStatistics;
 import org.apache.lucene.search.TopDocs;
@@ -75,7 +85,194 @@ import org.apache.lucene.util.LuceneTestCase;
 import org.apache.lucene.util.NumericUtils;
 import org.apache.lucene.util.TestUtil;
 
+import static org.apache.lucene.search.DocIdSetIterator.NO_MORE_DOCS;
+import static org.hamcrest.core.StringContains.containsString;
+
 public class TestIndexSorting extends LuceneTestCase {
+  static class AssertingNeedsIndexSortCodec extends FilterCodec {
+    boolean needsIndexSort;
+    int numCalls;
+
+    AssertingNeedsIndexSortCodec() {
+      super(TestUtil.getDefaultCodec().getName(), TestUtil.getDefaultCodec());
+    }
+
+    @Override
+    public PointsFormat pointsFormat() {
+      final PointsFormat pf = delegate.pointsFormat();
+      return new PointsFormat() {
+        @Override
+        public PointsWriter fieldsWriter(SegmentWriteState state) throws IOException {
+          final PointsWriter writer = pf.fieldsWriter(state);
+          return new PointsWriter() {
+            @Override
+            public void merge(MergeState mergeState) throws IOException {
+              // For single segment merge we cannot infer if the segment is already sorted or not.
+              if (mergeState.docMaps.length > 1) {
+                assertEquals(needsIndexSort, mergeState.needsIndexSort);
+              }
+              ++ numCalls;
+              writer.merge(mergeState);
+            }
+
+            @Override
+            public void writeField(FieldInfo fieldInfo, PointsReader values) throws IOException {
+              writer.writeField(fieldInfo, values);
+            }
+
+            @Override
+            public void finish() throws IOException {
+              writer.finish();
+            }
+
+            @Override
+            public void close() throws IOException {
+              writer.close();
+            }
+          };
+        }
+
+        @Override
+        public PointsReader fieldsReader(SegmentReadState state) throws IOException {
+          return pf.fieldsReader(state);
+        }
+      };
+    }
+  }
+
+  private static void assertNeedsIndexSortMerge(SortField sortField, Consumer<Document> defaultValueConsumer, Consumer<Document> randomValueConsumer) throws Exception {
+    Directory dir = newDirectory();
+    IndexWriterConfig iwc = new IndexWriterConfig(new MockAnalyzer(random()));
+    AssertingNeedsIndexSortCodec codec = new AssertingNeedsIndexSortCodec();
+    iwc.setCodec(codec);
+    Sort indexSort = new Sort(sortField,
+        new SortField("id", SortField.Type.INT));
+    iwc.setIndexSort(indexSort);
+    LogMergePolicy policy = newLogMergePolicy();
+    // make sure that merge factor is always > 2
+    if (policy.getMergeFactor() <= 2) {
+      policy.setMergeFactor(3);
+    }
+    iwc.setMergePolicy(policy);
+
+    // add already sorted documents
+    codec.numCalls = 0;
+    codec.needsIndexSort = false;
+    IndexWriter w = new IndexWriter(dir, iwc);
+    boolean withValues = random().nextBoolean();
+    for (int i = 100; i < 200; i++) {
+      Document doc = new Document();
+      doc.add(new StringField("id", Integer.toString(i), Store.YES));
+      doc.add(new NumericDocValuesField("id", i));
+      doc.add(new IntPoint("point", random().nextInt()));
+      if (withValues) {
+        defaultValueConsumer.accept(doc);
+      }
+      w.addDocument(doc);
+      if (i % 10 == 0) {
+        w.commit();
+      }
+    }
+    Set<Integer> deletedDocs = new HashSet<> ();
+    int num = random().nextInt(20);
+    for (int i = 0; i < num; i++) {
+      int nextDoc = random().nextInt(100);
+      w.deleteDocuments(new Term("id", Integer.toString(nextDoc)));
+      deletedDocs.add(nextDoc);
+    }
+    w.commit();
+    w.waitForMerges();
+    w.forceMerge(1);
+    assertTrue(codec.numCalls > 0);
+
+
+    // merge sort is needed
+    codec.numCalls = 0;
+    codec.needsIndexSort = true;
+    for (int i = 10; i >= 0; i--) {
+      Document doc = new Document();
+      doc.add(new StringField("id", Integer.toString(i), Store.YES));
+      doc.add(new NumericDocValuesField("id", i));
+      doc.add(new IntPoint("point", random().nextInt()));
+      if (withValues) {
+        defaultValueConsumer.accept(doc);
+      }
+      w.addDocument(doc);
+      w.commit();
+    }
+    w.commit();
+    w.waitForMerges();
+    w.forceMerge(1);
+    assertTrue(codec.numCalls > 0);
+
+    // segment sort is needed
+    codec.needsIndexSort = true;
+    codec.numCalls = 0;
+    for (int i = 201; i < 300; i++) {
+      Document doc = new Document();
+      doc.add(new StringField("id", Integer.toString(i), Store.YES));
+      doc.add(new NumericDocValuesField("id", i));
+      doc.add(new IntPoint("point", random().nextInt()));
+      randomValueConsumer.accept(doc);
+      w.addDocument(doc);
+      if (i % 10 == 0) {
+        w.commit();
+      }
+    }
+    w.commit();
+    w.waitForMerges();
+    w.forceMerge(1);
+    assertTrue(codec.numCalls > 0);
+
+    w.close();
+    dir.close();
+  }
+
+  public void testNumericAlreadySorted() throws Exception {
+    assertNeedsIndexSortMerge(new SortField("foo", SortField.Type.INT),
+        (doc) -> doc.add(new NumericDocValuesField("foo", 0)),
+        (doc) -> doc.add(new NumericDocValuesField("foo", random().nextInt())));
+  }
+
+  public void testStringAlreadySorted() throws Exception {
+    assertNeedsIndexSortMerge(new SortField("foo", SortField.Type.STRING),
+        (doc) -> doc.add(new SortedDocValuesField("foo", new BytesRef("default"))),
+        (doc) -> doc.add(new SortedDocValuesField("foo", TestUtil.randomBinaryTerm(random()))));
+  }
+
+  public void testMultiValuedNumericAlreadySorted() throws Exception {
+    assertNeedsIndexSortMerge(new SortedNumericSortField("foo", SortField.Type.INT),
+        (doc) -> {
+          doc.add(new SortedNumericDocValuesField("foo", Integer.MIN_VALUE));
+          int num = random().nextInt(5);
+          for (int j = 0; j < num; j++) {
+            doc.add(new SortedNumericDocValuesField("foo", random().nextInt()));
+          }
+        },
+        (doc) -> {
+          int num = random().nextInt(5);
+          for (int j = 0; j < num; j++) {
+            doc.add(new SortedNumericDocValuesField("foo", random().nextInt()));
+          }
+        });
+  }
+
+  public void testMultiValuedStringAlreadySorted() throws Exception {
+    assertNeedsIndexSortMerge(new SortedSetSortField("foo", false),
+        (doc) -> {
+          doc.add(new SortedSetDocValuesField("foo", new BytesRef("")));
+          int num = random().nextInt(5);
+          for (int j = 0; j < num; j++) {
+            doc.add(new SortedSetDocValuesField("foo", TestUtil.randomBinaryTerm(random())));
+          }
+        },
+        (doc) -> {
+          int num = random().nextInt(5);
+          for (int j = 0; j < num; j++) {
+            doc.add(new SortedSetDocValuesField("foo",  TestUtil.randomBinaryTerm(random())));
+          }
+        });
+  }
 
   public void testBasicString() throws Exception {
     Directory dir = newDirectory();
@@ -103,82 +300,261 @@ public class TestIndexSorting extends LuceneTestCase {
     LeafReader leaf = getOnlyLeafReader(r);
     assertEquals(3, leaf.maxDoc());
     SortedDocValues values = leaf.getSortedDocValues("foo");
-    assertEquals("aaa", values.get(0).utf8ToString());
-    assertEquals("mmm", values.get(1).utf8ToString());
-    assertEquals("zzz", values.get(2).utf8ToString());
+    assertEquals(0, values.nextDoc());
+    assertEquals("aaa", values.binaryValue().utf8ToString());
+    assertEquals(1, values.nextDoc());
+    assertEquals("mmm", values.binaryValue().utf8ToString());
+    assertEquals(2, values.nextDoc());
+    assertEquals("zzz", values.binaryValue().utf8ToString());
+    r.close();
+    w.close();
+    dir.close();
+  }
+
+  public void testBasicMultiValuedString() throws Exception {
+    Directory dir = newDirectory();
+    IndexWriterConfig iwc = new IndexWriterConfig(new MockAnalyzer(random()));
+    Sort indexSort = new Sort(new SortedSetSortField("foo", false));
+    iwc.setIndexSort(indexSort);
+    IndexWriter w = new IndexWriter(dir, iwc);
+    Document doc = new Document();
+    doc.add(new NumericDocValuesField("id", 3));
+    doc.add(new SortedSetDocValuesField("foo", new BytesRef("zzz")));
+    w.addDocument(doc);
+    // so we get more than one segment, so that forceMerge actually does merge, since we only get a sorted segment by merging:
+    w.commit();
+
+    doc = new Document();
+    doc.add(new NumericDocValuesField("id", 1));
+    doc.add(new SortedSetDocValuesField("foo", new BytesRef("aaa")));
+    doc.add(new SortedSetDocValuesField("foo", new BytesRef("zzz")));
+    doc.add(new SortedSetDocValuesField("foo", new BytesRef("bcg")));
+    w.addDocument(doc);
+    w.commit();
+
+    doc = new Document();
+    doc.add(new NumericDocValuesField("id", 2));
+    doc.add(new SortedSetDocValuesField("foo", new BytesRef("mmm")));
+    doc.add(new SortedSetDocValuesField("foo", new BytesRef("pppp")));
+    w.addDocument(doc);
+    w.forceMerge(1);
+
+    DirectoryReader r = DirectoryReader.open(w);
+    LeafReader leaf = getOnlyLeafReader(r);
+    assertEquals(3, leaf.maxDoc());
+    NumericDocValues values = leaf.getNumericDocValues("id");
+    assertEquals(0, values.nextDoc());
+    assertEquals(1l, values.longValue());
+    assertEquals(1, values.nextDoc());
+    assertEquals(2l, values.longValue());
+    assertEquals(2, values.nextDoc());
+    assertEquals(3l, values.longValue());
     r.close();
     w.close();
     dir.close();
   }
 
   public void testMissingStringFirst() throws Exception {
-    Directory dir = newDirectory();
-    IndexWriterConfig iwc = new IndexWriterConfig(new MockAnalyzer(random()));
-    SortField sortField = new SortField("foo", SortField.Type.STRING);
-    sortField.setMissingValue(SortField.STRING_FIRST);
-    Sort indexSort = new Sort(sortField);
-    iwc.setIndexSort(indexSort);
-    IndexWriter w = new IndexWriter(dir, iwc);
-    Document doc = new Document();
-    doc.add(new SortedDocValuesField("foo", new BytesRef("zzz")));
-    w.addDocument(doc);
-    // so we get more than one segment, so that forceMerge actually does merge, since we only get a sorted segment by merging:
-    w.commit();
+    for (boolean reverse : new boolean[] {true, false}) {
+      Directory dir = newDirectory();
+      IndexWriterConfig iwc = new IndexWriterConfig(new MockAnalyzer(random()));
+      SortField sortField = new SortField("foo", SortField.Type.STRING, reverse);
+      sortField.setMissingValue(SortField.STRING_FIRST);
+      Sort indexSort = new Sort(sortField);
+      iwc.setIndexSort(indexSort);
+      IndexWriter w = new IndexWriter(dir, iwc);
+      Document doc = new Document();
+      doc.add(new SortedDocValuesField("foo", new BytesRef("zzz")));
+      w.addDocument(doc);
+      // so we get more than one segment, so that forceMerge actually does merge, since we only get a sorted segment by merging:
+      w.commit();
 
-    // missing
-    w.addDocument(new Document());
-    w.commit();
+      // missing
+      w.addDocument(new Document());
+      w.commit();
 
-    doc = new Document();
-    doc.add(new SortedDocValuesField("foo", new BytesRef("mmm")));
-    w.addDocument(doc);
-    w.forceMerge(1);
+      doc = new Document();
+      doc.add(new SortedDocValuesField("foo", new BytesRef("mmm")));
+      w.addDocument(doc);
+      w.forceMerge(1);
 
-    DirectoryReader r = DirectoryReader.open(w);
-    LeafReader leaf = getOnlyLeafReader(r);
-    assertEquals(3, leaf.maxDoc());
-    SortedDocValues values = leaf.getSortedDocValues("foo");
-    assertEquals(-1, values.getOrd(0));
-    assertEquals("mmm", values.get(1).utf8ToString());
-    assertEquals("zzz", values.get(2).utf8ToString());
-    r.close();
-    w.close();
-    dir.close();
+      DirectoryReader r = DirectoryReader.open(w);
+      LeafReader leaf = getOnlyLeafReader(r);
+      assertEquals(3, leaf.maxDoc());
+      SortedDocValues values = leaf.getSortedDocValues("foo");
+      if (reverse) {
+        assertEquals(0, values.nextDoc());
+        assertEquals("zzz", values.binaryValue().utf8ToString());
+        assertEquals(1, values.nextDoc());
+        assertEquals("mmm", values.binaryValue().utf8ToString());
+      } else {
+        // docID 0 is missing:
+        assertEquals(1, values.nextDoc());
+        assertEquals("mmm", values.binaryValue().utf8ToString());
+        assertEquals(2, values.nextDoc());
+        assertEquals("zzz", values.binaryValue().utf8ToString());
+      }
+      r.close();
+      w.close();
+      dir.close();
+    }
+  }
+
+  public void testMissingMultiValuedStringFirst() throws Exception {
+    for (boolean reverse : new boolean[] {true, false}) {
+      Directory dir = newDirectory();
+      IndexWriterConfig iwc = new IndexWriterConfig(new MockAnalyzer(random()));
+      SortField sortField = new SortedSetSortField("foo", reverse);
+      sortField.setMissingValue(SortField.STRING_FIRST);
+      Sort indexSort = new Sort(sortField);
+      iwc.setIndexSort(indexSort);
+      IndexWriter w = new IndexWriter(dir, iwc);
+      Document doc = new Document();
+      doc.add(new NumericDocValuesField("id", 3));
+      doc.add(new SortedSetDocValuesField("foo", new BytesRef("zzz")));
+      doc.add(new SortedSetDocValuesField("foo", new BytesRef("zzza")));
+      doc.add(new SortedSetDocValuesField("foo", new BytesRef("zzzd")));
+      w.addDocument(doc);
+      // so we get more than one segment, so that forceMerge actually does merge, since we only get a sorted segment by merging:
+      w.commit();
+
+      // missing
+      doc = new Document();
+      doc.add(new NumericDocValuesField("id", 1));
+      w.addDocument(doc);
+      w.commit();
+
+      doc = new Document();
+      doc.add(new NumericDocValuesField("id", 2));
+      doc.add(new SortedSetDocValuesField("foo", new BytesRef("mmm")));
+      doc.add(new SortedSetDocValuesField("foo", new BytesRef("nnnn")));
+      w.addDocument(doc);
+      w.forceMerge(1);
+
+      DirectoryReader r = DirectoryReader.open(w);
+      LeafReader leaf = getOnlyLeafReader(r);
+      assertEquals(3, leaf.maxDoc());
+      NumericDocValues values = leaf.getNumericDocValues("id");
+      if (reverse) {
+        assertEquals(0, values.nextDoc());
+        assertEquals(3l, values.longValue());
+        assertEquals(1, values.nextDoc());
+        assertEquals(2l, values.longValue());
+        assertEquals(2, values.nextDoc());
+        assertEquals(1l, values.longValue());
+      } else {
+        assertEquals(0, values.nextDoc());
+        assertEquals(1l, values.longValue());
+        assertEquals(1, values.nextDoc());
+        assertEquals(2l, values.longValue());
+        assertEquals(2, values.nextDoc());
+        assertEquals(3l, values.longValue());
+      }
+      r.close();
+      w.close();
+      dir.close();
+    }
   }
 
   public void testMissingStringLast() throws Exception {
-    Directory dir = newDirectory();
-    IndexWriterConfig iwc = new IndexWriterConfig(new MockAnalyzer(random()));
-    SortField sortField = new SortField("foo", SortField.Type.STRING);
-    sortField.setMissingValue(SortField.STRING_LAST);
-    Sort indexSort = new Sort(sortField);
-    iwc.setIndexSort(indexSort);
-    IndexWriter w = new IndexWriter(dir, iwc);
-    Document doc = new Document();
-    doc.add(new SortedDocValuesField("foo", new BytesRef("zzz")));
-    w.addDocument(doc);
-    // so we get more than one segment, so that forceMerge actually does merge, since we only get a sorted segment by merging:
-    w.commit();
+    for (boolean reverse : new boolean[] {true, false}) {
+      Directory dir = newDirectory();
+      IndexWriterConfig iwc = new IndexWriterConfig(new MockAnalyzer(random()));
+      SortField sortField = new SortField("foo", SortField.Type.STRING, reverse);
+      sortField.setMissingValue(SortField.STRING_LAST);
+      Sort indexSort = new Sort(sortField);
+      iwc.setIndexSort(indexSort);
+      IndexWriter w = new IndexWriter(dir, iwc);
+      Document doc = new Document();
+      doc.add(new SortedDocValuesField("foo", new BytesRef("zzz")));
+      w.addDocument(doc);
+      // so we get more than one segment, so that forceMerge actually does merge, since we only get a sorted segment by merging:
+      w.commit();
 
-    // missing
-    w.addDocument(new Document());
-    w.commit();
+      // missing
+      w.addDocument(new Document());
+      w.commit();
 
-    doc = new Document();
-    doc.add(new SortedDocValuesField("foo", new BytesRef("mmm")));
-    w.addDocument(doc);
-    w.forceMerge(1);
+      doc = new Document();
+      doc.add(new SortedDocValuesField("foo", new BytesRef("mmm")));
+      w.addDocument(doc);
+      w.forceMerge(1);
 
-    DirectoryReader r = DirectoryReader.open(w);
-    LeafReader leaf = getOnlyLeafReader(r);
-    assertEquals(3, leaf.maxDoc());
-    SortedDocValues values = leaf.getSortedDocValues("foo");
-    assertEquals("mmm", values.get(0).utf8ToString());
-    assertEquals("zzz", values.get(1).utf8ToString());
-    assertEquals(-1, values.getOrd(2));
-    r.close();
-    w.close();
-    dir.close();
+      DirectoryReader r = DirectoryReader.open(w);
+      LeafReader leaf = getOnlyLeafReader(r);
+      assertEquals(3, leaf.maxDoc());
+      SortedDocValues values = leaf.getSortedDocValues("foo");
+      if (reverse) {
+        assertEquals(1, values.nextDoc());
+        assertEquals("zzz", values.binaryValue().utf8ToString());
+        assertEquals(2, values.nextDoc());
+        assertEquals("mmm", values.binaryValue().utf8ToString());
+      } else {
+        assertEquals(0, values.nextDoc());
+        assertEquals("mmm", values.binaryValue().utf8ToString());
+        assertEquals(1, values.nextDoc());
+        assertEquals("zzz", values.binaryValue().utf8ToString());
+      }
+      assertEquals(NO_MORE_DOCS, values.nextDoc());
+      r.close();
+      w.close();
+      dir.close();
+    }
+  }
+
+  public void testMissingMultiValuedStringLast() throws Exception {
+    for (boolean reverse : new boolean[] {true, false}) {
+      Directory dir = newDirectory();
+      IndexWriterConfig iwc = new IndexWriterConfig(new MockAnalyzer(random()));
+      SortField sortField = new SortedSetSortField("foo", reverse);
+      sortField.setMissingValue(SortField.STRING_LAST);
+      Sort indexSort = new Sort(sortField);
+      iwc.setIndexSort(indexSort);
+      IndexWriter w = new IndexWriter(dir, iwc);
+      Document doc = new Document();
+      doc.add(new NumericDocValuesField("id", 2));
+      doc.add(new SortedSetDocValuesField("foo", new BytesRef("zzz")));
+      doc.add(new SortedSetDocValuesField("foo", new BytesRef("zzzd")));
+      w.addDocument(doc);
+      // so we get more than one segment, so that forceMerge actually does merge, since we only get a sorted segment by merging:
+      w.commit();
+
+      // missing
+      doc = new Document();
+      doc.add(new NumericDocValuesField("id", 3));
+      w.addDocument(doc);
+      w.commit();
+
+      doc = new Document();
+      doc.add(new NumericDocValuesField("id", 1));
+      doc.add(new SortedSetDocValuesField("foo", new BytesRef("mmm")));
+      doc.add(new SortedSetDocValuesField("foo", new BytesRef("ppp")));
+      w.addDocument(doc);
+      w.forceMerge(1);
+
+      DirectoryReader r = DirectoryReader.open(w);
+      LeafReader leaf = getOnlyLeafReader(r);
+      assertEquals(3, leaf.maxDoc());
+      NumericDocValues values = leaf.getNumericDocValues("id");
+      if (reverse) {
+        assertEquals(0, values.nextDoc());
+        assertEquals(3l, values.longValue());
+        assertEquals(1, values.nextDoc());
+        assertEquals(2l, values.longValue());
+        assertEquals(2, values.nextDoc());
+        assertEquals(1l, values.longValue());
+      } else {
+        assertEquals(0, values.nextDoc());
+        assertEquals(1l, values.longValue());
+        assertEquals(1, values.nextDoc());
+        assertEquals(2l, values.longValue());
+        assertEquals(2, values.nextDoc());
+        assertEquals(3l, values.longValue());
+      }
+      r.close();
+      w.close();
+      dir.close();
+    }
   }
 
   public void testBasicLong() throws Exception {
@@ -207,86 +583,261 @@ public class TestIndexSorting extends LuceneTestCase {
     LeafReader leaf = getOnlyLeafReader(r);
     assertEquals(3, leaf.maxDoc());
     NumericDocValues values = leaf.getNumericDocValues("foo");
-    assertEquals(-1, values.get(0));
-    assertEquals(7, values.get(1));
-    assertEquals(18, values.get(2));
+    assertEquals(0, values.nextDoc());
+    assertEquals(-1, values.longValue());
+    assertEquals(1, values.nextDoc());
+    assertEquals(7, values.longValue());
+    assertEquals(2, values.nextDoc());
+    assertEquals(18, values.longValue());
+    r.close();
+    w.close();
+    dir.close();
+  }
+
+  public void testBasicMultiValuedLong() throws Exception {
+    Directory dir = newDirectory();
+    IndexWriterConfig iwc = new IndexWriterConfig(new MockAnalyzer(random()));
+    Sort indexSort = new Sort(new SortedNumericSortField("foo", SortField.Type.LONG));
+    iwc.setIndexSort(indexSort);
+    IndexWriter w = new IndexWriter(dir, iwc);
+    Document doc = new Document();
+    doc.add(new NumericDocValuesField("id", 3));
+    doc.add(new SortedNumericDocValuesField("foo", 18));
+    doc.add(new SortedNumericDocValuesField("foo", 35));
+    w.addDocument(doc);
+    // so we get more than one segment, so that forceMerge actually does merge, since we only get a sorted segment by merging:
+    w.commit();
+
+    doc = new Document();
+    doc.add(new NumericDocValuesField("id", 1));
+    doc.add(new SortedNumericDocValuesField("foo", -1));
+    w.addDocument(doc);
+    w.commit();
+
+    doc = new Document();
+    doc.add(new NumericDocValuesField("id", 2));
+    doc.add(new SortedNumericDocValuesField("foo", 7));
+    doc.add(new SortedNumericDocValuesField("foo", 22));
+    w.addDocument(doc);
+    w.forceMerge(1);
+
+    DirectoryReader r = DirectoryReader.open(w);
+    LeafReader leaf = getOnlyLeafReader(r);
+    assertEquals(3, leaf.maxDoc());
+    NumericDocValues values = leaf.getNumericDocValues("id");
+    assertEquals(0, values.nextDoc());
+    assertEquals(1, values.longValue());
+    assertEquals(1, values.nextDoc());
+    assertEquals(2, values.longValue());
+    assertEquals(2, values.nextDoc());
+    assertEquals(3, values.longValue());
     r.close();
     w.close();
     dir.close();
   }
 
   public void testMissingLongFirst() throws Exception {
-    Directory dir = newDirectory();
-    IndexWriterConfig iwc = new IndexWriterConfig(new MockAnalyzer(random()));
-    SortField sortField = new SortField("foo", SortField.Type.LONG);
-    sortField.setMissingValue(Long.valueOf(Long.MIN_VALUE));
-    Sort indexSort = new Sort(sortField);
-    iwc.setIndexSort(indexSort);
-    IndexWriter w = new IndexWriter(dir, iwc);
-    Document doc = new Document();
-    doc.add(new NumericDocValuesField("foo", 18));
-    w.addDocument(doc);
-    // so we get more than one segment, so that forceMerge actually does merge, since we only get a sorted segment by merging:
-    w.commit();
+    for (boolean reverse : new boolean[] {true, false}) {
+      Directory dir = newDirectory();
+      IndexWriterConfig iwc = new IndexWriterConfig(new MockAnalyzer(random()));
+      SortField sortField = new SortField("foo", SortField.Type.LONG, reverse);
+      sortField.setMissingValue(Long.valueOf(Long.MIN_VALUE));
+      Sort indexSort = new Sort(sortField);
+      iwc.setIndexSort(indexSort);
+      IndexWriter w = new IndexWriter(dir, iwc);
+      Document doc = new Document();
+      doc.add(new NumericDocValuesField("foo", 18));
+      w.addDocument(doc);
+      // so we get more than one segment, so that forceMerge actually does merge, since we only get a sorted segment by merging:
+      w.commit();
 
-    // missing
-    w.addDocument(new Document());
-    w.commit();
+      // missing
+      w.addDocument(new Document());
+      w.commit();
 
-    doc = new Document();
-    doc.add(new NumericDocValuesField("foo", 7));
-    w.addDocument(doc);
-    w.forceMerge(1);
+      doc = new Document();
+      doc.add(new NumericDocValuesField("foo", 7));
+      w.addDocument(doc);
+      w.forceMerge(1);
 
-    DirectoryReader r = DirectoryReader.open(w);
-    LeafReader leaf = getOnlyLeafReader(r);
-    assertEquals(3, leaf.maxDoc());
-    NumericDocValues values = leaf.getNumericDocValues("foo");
-    Bits docsWithField = leaf.getDocsWithField("foo");
-    assertEquals(0, values.get(0));
-    assertFalse(docsWithField.get(0));
-    assertEquals(7, values.get(1));
-    assertEquals(18, values.get(2));
-    r.close();
-    w.close();
-    dir.close();
+      DirectoryReader r = DirectoryReader.open(w);
+      LeafReader leaf = getOnlyLeafReader(r);
+      assertEquals(3, leaf.maxDoc());
+      NumericDocValues values = leaf.getNumericDocValues("foo");
+      if (reverse) {
+        assertEquals(0, values.nextDoc());
+        assertEquals(18, values.longValue());
+        assertEquals(1, values.nextDoc());
+        assertEquals(7, values.longValue());
+      } else {
+        // docID 0 has no value
+        assertEquals(1, values.nextDoc());
+        assertEquals(7, values.longValue());
+        assertEquals(2, values.nextDoc());
+        assertEquals(18, values.longValue());
+      }
+      r.close();
+      w.close();
+      dir.close();
+    }
+  }
+
+  public void testMissingMultiValuedLongFirst() throws Exception {
+    for (boolean reverse : new boolean[] {true, false}) {
+      Directory dir = newDirectory();
+      IndexWriterConfig iwc = new IndexWriterConfig(new MockAnalyzer(random()));
+      SortField sortField = new SortedNumericSortField("foo", SortField.Type.LONG, reverse);
+      sortField.setMissingValue(Long.valueOf(Long.MIN_VALUE));
+      Sort indexSort = new Sort(sortField);
+      iwc.setIndexSort(indexSort);
+      IndexWriter w = new IndexWriter(dir, iwc);
+      Document doc = new Document();
+      doc.add(new NumericDocValuesField("id", 3));
+      doc.add(new SortedNumericDocValuesField("foo", 18));
+      doc.add(new SortedNumericDocValuesField("foo", 27));
+      w.addDocument(doc);
+      // so we get more than one segment, so that forceMerge actually does merge, since we only get a sorted segment by merging:
+      w.commit();
+
+      // missing
+      doc = new Document();
+      doc.add(new NumericDocValuesField("id", 1));
+      w.addDocument(doc);
+      w.commit();
+
+      doc = new Document();
+      doc.add(new NumericDocValuesField("id", 2));
+      doc.add(new SortedNumericDocValuesField("foo", 7));
+      doc.add(new SortedNumericDocValuesField("foo", 24));
+      w.addDocument(doc);
+      w.forceMerge(1);
+
+      DirectoryReader r = DirectoryReader.open(w);
+      LeafReader leaf = getOnlyLeafReader(r);
+      assertEquals(3, leaf.maxDoc());
+      NumericDocValues values = leaf.getNumericDocValues("id");
+      if (reverse) {
+        assertEquals(0, values.nextDoc());
+        assertEquals(3, values.longValue());
+        assertEquals(1, values.nextDoc());
+        assertEquals(2, values.longValue());
+        assertEquals(2, values.nextDoc());
+        assertEquals(1, values.longValue());
+      } else {
+        assertEquals(0, values.nextDoc());
+        assertEquals(1, values.longValue());
+        assertEquals(1, values.nextDoc());
+        assertEquals(2, values.longValue());
+        assertEquals(2, values.nextDoc());
+        assertEquals(3, values.longValue());
+      }
+      r.close();
+      w.close();
+      dir.close();
+    }
   }
 
   public void testMissingLongLast() throws Exception {
-    Directory dir = newDirectory();
-    IndexWriterConfig iwc = new IndexWriterConfig(new MockAnalyzer(random()));
-    SortField sortField = new SortField("foo", SortField.Type.LONG);
-    sortField.setMissingValue(Long.valueOf(Long.MAX_VALUE));
-    Sort indexSort = new Sort(sortField);
-    iwc.setIndexSort(indexSort);
-    IndexWriter w = new IndexWriter(dir, iwc);
-    Document doc = new Document();
-    doc.add(new NumericDocValuesField("foo", 18));
-    w.addDocument(doc);
-    // so we get more than one segment, so that forceMerge actually does merge, since we only get a sorted segment by merging:
-    w.commit();
+    for (boolean reverse : new boolean[] {true, false}) {
+      Directory dir = newDirectory();
+      IndexWriterConfig iwc = new IndexWriterConfig(new MockAnalyzer(random()));
+      SortField sortField = new SortField("foo", SortField.Type.LONG, reverse);
+      sortField.setMissingValue(Long.valueOf(Long.MAX_VALUE));
+      Sort indexSort = new Sort(sortField);
+      iwc.setIndexSort(indexSort);
+      IndexWriter w = new IndexWriter(dir, iwc);
+      Document doc = new Document();
+      doc.add(new NumericDocValuesField("foo", 18));
+      w.addDocument(doc);
+      // so we get more than one segment, so that forceMerge actually does merge, since we only get a sorted segment by merging:
+      w.commit();
 
-    // missing
-    w.addDocument(new Document());
-    w.commit();
+      // missing
+      w.addDocument(new Document());
+      w.commit();
 
-    doc = new Document();
-    doc.add(new NumericDocValuesField("foo", 7));
-    w.addDocument(doc);
-    w.forceMerge(1);
+      doc = new Document();
+      doc.add(new NumericDocValuesField("foo", 7));
+      w.addDocument(doc);
+      w.forceMerge(1);
 
-    DirectoryReader r = DirectoryReader.open(w);
-    LeafReader leaf = getOnlyLeafReader(r);
-    assertEquals(3, leaf.maxDoc());
-    NumericDocValues values = leaf.getNumericDocValues("foo");
-    Bits docsWithField = leaf.getDocsWithField("foo");
-    assertEquals(7, values.get(0));
-    assertEquals(18, values.get(1));
-    assertEquals(0, values.get(2));
-    assertFalse(docsWithField.get(2));
-    r.close();
-    w.close();
-    dir.close();
+      DirectoryReader r = DirectoryReader.open(w);
+      LeafReader leaf = getOnlyLeafReader(r);
+      assertEquals(3, leaf.maxDoc());
+      NumericDocValues values = leaf.getNumericDocValues("foo");
+      if (reverse) {
+        // docID 0 is missing
+        assertEquals(1, values.nextDoc());
+        assertEquals(18, values.longValue());
+        assertEquals(2, values.nextDoc());
+        assertEquals(7, values.longValue());
+      } else {
+        assertEquals(0, values.nextDoc());
+        assertEquals(7, values.longValue());
+        assertEquals(1, values.nextDoc());
+        assertEquals(18, values.longValue());
+      }
+      assertEquals(NO_MORE_DOCS, values.nextDoc());
+      r.close();
+      w.close();
+      dir.close();
+    }
+  }
+
+  public void testMissingMultiValuedLongLast() throws Exception {
+    for (boolean reverse : new boolean[] {true, false}) {
+      Directory dir = newDirectory();
+      IndexWriterConfig iwc = new IndexWriterConfig(new MockAnalyzer(random()));
+      SortField sortField = new SortedNumericSortField("foo", SortField.Type.LONG, reverse);
+      sortField.setMissingValue(Long.valueOf(Long.MAX_VALUE));
+      Sort indexSort = new Sort(sortField);
+      iwc.setIndexSort(indexSort);
+      IndexWriter w = new IndexWriter(dir, iwc);
+      Document doc = new Document();
+      doc.add(new NumericDocValuesField("id", 2));
+      doc.add(new SortedNumericDocValuesField("foo", 18));
+      doc.add(new SortedNumericDocValuesField("foo", 65));
+      w.addDocument(doc);
+      // so we get more than one segment, so that forceMerge actually does merge, since we only get a sorted segment by merging:
+      w.commit();
+
+      // missing
+      doc = new Document();
+      doc.add(new NumericDocValuesField("id", 3));
+      w.addDocument(doc);
+      w.commit();
+
+      doc = new Document();
+      doc.add(new NumericDocValuesField("id", 1));
+      doc.add(new SortedNumericDocValuesField("foo", 7));
+      doc.add(new SortedNumericDocValuesField("foo", 34));
+      doc.add(new SortedNumericDocValuesField("foo", 74));
+      w.addDocument(doc);
+      w.forceMerge(1);
+
+      DirectoryReader r = DirectoryReader.open(w);
+      LeafReader leaf = getOnlyLeafReader(r);
+      assertEquals(3, leaf.maxDoc());
+      NumericDocValues values = leaf.getNumericDocValues("id");
+      if (reverse) {
+        assertEquals(0, values.nextDoc());
+        assertEquals(3, values.longValue());
+        assertEquals(1, values.nextDoc());
+        assertEquals(2, values.longValue());
+        assertEquals(2, values.nextDoc());
+        assertEquals(1, values.longValue());
+      } else {
+        assertEquals(0, values.nextDoc());
+        assertEquals(1, values.longValue());
+        assertEquals(1, values.nextDoc());
+        assertEquals(2, values.longValue());
+        assertEquals(2, values.nextDoc());
+        assertEquals(3, values.longValue());
+      }
+      r.close();
+      w.close();
+      dir.close();
+    }
   }
 
   public void testBasicInt() throws Exception {
@@ -315,86 +866,261 @@ public class TestIndexSorting extends LuceneTestCase {
     LeafReader leaf = getOnlyLeafReader(r);
     assertEquals(3, leaf.maxDoc());
     NumericDocValues values = leaf.getNumericDocValues("foo");
-    assertEquals(-1, values.get(0));
-    assertEquals(7, values.get(1));
-    assertEquals(18, values.get(2));
+    assertEquals(0, values.nextDoc());
+    assertEquals(-1, values.longValue());
+    assertEquals(1, values.nextDoc());
+    assertEquals(7, values.longValue());
+    assertEquals(2, values.nextDoc());
+    assertEquals(18, values.longValue());
+    r.close();
+    w.close();
+    dir.close();
+  }
+
+  public void testBasicMultiValuedInt() throws Exception {
+    Directory dir = newDirectory();
+    IndexWriterConfig iwc = new IndexWriterConfig(new MockAnalyzer(random()));
+    Sort indexSort = new Sort(new SortedNumericSortField("foo", SortField.Type.INT));
+    iwc.setIndexSort(indexSort);
+    IndexWriter w = new IndexWriter(dir, iwc);
+    Document doc = new Document();
+    doc.add(new NumericDocValuesField("id", 3));
+    doc.add(new SortedNumericDocValuesField("foo", 18));
+    doc.add(new SortedNumericDocValuesField("foo", 34));
+    w.addDocument(doc);
+    // so we get more than one segment, so that forceMerge actually does merge, since we only get a sorted segment by merging:
+    w.commit();
+
+    doc = new Document();
+    doc.add(new NumericDocValuesField("id", 1));
+    doc.add(new SortedNumericDocValuesField("foo", -1));
+    doc.add(new SortedNumericDocValuesField("foo", 34));
+    w.addDocument(doc);
+    w.commit();
+
+    doc = new Document();
+    doc.add(new NumericDocValuesField("id", 2));
+    doc.add(new SortedNumericDocValuesField("foo", 7));
+    doc.add(new SortedNumericDocValuesField("foo", 22));
+    doc.add(new SortedNumericDocValuesField("foo", 27));
+    w.addDocument(doc);
+    w.forceMerge(1);
+
+    DirectoryReader r = DirectoryReader.open(w);
+    LeafReader leaf = getOnlyLeafReader(r);
+    assertEquals(3, leaf.maxDoc());
+    NumericDocValues values = leaf.getNumericDocValues("id");
+    assertEquals(0, values.nextDoc());
+    assertEquals(1, values.longValue());
+    assertEquals(1, values.nextDoc());
+    assertEquals(2, values.longValue());
+    assertEquals(2, values.nextDoc());
+    assertEquals(3, values.longValue());
     r.close();
     w.close();
     dir.close();
   }
 
   public void testMissingIntFirst() throws Exception {
-    Directory dir = newDirectory();
-    IndexWriterConfig iwc = new IndexWriterConfig(new MockAnalyzer(random()));
-    SortField sortField = new SortField("foo", SortField.Type.INT);
-    sortField.setMissingValue(Integer.valueOf(Integer.MIN_VALUE));
-    Sort indexSort = new Sort(sortField);
-    iwc.setIndexSort(indexSort);
-    IndexWriter w = new IndexWriter(dir, iwc);
-    Document doc = new Document();
-    doc.add(new NumericDocValuesField("foo", 18));
-    w.addDocument(doc);
-    // so we get more than one segment, so that forceMerge actually does merge, since we only get a sorted segment by merging:
-    w.commit();
+    for (boolean reverse : new boolean[] {true, false}) {
+      Directory dir = newDirectory();
+      IndexWriterConfig iwc = new IndexWriterConfig(new MockAnalyzer(random()));
+      SortField sortField = new SortField("foo", SortField.Type.INT, reverse);
+      sortField.setMissingValue(Integer.valueOf(Integer.MIN_VALUE));
+      Sort indexSort = new Sort(sortField);
+      iwc.setIndexSort(indexSort);
+      IndexWriter w = new IndexWriter(dir, iwc);
+      Document doc = new Document();
+      doc.add(new NumericDocValuesField("foo", 18));
+      w.addDocument(doc);
+      // so we get more than one segment, so that forceMerge actually does merge, since we only get a sorted segment by merging:
+      w.commit();
 
-    // missing
-    w.addDocument(new Document());
-    w.commit();
+      // missing
+      w.addDocument(new Document());
+      w.commit();
 
-    doc = new Document();
-    doc.add(new NumericDocValuesField("foo", 7));
-    w.addDocument(doc);
-    w.forceMerge(1);
+      doc = new Document();
+      doc.add(new NumericDocValuesField("foo", 7));
+      w.addDocument(doc);
+      w.forceMerge(1);
 
-    DirectoryReader r = DirectoryReader.open(w);
-    LeafReader leaf = getOnlyLeafReader(r);
-    assertEquals(3, leaf.maxDoc());
-    NumericDocValues values = leaf.getNumericDocValues("foo");
-    Bits docsWithField = leaf.getDocsWithField("foo");
-    assertEquals(0, values.get(0));
-    assertFalse(docsWithField.get(0));
-    assertEquals(7, values.get(1));
-    assertEquals(18, values.get(2));
-    r.close();
-    w.close();
-    dir.close();
+      DirectoryReader r = DirectoryReader.open(w);
+      LeafReader leaf = getOnlyLeafReader(r);
+      assertEquals(3, leaf.maxDoc());
+      NumericDocValues values = leaf.getNumericDocValues("foo");
+      if (reverse) {
+        assertEquals(0, values.nextDoc());
+        assertEquals(18, values.longValue());
+        assertEquals(1, values.nextDoc());
+        assertEquals(7, values.longValue());
+      } else {
+        assertEquals(1, values.nextDoc());
+        assertEquals(7, values.longValue());
+        assertEquals(2, values.nextDoc());
+        assertEquals(18, values.longValue());
+      }
+      r.close();
+      w.close();
+      dir.close();
+    }
+  }
+
+  public void testMissingMultiValuedIntFirst() throws Exception {
+    for (boolean reverse : new boolean[] {true, false}) {
+      Directory dir = newDirectory();
+      IndexWriterConfig iwc = new IndexWriterConfig(new MockAnalyzer(random()));
+      SortField sortField = new SortedNumericSortField("foo", SortField.Type.INT, reverse);
+      sortField.setMissingValue(Integer.valueOf(Integer.MIN_VALUE));
+      Sort indexSort = new Sort(sortField);
+      iwc.setIndexSort(indexSort);
+      IndexWriter w = new IndexWriter(dir, iwc);
+      Document doc = new Document();
+      doc.add(new NumericDocValuesField("id", 3));
+      doc.add(new SortedNumericDocValuesField("foo", 18));
+      doc.add(new SortedNumericDocValuesField("foo", 187667));
+      w.addDocument(doc);
+      // so we get more than one segment, so that forceMerge actually does merge, since we only get a sorted segment by merging:
+      w.commit();
+
+      // missing
+      doc = new Document();
+      doc.add(new NumericDocValuesField("id", 1));
+      w.addDocument(doc);
+      w.commit();
+
+      doc = new Document();
+      doc.add(new NumericDocValuesField("id", 2));
+      doc.add(new SortedNumericDocValuesField("foo", 7));
+      doc.add(new SortedNumericDocValuesField("foo", 34));
+      w.addDocument(doc);
+      w.forceMerge(1);
+
+      DirectoryReader r = DirectoryReader.open(w);
+      LeafReader leaf = getOnlyLeafReader(r);
+      assertEquals(3, leaf.maxDoc());
+      NumericDocValues values = leaf.getNumericDocValues("id");
+      if (reverse) {
+        assertEquals(0, values.nextDoc());
+        assertEquals(3, values.longValue());
+        assertEquals(1, values.nextDoc());
+        assertEquals(2, values.longValue());
+        assertEquals(2, values.nextDoc());
+        assertEquals(1, values.longValue());
+      } else {
+        assertEquals(0, values.nextDoc());
+        assertEquals(1, values.longValue());
+        assertEquals(1, values.nextDoc());
+        assertEquals(2, values.longValue());
+        assertEquals(2, values.nextDoc());
+        assertEquals(3, values.longValue());
+      }
+      r.close();
+      w.close();
+      dir.close();
+    }
   }
 
   public void testMissingIntLast() throws Exception {
-    Directory dir = newDirectory();
-    IndexWriterConfig iwc = new IndexWriterConfig(new MockAnalyzer(random()));
-    SortField sortField = new SortField("foo", SortField.Type.INT);
-    sortField.setMissingValue(Integer.valueOf(Integer.MAX_VALUE));
-    Sort indexSort = new Sort(sortField);
-    iwc.setIndexSort(indexSort);
-    IndexWriter w = new IndexWriter(dir, iwc);
-    Document doc = new Document();
-    doc.add(new NumericDocValuesField("foo", 18));
-    w.addDocument(doc);
-    // so we get more than one segment, so that forceMerge actually does merge, since we only get a sorted segment by merging:
-    w.commit();
+    for (boolean reverse : new boolean[] {true, false}) {
+      Directory dir = newDirectory();
+      IndexWriterConfig iwc = new IndexWriterConfig(new MockAnalyzer(random()));
+      SortField sortField = new SortField("foo", SortField.Type.INT, reverse);
+      sortField.setMissingValue(Integer.valueOf(Integer.MAX_VALUE));
+      Sort indexSort = new Sort(sortField);
+      iwc.setIndexSort(indexSort);
+      IndexWriter w = new IndexWriter(dir, iwc);
+      Document doc = new Document();
+      doc.add(new NumericDocValuesField("foo", 18));
+      w.addDocument(doc);
+      // so we get more than one segment, so that forceMerge actually does merge, since we only get a sorted segment by merging:
+      w.commit();
 
-    // missing
-    w.addDocument(new Document());
-    w.commit();
+      // missing
+      w.addDocument(new Document());
+      w.commit();
 
-    doc = new Document();
-    doc.add(new NumericDocValuesField("foo", 7));
-    w.addDocument(doc);
-    w.forceMerge(1);
+      doc = new Document();
+      doc.add(new NumericDocValuesField("foo", 7));
+      w.addDocument(doc);
+      w.forceMerge(1);
 
-    DirectoryReader r = DirectoryReader.open(w);
-    LeafReader leaf = getOnlyLeafReader(r);
-    assertEquals(3, leaf.maxDoc());
-    NumericDocValues values = leaf.getNumericDocValues("foo");
-    Bits docsWithField = leaf.getDocsWithField("foo");
-    assertEquals(7, values.get(0));
-    assertEquals(18, values.get(1));
-    assertEquals(0, values.get(2));
-    assertFalse(docsWithField.get(2));
-    r.close();
-    w.close();
-    dir.close();
+      DirectoryReader r = DirectoryReader.open(w);
+      LeafReader leaf = getOnlyLeafReader(r);
+      assertEquals(3, leaf.maxDoc());
+      NumericDocValues values = leaf.getNumericDocValues("foo");
+      if (reverse) {
+        // docID 0 is missing
+        assertEquals(1, values.nextDoc());
+        assertEquals(18, values.longValue());
+        assertEquals(2, values.nextDoc());
+        assertEquals(7, values.longValue());
+      } else {
+        assertEquals(0, values.nextDoc());
+        assertEquals(7, values.longValue());
+        assertEquals(1, values.nextDoc());
+        assertEquals(18, values.longValue());
+      }
+      assertEquals(NO_MORE_DOCS, values.nextDoc());
+      r.close();
+      w.close();
+      dir.close();
+    }
+  }
+
+  public void testMissingMultiValuedIntLast() throws Exception {
+    for (boolean reverse : new boolean[] {true, false}) {
+      Directory dir = newDirectory();
+      IndexWriterConfig iwc = new IndexWriterConfig(new MockAnalyzer(random()));
+      SortField sortField = new SortedNumericSortField("foo", SortField.Type.INT, reverse);
+      sortField.setMissingValue(Integer.valueOf(Integer.MAX_VALUE));
+      Sort indexSort = new Sort(sortField);
+      iwc.setIndexSort(indexSort);
+      IndexWriter w = new IndexWriter(dir, iwc);
+      Document doc = new Document();
+      doc.add(new NumericDocValuesField("id", 2));
+      doc.add(new SortedNumericDocValuesField("foo", 18));
+      doc.add(new SortedNumericDocValuesField("foo", 6372));
+      w.addDocument(doc);
+      // so we get more than one segment, so that forceMerge actually does merge, since we only get a sorted segment by merging:
+      w.commit();
+
+      // missing
+      doc = new Document();
+      doc.add(new NumericDocValuesField("id", 3));
+      w.addDocument(doc);
+      w.commit();
+
+      doc = new Document();
+      doc.add(new NumericDocValuesField("id", 1));
+      doc.add(new SortedNumericDocValuesField("foo", 7));
+      doc.add(new SortedNumericDocValuesField("foo", 8));
+      w.addDocument(doc);
+      w.forceMerge(1);
+
+      DirectoryReader r = DirectoryReader.open(w);
+      LeafReader leaf = getOnlyLeafReader(r);
+      assertEquals(3, leaf.maxDoc());
+      NumericDocValues values = leaf.getNumericDocValues("id");
+      if (reverse) {
+        assertEquals(0, values.nextDoc());
+        assertEquals(3, values.longValue());
+        assertEquals(1, values.nextDoc());
+        assertEquals(2, values.longValue());
+        assertEquals(2, values.nextDoc());
+        assertEquals(1, values.longValue());
+      } else {
+        assertEquals(0, values.nextDoc());
+        assertEquals(1, values.longValue());
+        assertEquals(1, values.nextDoc());
+        assertEquals(2, values.longValue());
+        assertEquals(2, values.nextDoc());
+        assertEquals(3, values.longValue());
+      }
+      r.close();
+      w.close();
+      dir.close();
+    }
   }
 
   public void testBasicDouble() throws Exception {
@@ -423,86 +1149,259 @@ public class TestIndexSorting extends LuceneTestCase {
     LeafReader leaf = getOnlyLeafReader(r);
     assertEquals(3, leaf.maxDoc());
     NumericDocValues values = leaf.getNumericDocValues("foo");
-    assertEquals(-1.0, Double.longBitsToDouble(values.get(0)), 0.0);
-    assertEquals(7.0, Double.longBitsToDouble(values.get(1)), 0.0);
-    assertEquals(18.0, Double.longBitsToDouble(values.get(2)), 0.0);
+    assertEquals(0, values.nextDoc());
+    assertEquals(-1.0, Double.longBitsToDouble(values.longValue()), 0.0);
+    assertEquals(1, values.nextDoc());
+    assertEquals(7.0, Double.longBitsToDouble(values.longValue()), 0.0);
+    assertEquals(2, values.nextDoc());
+    assertEquals(18.0, Double.longBitsToDouble(values.longValue()), 0.0);
+    r.close();
+    w.close();
+    dir.close();
+  }
+
+  public void testBasicMultiValuedDouble() throws Exception {
+    Directory dir = newDirectory();
+    IndexWriterConfig iwc = new IndexWriterConfig(new MockAnalyzer(random()));
+    Sort indexSort = new Sort(new SortedNumericSortField("foo", SortField.Type.DOUBLE));
+    iwc.setIndexSort(indexSort);
+    IndexWriter w = new IndexWriter(dir, iwc);
+    Document doc = new Document();
+    doc.add(new NumericDocValuesField("id", 3));
+    doc.add(new SortedNumericDocValuesField("foo", NumericUtils.doubleToSortableLong(7.54)));
+    doc.add(new SortedNumericDocValuesField("foo", NumericUtils.doubleToSortableLong(27.0)));
+    w.addDocument(doc);
+    // so we get more than one segment, so that forceMerge actually does merge, since we only get a sorted segment by merging:
+    w.commit();
+
+    doc = new Document();
+    doc.add(new NumericDocValuesField("id", 1));
+    doc.add(new SortedNumericDocValuesField("foo", NumericUtils.doubleToSortableLong(-1.0)));
+    doc.add(new SortedNumericDocValuesField("foo", NumericUtils.doubleToSortableLong(0.0)));
+    w.addDocument(doc);
+    w.commit();
+
+    doc = new Document();
+    doc.add(new NumericDocValuesField("id", 2));
+    doc.add(new SortedNumericDocValuesField("foo", NumericUtils.doubleToSortableLong(7.0)));
+    doc.add(new SortedNumericDocValuesField("foo", NumericUtils.doubleToSortableLong(7.67)));
+    w.addDocument(doc);
+    w.forceMerge(1);
+
+    DirectoryReader r = DirectoryReader.open(w);
+    LeafReader leaf = getOnlyLeafReader(r);
+    assertEquals(3, leaf.maxDoc());
+    NumericDocValues values = leaf.getNumericDocValues("id");
+    assertEquals(0, values.nextDoc());
+    assertEquals(1, values.longValue());
+    assertEquals(1, values.nextDoc());
+    assertEquals(2, values.longValue());
+    assertEquals(2, values.nextDoc());
+    assertEquals(3, values.longValue());
     r.close();
     w.close();
     dir.close();
   }
 
   public void testMissingDoubleFirst() throws Exception {
-    Directory dir = newDirectory();
-    IndexWriterConfig iwc = new IndexWriterConfig(new MockAnalyzer(random()));
-    SortField sortField = new SortField("foo", SortField.Type.DOUBLE);
-    sortField.setMissingValue(Double.NEGATIVE_INFINITY);
-    Sort indexSort = new Sort(sortField);
-    iwc.setIndexSort(indexSort);
-    IndexWriter w = new IndexWriter(dir, iwc);
-    Document doc = new Document();
-    doc.add(new DoubleDocValuesField("foo", 18.0));
-    w.addDocument(doc);
-    // so we get more than one segment, so that forceMerge actually does merge, since we only get a sorted segment by merging:
-    w.commit();
+    for (boolean reverse : new boolean[] {true, false}) {
+      Directory dir = newDirectory();
+      IndexWriterConfig iwc = new IndexWriterConfig(new MockAnalyzer(random()));
+      SortField sortField = new SortField("foo", SortField.Type.DOUBLE, reverse);
+      sortField.setMissingValue(Double.NEGATIVE_INFINITY);
+      Sort indexSort = new Sort(sortField);
+      iwc.setIndexSort(indexSort);
+      IndexWriter w = new IndexWriter(dir, iwc);
+      Document doc = new Document();
+      doc.add(new DoubleDocValuesField("foo", 18.0));
+      w.addDocument(doc);
+      // so we get more than one segment, so that forceMerge actually does merge, since we only get a sorted segment by merging:
+      w.commit();
 
-    // missing
-    w.addDocument(new Document());
-    w.commit();
+      // missing
+      w.addDocument(new Document());
+      w.commit();
 
-    doc = new Document();
-    doc.add(new DoubleDocValuesField("foo", 7.0));
-    w.addDocument(doc);
-    w.forceMerge(1);
+      doc = new Document();
+      doc.add(new DoubleDocValuesField("foo", 7.0));
+      w.addDocument(doc);
+      w.forceMerge(1);
 
-    DirectoryReader r = DirectoryReader.open(w);
-    LeafReader leaf = getOnlyLeafReader(r);
-    assertEquals(3, leaf.maxDoc());
-    NumericDocValues values = leaf.getNumericDocValues("foo");
-    Bits docsWithField = leaf.getDocsWithField("foo");
-    assertEquals(0.0, Double.longBitsToDouble(values.get(0)), 0.0);
-    assertFalse(docsWithField.get(0));
-    assertEquals(7.0, Double.longBitsToDouble(values.get(1)), 0.0);
-    assertEquals(18.0, Double.longBitsToDouble(values.get(2)), 0.0);
-    r.close();
-    w.close();
-    dir.close();
+      DirectoryReader r = DirectoryReader.open(w);
+      LeafReader leaf = getOnlyLeafReader(r);
+      assertEquals(3, leaf.maxDoc());
+      NumericDocValues values = leaf.getNumericDocValues("foo");
+      if (reverse) {
+        assertEquals(0, values.nextDoc());
+        assertEquals(18.0, Double.longBitsToDouble(values.longValue()), 0.0);
+        assertEquals(1, values.nextDoc());
+        assertEquals(7.0, Double.longBitsToDouble(values.longValue()), 0.0);
+      } else {
+        assertEquals(1, values.nextDoc());
+        assertEquals(7.0, Double.longBitsToDouble(values.longValue()), 0.0);
+        assertEquals(2, values.nextDoc());
+        assertEquals(18.0, Double.longBitsToDouble(values.longValue()), 0.0);
+      }
+      r.close();
+      w.close();
+      dir.close();
+    }
+  }
+
+  public void testMissingMultiValuedDoubleFirst() throws Exception {
+    for (boolean reverse : new boolean[] {true, false}) {
+      Directory dir = newDirectory();
+      IndexWriterConfig iwc = new IndexWriterConfig(new MockAnalyzer(random()));
+      SortField sortField = new SortedNumericSortField("foo", SortField.Type.DOUBLE, reverse);
+      sortField.setMissingValue(Double.NEGATIVE_INFINITY);
+      Sort indexSort = new Sort(sortField);
+      iwc.setIndexSort(indexSort);
+      IndexWriter w = new IndexWriter(dir, iwc);
+      Document doc = new Document();
+      doc.add(new NumericDocValuesField("id", 3));
+      doc.add(new SortedNumericDocValuesField("foo", NumericUtils.doubleToSortableLong(18.0)));
+      doc.add(new SortedNumericDocValuesField("foo", NumericUtils.doubleToSortableLong(18.76)));
+      w.addDocument(doc);
+      // so we get more than one segment, so that forceMerge actually does merge, since we only get a sorted segment by merging:
+      w.commit();
+
+      // missing
+      doc = new Document();
+      doc.add(new NumericDocValuesField("id", 1));
+      w.addDocument(doc);
+      w.commit();
+
+      doc = new Document();
+      doc.add(new NumericDocValuesField("id", 2));
+      doc.add(new SortedNumericDocValuesField("foo", NumericUtils.doubleToSortableLong(7.0)));
+      doc.add(new SortedNumericDocValuesField("foo", NumericUtils.doubleToSortableLong(70.0)));
+      w.addDocument(doc);
+      w.forceMerge(1);
+
+      DirectoryReader r = DirectoryReader.open(w);
+      LeafReader leaf = getOnlyLeafReader(r);
+      assertEquals(3, leaf.maxDoc());
+      NumericDocValues values = leaf.getNumericDocValues("id");
+      if (reverse) {
+        assertEquals(0, values.nextDoc());
+        assertEquals(3, values.longValue());
+        assertEquals(1, values.nextDoc());
+        assertEquals(2, values.longValue());
+        assertEquals(2, values.nextDoc());
+        assertEquals(1, values.longValue());
+      } else {
+        assertEquals(0, values.nextDoc());
+        assertEquals(1, values.longValue());
+        assertEquals(1, values.nextDoc());
+        assertEquals(2, values.longValue());
+        assertEquals(2, values.nextDoc());
+        assertEquals(3, values.longValue());
+      }
+      r.close();
+      w.close();
+      dir.close();
+    }
   }
 
   public void testMissingDoubleLast() throws Exception {
-    Directory dir = newDirectory();
-    IndexWriterConfig iwc = new IndexWriterConfig(new MockAnalyzer(random()));
-    SortField sortField = new SortField("foo", SortField.Type.DOUBLE);
-    sortField.setMissingValue(Double.POSITIVE_INFINITY);
-    Sort indexSort = new Sort(sortField);
-    iwc.setIndexSort(indexSort);
-    IndexWriter w = new IndexWriter(dir, iwc);
-    Document doc = new Document();
-    doc.add(new DoubleDocValuesField("foo", 18.0));
-    w.addDocument(doc);
-    // so we get more than one segment, so that forceMerge actually does merge, since we only get a sorted segment by merging:
-    w.commit();
+    for (boolean reverse : new boolean[] {true, false}) {
+      Directory dir = newDirectory();
+      IndexWriterConfig iwc = new IndexWriterConfig(new MockAnalyzer(random()));
+      SortField sortField = new SortField("foo", SortField.Type.DOUBLE, reverse);
+      sortField.setMissingValue(Double.POSITIVE_INFINITY);
+      Sort indexSort = new Sort(sortField);
+      iwc.setIndexSort(indexSort);
+      IndexWriter w = new IndexWriter(dir, iwc);
+      Document doc = new Document();
+      doc.add(new DoubleDocValuesField("foo", 18.0));
+      w.addDocument(doc);
+      // so we get more than one segment, so that forceMerge actually does merge, since we only get a sorted segment by merging:
+      w.commit();
 
-    // missing
-    w.addDocument(new Document());
-    w.commit();
+      // missing
+      w.addDocument(new Document());
+      w.commit();
 
-    doc = new Document();
-    doc.add(new DoubleDocValuesField("foo", 7.0));
-    w.addDocument(doc);
-    w.forceMerge(1);
+      doc = new Document();
+      doc.add(new DoubleDocValuesField("foo", 7.0));
+      w.addDocument(doc);
+      w.forceMerge(1);
 
-    DirectoryReader r = DirectoryReader.open(w);
-    LeafReader leaf = getOnlyLeafReader(r);
-    assertEquals(3, leaf.maxDoc());
-    NumericDocValues values = leaf.getNumericDocValues("foo");
-    Bits docsWithField = leaf.getDocsWithField("foo");
-    assertEquals(7.0, Double.longBitsToDouble(values.get(0)), 0.0);
-    assertEquals(18.0, Double.longBitsToDouble(values.get(1)), 0.0);
-    assertEquals(0.0, Double.longBitsToDouble(values.get(2)), 0.0);
-    assertFalse(docsWithField.get(2));
-    r.close();
-    w.close();
-    dir.close();
+      DirectoryReader r = DirectoryReader.open(w);
+      LeafReader leaf = getOnlyLeafReader(r);
+      assertEquals(3, leaf.maxDoc());
+      NumericDocValues values = leaf.getNumericDocValues("foo");
+      if (reverse) {
+        assertEquals(1, values.nextDoc());
+        assertEquals(18.0, Double.longBitsToDouble(values.longValue()), 0.0);
+        assertEquals(2, values.nextDoc());
+        assertEquals(7.0, Double.longBitsToDouble(values.longValue()), 0.0);
+      } else {
+        assertEquals(0, values.nextDoc());
+        assertEquals(7.0, Double.longBitsToDouble(values.longValue()), 0.0);
+        assertEquals(1, values.nextDoc());
+        assertEquals(18.0, Double.longBitsToDouble(values.longValue()), 0.0);
+      }
+      assertEquals(NO_MORE_DOCS, values.nextDoc());
+      r.close();
+      w.close();
+      dir.close();
+    }
+  }
+
+  public void testMissingMultiValuedDoubleLast() throws Exception {
+    for (boolean reverse : new boolean[] {true, false}) {
+      Directory dir = newDirectory();
+      IndexWriterConfig iwc = new IndexWriterConfig(new MockAnalyzer(random()));
+      SortField sortField = new SortedNumericSortField("foo", SortField.Type.DOUBLE, reverse);
+      sortField.setMissingValue(Double.POSITIVE_INFINITY);
+      Sort indexSort = new Sort(sortField);
+      iwc.setIndexSort(indexSort);
+      IndexWriter w = new IndexWriter(dir, iwc);
+      Document doc = new Document();
+      doc.add(new NumericDocValuesField("id", 2));
+      doc.add(new SortedNumericDocValuesField("foo", NumericUtils.doubleToSortableLong(18.0)));
+      doc.add(new SortedNumericDocValuesField("foo", NumericUtils.doubleToSortableLong(8262.0)));
+      w.addDocument(doc);
+      // so we get more than one segment, so that forceMerge actually does merge, since we only get a sorted segment by merging:
+      w.commit();
+
+      // missing
+      doc = new Document();
+      doc.add(new NumericDocValuesField("id", 3));
+      w.addDocument(doc);
+      w.commit();
+
+      doc = new Document();
+      doc.add(new NumericDocValuesField("id", 1));
+      doc.add(new SortedNumericDocValuesField("foo", NumericUtils.doubleToSortableLong(7.0)));
+      doc.add(new SortedNumericDocValuesField("foo", NumericUtils.doubleToSortableLong(7.87)));
+      w.addDocument(doc);
+      w.forceMerge(1);
+
+      DirectoryReader r = DirectoryReader.open(w);
+      LeafReader leaf = getOnlyLeafReader(r);
+      assertEquals(3, leaf.maxDoc());
+      NumericDocValues values = leaf.getNumericDocValues("id");
+      if (reverse) {
+        assertEquals(0, values.nextDoc());
+        assertEquals(3, values.longValue());
+        assertEquals(1, values.nextDoc());
+        assertEquals(2, values.longValue());
+        assertEquals(2, values.nextDoc());
+        assertEquals(1, values.longValue());
+      } else {
+        assertEquals(0, values.nextDoc());
+        assertEquals(1, values.longValue());
+        assertEquals(1, values.nextDoc());
+        assertEquals(2, values.longValue());
+        assertEquals(2, values.nextDoc());
+        assertEquals(3, values.longValue());
+      }
+      r.close();
+      w.close();
+      dir.close();
+    }
   }
 
   public void testBasicFloat() throws Exception {
@@ -531,86 +1430,258 @@ public class TestIndexSorting extends LuceneTestCase {
     LeafReader leaf = getOnlyLeafReader(r);
     assertEquals(3, leaf.maxDoc());
     NumericDocValues values = leaf.getNumericDocValues("foo");
-    assertEquals(-1.0f, Float.intBitsToFloat((int) values.get(0)), 0.0f);
-    assertEquals(7.0f, Float.intBitsToFloat((int) values.get(1)), 0.0f);
-    assertEquals(18.0f, Float.intBitsToFloat((int) values.get(2)), 0.0f);
+    assertEquals(0, values.nextDoc());
+    assertEquals(-1.0f, Float.intBitsToFloat((int) values.longValue()), 0.0f);
+    assertEquals(1, values.nextDoc());
+    assertEquals(7.0f, Float.intBitsToFloat((int) values.longValue()), 0.0f);
+    assertEquals(2, values.nextDoc());
+    assertEquals(18.0f, Float.intBitsToFloat((int) values.longValue()), 0.0f);
+    r.close();
+    w.close();
+    dir.close();
+  }
+
+  public void testBasicMultiValuedFloat() throws Exception {
+    Directory dir = newDirectory();
+    IndexWriterConfig iwc = new IndexWriterConfig(new MockAnalyzer(random()));
+    Sort indexSort = new Sort(new SortedNumericSortField("foo", SortField.Type.FLOAT));
+    iwc.setIndexSort(indexSort);
+    IndexWriter w = new IndexWriter(dir, iwc);
+    Document doc = new Document();
+    doc.add(new NumericDocValuesField("id", 3));
+    doc.add(new SortedNumericDocValuesField("foo", NumericUtils.floatToSortableInt(18.0f)));
+    doc.add(new SortedNumericDocValuesField("foo", NumericUtils.floatToSortableInt(29.0f)));
+    w.addDocument(doc);
+    // so we get more than one segment, so that forceMerge actually does merge, since we only get a sorted segment by merging:
+    w.commit();
+
+    doc = new Document();
+    doc.add(new NumericDocValuesField("id", 1));
+    doc.add(new SortedNumericDocValuesField("foo", NumericUtils.floatToSortableInt(-1.0f)));
+    doc.add(new SortedNumericDocValuesField("foo", NumericUtils.floatToSortableInt(34.0f)));
+    w.addDocument(doc);
+    w.commit();
+
+    doc = new Document();
+    doc.add(new NumericDocValuesField("id", 2));
+    doc.add(new SortedNumericDocValuesField("foo", NumericUtils.floatToSortableInt(7.0f)));
+    w.addDocument(doc);
+    w.forceMerge(1);
+
+    DirectoryReader r = DirectoryReader.open(w);
+    LeafReader leaf = getOnlyLeafReader(r);
+    assertEquals(3, leaf.maxDoc());
+    NumericDocValues values = leaf.getNumericDocValues("id");
+    assertEquals(0, values.nextDoc());
+    assertEquals(1, values.longValue());
+    assertEquals(1, values.nextDoc());
+    assertEquals(2, values.longValue());
+    assertEquals(2, values.nextDoc());
+    assertEquals(3, values.longValue());
     r.close();
     w.close();
     dir.close();
   }
 
   public void testMissingFloatFirst() throws Exception {
-    Directory dir = newDirectory();
-    IndexWriterConfig iwc = new IndexWriterConfig(new MockAnalyzer(random()));
-    SortField sortField = new SortField("foo", SortField.Type.FLOAT);
-    sortField.setMissingValue(Float.NEGATIVE_INFINITY);
-    Sort indexSort = new Sort(sortField);
-    iwc.setIndexSort(indexSort);
-    IndexWriter w = new IndexWriter(dir, iwc);
-    Document doc = new Document();
-    doc.add(new FloatDocValuesField("foo", 18.0f));
-    w.addDocument(doc);
-    // so we get more than one segment, so that forceMerge actually does merge, since we only get a sorted segment by merging:
-    w.commit();
+    for (boolean reverse : new boolean[] {true, false}) {
+      Directory dir = newDirectory();
+      IndexWriterConfig iwc = new IndexWriterConfig(new MockAnalyzer(random()));
+      SortField sortField = new SortField("foo", SortField.Type.FLOAT, reverse);
+      sortField.setMissingValue(Float.NEGATIVE_INFINITY);
+      Sort indexSort = new Sort(sortField);
+      iwc.setIndexSort(indexSort);
+      IndexWriter w = new IndexWriter(dir, iwc);
+      Document doc = new Document();
+      doc.add(new FloatDocValuesField("foo", 18.0f));
+      w.addDocument(doc);
+      // so we get more than one segment, so that forceMerge actually does merge, since we only get a sorted segment by merging:
+      w.commit();
 
-    // missing
-    w.addDocument(new Document());
-    w.commit();
+      // missing
+      w.addDocument(new Document());
+      w.commit();
 
-    doc = new Document();
-    doc.add(new FloatDocValuesField("foo", 7.0f));
-    w.addDocument(doc);
-    w.forceMerge(1);
+      doc = new Document();
+      doc.add(new FloatDocValuesField("foo", 7.0f));
+      w.addDocument(doc);
+      w.forceMerge(1);
 
-    DirectoryReader r = DirectoryReader.open(w);
-    LeafReader leaf = getOnlyLeafReader(r);
-    assertEquals(3, leaf.maxDoc());
-    NumericDocValues values = leaf.getNumericDocValues("foo");
-    Bits docsWithField = leaf.getDocsWithField("foo");
-    assertEquals(0.0f, Float.intBitsToFloat((int) values.get(0)), 0.0f);
-    assertFalse(docsWithField.get(0));
-    assertEquals(7.0f, Float.intBitsToFloat((int) values.get(1)), 0.0f);
-    assertEquals(18.0f, Float.intBitsToFloat((int) values.get(2)), 0.0f);
-    r.close();
-    w.close();
-    dir.close();
+      DirectoryReader r = DirectoryReader.open(w);
+      LeafReader leaf = getOnlyLeafReader(r);
+      assertEquals(3, leaf.maxDoc());
+      NumericDocValues values = leaf.getNumericDocValues("foo");
+      if (reverse) {
+        assertEquals(0, values.nextDoc());
+        assertEquals(18.0f, Float.intBitsToFloat((int) values.longValue()), 0.0f);
+        assertEquals(1, values.nextDoc());
+        assertEquals(7.0f, Float.intBitsToFloat((int) values.longValue()), 0.0f);
+      } else {
+        assertEquals(1, values.nextDoc());
+        assertEquals(7.0f, Float.intBitsToFloat((int) values.longValue()), 0.0f);
+        assertEquals(2, values.nextDoc());
+        assertEquals(18.0f, Float.intBitsToFloat((int) values.longValue()), 0.0f);
+      }
+      r.close();
+      w.close();
+      dir.close();
+    }
+  }
+
+  public void testMissingMultiValuedFloatFirst() throws Exception {
+    for (boolean reverse : new boolean[] {true, false}) {
+      Directory dir = newDirectory();
+      IndexWriterConfig iwc = new IndexWriterConfig(new MockAnalyzer(random()));
+      SortField sortField = new SortedNumericSortField("foo", SortField.Type.FLOAT, reverse);
+      sortField.setMissingValue(Float.NEGATIVE_INFINITY);
+      Sort indexSort = new Sort(sortField);
+      iwc.setIndexSort(indexSort);
+      IndexWriter w = new IndexWriter(dir, iwc);
+      Document doc = new Document();
+      doc.add(new NumericDocValuesField("id", 3));
+      doc.add(new SortedNumericDocValuesField("foo", NumericUtils.floatToSortableInt(18.0f)));
+      doc.add(new SortedNumericDocValuesField("foo", NumericUtils.floatToSortableInt(726.0f)));
+      w.addDocument(doc);
+      // so we get more than one segment, so that forceMerge actually does merge, since we only get a sorted segment by merging:
+      w.commit();
+
+      // missing
+      doc = new Document();
+      doc.add(new NumericDocValuesField("id", 1));
+      w.addDocument(doc);
+      w.commit();
+
+      doc = new Document();
+      doc.add(new NumericDocValuesField("id", 2));
+      doc.add(new SortedNumericDocValuesField("foo", NumericUtils.floatToSortableInt(7.0f)));
+      doc.add(new SortedNumericDocValuesField("foo", NumericUtils.floatToSortableInt(18.0f)));
+      w.addDocument(doc);
+      w.forceMerge(1);
+
+      DirectoryReader r = DirectoryReader.open(w);
+      LeafReader leaf = getOnlyLeafReader(r);
+      assertEquals(3, leaf.maxDoc());
+      NumericDocValues values = leaf.getNumericDocValues("id");
+      if (reverse) {
+        assertEquals(0, values.nextDoc());
+        assertEquals(3, values.longValue());
+        assertEquals(1, values.nextDoc());
+        assertEquals(2, values.longValue());
+        assertEquals(2, values.nextDoc());
+        assertEquals(1, values.longValue());
+      } else {
+        assertEquals(0, values.nextDoc());
+        assertEquals(1, values.longValue());
+        assertEquals(1, values.nextDoc());
+        assertEquals(2, values.longValue());
+        assertEquals(2, values.nextDoc());
+        assertEquals(3, values.longValue());
+      }
+      r.close();
+      w.close();
+      dir.close();
+    }
   }
 
   public void testMissingFloatLast() throws Exception {
-    Directory dir = newDirectory();
-    IndexWriterConfig iwc = new IndexWriterConfig(new MockAnalyzer(random()));
-    SortField sortField = new SortField("foo", SortField.Type.FLOAT);
-    sortField.setMissingValue(Float.POSITIVE_INFINITY);
-    Sort indexSort = new Sort(sortField);
-    iwc.setIndexSort(indexSort);
-    IndexWriter w = new IndexWriter(dir, iwc);
-    Document doc = new Document();
-    doc.add(new FloatDocValuesField("foo", 18.0f));
-    w.addDocument(doc);
-    // so we get more than one segment, so that forceMerge actually does merge, since we only get a sorted segment by merging:
-    w.commit();
+    for (boolean reverse : new boolean[] {true, false}) {
+      Directory dir = newDirectory();
+      IndexWriterConfig iwc = new IndexWriterConfig(new MockAnalyzer(random()));
+      SortField sortField = new SortField("foo", SortField.Type.FLOAT, reverse);
+      sortField.setMissingValue(Float.POSITIVE_INFINITY);
+      Sort indexSort = new Sort(sortField);
+      iwc.setIndexSort(indexSort);
+      IndexWriter w = new IndexWriter(dir, iwc);
+      Document doc = new Document();
+      doc.add(new FloatDocValuesField("foo", 18.0f));
+      w.addDocument(doc);
+      // so we get more than one segment, so that forceMerge actually does merge, since we only get a sorted segment by merging:
+      w.commit();
 
-    // missing
-    w.addDocument(new Document());
-    w.commit();
+      // missing
+      w.addDocument(new Document());
+      w.commit();
 
-    doc = new Document();
-    doc.add(new FloatDocValuesField("foo", 7.0f));
-    w.addDocument(doc);
-    w.forceMerge(1);
+      doc = new Document();
+      doc.add(new FloatDocValuesField("foo", 7.0f));
+      w.addDocument(doc);
+      w.forceMerge(1);
 
-    DirectoryReader r = DirectoryReader.open(w);
-    LeafReader leaf = getOnlyLeafReader(r);
-    assertEquals(3, leaf.maxDoc());
-    NumericDocValues values = leaf.getNumericDocValues("foo");
-    Bits docsWithField = leaf.getDocsWithField("foo");
-    assertEquals(7.0f, Float.intBitsToFloat((int) values.get(0)), 0.0f);
-    assertEquals(18.0f, Float.intBitsToFloat((int) values.get(1)), 0.0f);
-    assertEquals(0.0f, Float.intBitsToFloat((int) values.get(2)), 0.0f);
-    assertFalse(docsWithField.get(2));
-    r.close();
-    w.close();
-    dir.close();
+      DirectoryReader r = DirectoryReader.open(w);
+      LeafReader leaf = getOnlyLeafReader(r);
+      assertEquals(3, leaf.maxDoc());
+      NumericDocValues values = leaf.getNumericDocValues("foo");
+      if (reverse) {
+        assertEquals(1, values.nextDoc());
+        assertEquals(18.0f, Float.intBitsToFloat((int) values.longValue()), 0.0f);
+        assertEquals(2, values.nextDoc());
+        assertEquals(7.0f, Float.intBitsToFloat((int) values.longValue()), 0.0f);
+      } else {
+        assertEquals(0, values.nextDoc());
+        assertEquals(7.0f, Float.intBitsToFloat((int) values.longValue()), 0.0f);
+        assertEquals(1, values.nextDoc());
+        assertEquals(18.0f, Float.intBitsToFloat((int) values.longValue()), 0.0f);
+      }
+      assertEquals(NO_MORE_DOCS, values.nextDoc());
+      r.close();
+      w.close();
+      dir.close();
+    }
+  }
+
+  public void testMissingMultiValuedFloatLast() throws Exception {
+    for (boolean reverse : new boolean[] {true, false}) {
+      Directory dir = newDirectory();
+      IndexWriterConfig iwc = new IndexWriterConfig(new MockAnalyzer(random()));
+      SortField sortField = new SortedNumericSortField("foo", SortField.Type.FLOAT, reverse);
+      sortField.setMissingValue(Float.POSITIVE_INFINITY);
+      Sort indexSort = new Sort(sortField);
+      iwc.setIndexSort(indexSort);
+      IndexWriter w = new IndexWriter(dir, iwc);
+      Document doc = new Document();
+      doc.add(new NumericDocValuesField("id", 2));
+      doc.add(new SortedNumericDocValuesField("foo", NumericUtils.floatToSortableInt(726.0f)));
+      doc.add(new SortedNumericDocValuesField("foo", NumericUtils.floatToSortableInt(18.0f)));
+      w.addDocument(doc);
+      // so we get more than one segment, so that forceMerge actually does merge, since we only get a sorted segment by merging:
+      w.commit();
+
+      // missing
+      doc = new Document();
+      doc.add(new NumericDocValuesField("id", 3));
+      w.addDocument(doc);
+      w.commit();
+
+      doc = new Document();
+      doc.add(new NumericDocValuesField("id", 1));
+      doc.add(new SortedNumericDocValuesField("foo", NumericUtils.floatToSortableInt(12.67f)));
+      doc.add(new SortedNumericDocValuesField("foo", NumericUtils.floatToSortableInt(7.0f)));
+      w.addDocument(doc);
+      w.forceMerge(1);
+
+      DirectoryReader r = DirectoryReader.open(w);
+      LeafReader leaf = getOnlyLeafReader(r);
+      assertEquals(3, leaf.maxDoc());
+      NumericDocValues values = leaf.getNumericDocValues("id");
+      if (reverse) {
+        assertEquals(0, values.nextDoc());
+        assertEquals(3, values.longValue());
+        assertEquals(1, values.nextDoc());
+        assertEquals(2, values.longValue());
+        assertEquals(2, values.nextDoc());
+        assertEquals(1, values.longValue());
+      } else {
+        assertEquals(0, values.nextDoc());
+        assertEquals(1, values.longValue());
+        assertEquals(1, values.nextDoc());
+        assertEquals(2, values.longValue());
+        assertEquals(2, values.nextDoc());
+        assertEquals(3, values.longValue());
+      }
+      r.close();
+      w.close();
+      dir.close();
+    }
   }
 
   public void testRandom1() throws IOException {
@@ -646,14 +1717,13 @@ public class TestIndexSorting extends LuceneTestCase {
       SegmentInfo info = leaf.getSegmentInfo().info;
       switch (info.getDiagnostics().get(IndexWriter.SOURCE)) {
         case IndexWriter.SOURCE_FLUSH:
-          assertNull(info.getIndexSort());
-          break;
         case IndexWriter.SOURCE_MERGE:
           assertEquals(indexSort, info.getIndexSort());
           final NumericDocValues values = leaf.getNumericDocValues("foo");
           long previous = Long.MIN_VALUE;
           for (int i = 0; i < leaf.maxDoc(); ++i) {
-            final long value = values.get(i);
+            assertEquals(i, values.nextDoc());
+            final long value = values.longValue();
             assertTrue(value >= previous);
             previous = value;
           }
@@ -669,10 +1739,64 @@ public class TestIndexSorting extends LuceneTestCase {
       TermQuery termQuery = new TermQuery(new Term("id", Integer.toString(i)));
       final TopDocs topDocs = searcher.search(termQuery, 1);
       if (deleted.get(i)) {
-        assertEquals(0, topDocs.totalHits);
+        assertEquals(0, topDocs.totalHits.value);
       } else {
-        assertEquals(1, topDocs.totalHits);
-        assertEquals(i, MultiDocValues.getNumericValues(reader, "id").get(topDocs.scoreDocs[0].doc));
+        assertEquals(1, topDocs.totalHits.value);
+        NumericDocValues values = MultiDocValues.getNumericValues(reader, "id");
+        assertEquals(topDocs.scoreDocs[0].doc, values.advance(topDocs.scoreDocs[0].doc));
+        assertEquals(i, values.longValue());
+        Document document = reader.document(topDocs.scoreDocs[0].doc);
+        assertEquals(Integer.toString(i), document.get("id"));
+      }
+    }
+
+    reader.close();
+    w.close();
+    dir.close();
+  }
+
+  public void testMultiValuedRandom1() throws IOException {
+    boolean withDeletes = random().nextBoolean();
+    Directory dir = newDirectory();
+    IndexWriterConfig iwc = new IndexWriterConfig(new MockAnalyzer(random()));
+    Sort indexSort = new Sort(new SortedNumericSortField("foo", SortField.Type.LONG));
+    iwc.setIndexSort(indexSort);
+    IndexWriter w = new IndexWriter(dir, iwc);
+    final int numDocs = atLeast(1000);
+    final FixedBitSet deleted = new FixedBitSet(numDocs);
+    for (int i = 0; i < numDocs; ++i) {
+      Document doc = new Document();
+      int num = random().nextInt(10);
+      for (int j = 0; j < num; j++) {
+        doc.add(new SortedNumericDocValuesField("foo", random().nextInt(2000)));
+      }
+      doc.add(new StringField("id", Integer.toString(i), Store.YES));
+      doc.add(new NumericDocValuesField("id", i));
+      w.addDocument(doc);
+      if (random().nextInt(5) == 0) {
+        w.getReader().close();
+      } else if (random().nextInt(30) == 0) {
+        w.forceMerge(2);
+      } else if (random().nextInt(4) == 0) {
+        final int id = TestUtil.nextInt(random(), 0, i);
+        deleted.set(id);
+        w.deleteDocuments(new Term("id", Integer.toString(id)));
+      }
+    }
+
+    DirectoryReader reader = w.getReader();
+    // Now check that the index is consistent
+    IndexSearcher searcher = newSearcher(reader);
+    for (int i = 0; i < numDocs; ++i) {
+      TermQuery termQuery = new TermQuery(new Term("id", Integer.toString(i)));
+      final TopDocs topDocs = searcher.search(termQuery, 1);
+      if (deleted.get(i)) {
+        assertEquals(0, topDocs.totalHits.value);
+      } else {
+        assertEquals(1, topDocs.totalHits.value);
+        NumericDocValues values = MultiDocValues.getNumericValues(reader, "id");
+        assertEquals(topDocs.scoreDocs[0].doc, values.advance(topDocs.scoreDocs[0].doc));
+        assertEquals(i, values.longValue());
         Document document = reader.document(topDocs.scoreDocs[0].doc);
         assertEquals(Integer.toString(i), document.get("id"));
       }
@@ -746,6 +1870,7 @@ public class TestIndexSorting extends LuceneTestCase {
 
     final int numDocs = atLeast(100);
     Thread[] threads = new Thread[2];
+
     final AtomicInteger updateCount = new AtomicInteger(atLeast(1000));
     final CountDownLatch latch = new CountDownLatch(1);
     for (int i = 0; i < threads.length; ++i) {
@@ -765,13 +1890,38 @@ public class TestIndexSorting extends LuceneTestCase {
     for (int i = 0; i < numDocs; ++i) {
       final TopDocs topDocs = searcher.search(new TermQuery(new Term("id", Integer.toString(i))), 1);
       if (values.containsKey(i) == false) {
-        assertEquals(0, topDocs.totalHits);
+        assertEquals(0, topDocs.totalHits.value);
       } else {
-        assertEquals(1, topDocs.totalHits);
-        assertEquals(values.get(i).longValue(), MultiDocValues.getNumericValues(reader, "foo").get(topDocs.scoreDocs[0].doc));
+        assertEquals(1, topDocs.totalHits.value);
+        NumericDocValues dvs = MultiDocValues.getNumericValues(reader, "foo");
+        int docID = topDocs.scoreDocs[0].doc;
+        assertEquals(docID, dvs.advance(docID));
+        assertEquals(values.get(i).longValue(), dvs.longValue());
       }
     }
     reader.close();
+    w.close();
+    dir.close();
+  }
+
+  // docvalues fields involved in the index sort cannot be updated
+  public void testBadDVUpdate() throws Exception {
+    Directory dir = newDirectory();
+    IndexWriterConfig iwc = new IndexWriterConfig(new MockAnalyzer(random()));
+    Sort indexSort = new Sort(new SortField("foo", SortField.Type.LONG));
+    iwc.setIndexSort(indexSort);
+    IndexWriter w = new IndexWriter(dir, iwc);
+    Document doc = new Document();
+    doc.add(new StringField("id", new BytesRef("0"), Store.NO));
+    doc.add(new NumericDocValuesField("foo", random().nextInt()));
+    w.addDocument(doc);
+    w.commit();
+    IllegalArgumentException exc = expectThrows(IllegalArgumentException.class,
+        () -> w.updateDocValues(new Term("id", "0"), new NumericDocValuesField("foo", -1)));
+    assertEquals(exc.getMessage(), "cannot update docvalues field involved in the index sort, field=foo, sort=<long: \"foo\">");
+    exc = expectThrows(IllegalArgumentException.class,
+        () -> w.updateNumericDocValue(new Term("id", "0"), "foo", -1));
+    assertEquals(exc.getMessage(), "cannot update docvalues field involved in the index sort, field=foo, sort=<long: \"foo\">");
     w.close();
     dir.close();
   }
@@ -803,7 +1953,7 @@ public class TestIndexSorting extends LuceneTestCase {
           final long value = random.nextInt(20);
 
           synchronized (values) {
-            w.updateDocValues(new Term("id", Integer.toString(id)), new NumericDocValuesField("foo", value));
+            w.updateDocValues(new Term("id", Integer.toString(id)), new NumericDocValuesField("bar", value));
             values.put(id, value);
           }
 
@@ -838,7 +1988,8 @@ public class TestIndexSorting extends LuceneTestCase {
     for (int i = 0; i < numDocs; ++i) {
       Document doc = new Document();
       doc.add(new StringField("id", Integer.toString(i), Store.NO));
-      doc.add(new NumericDocValuesField("foo", -1));
+      doc.add(new NumericDocValuesField("foo", random().nextInt()));
+      doc.add(new NumericDocValuesField("bar", -1));
       w.addDocument(doc);
       values.put(i, -1L);
     }
@@ -861,27 +2012,63 @@ public class TestIndexSorting extends LuceneTestCase {
     IndexSearcher searcher = newSearcher(reader);
     for (int i = 0; i < numDocs; ++i) {
       final TopDocs topDocs = searcher.search(new TermQuery(new Term("id", Integer.toString(i))), 1);
-      assertEquals(1, topDocs.totalHits);
-      assertEquals(values.get(i).longValue(), MultiDocValues.getNumericValues(reader, "foo").get(topDocs.scoreDocs[0].doc));
+      assertEquals(1, topDocs.totalHits.value);
+      NumericDocValues dvs = MultiDocValues.getNumericValues(reader, "bar");
+      int hitDoc = topDocs.scoreDocs[0].doc;
+      assertEquals(hitDoc, dvs.advance(hitDoc));
+      assertEquals(values.get(i).longValue(), dvs.longValue());
     }
     reader.close();
     w.close();
     dir.close();
   }
 
-  public void testAddIndexes(boolean withDeletes, boolean useReaders) throws Exception {
+  public void testBadAddIndexes() throws Exception {
     Directory dir = newDirectory();
     Sort indexSort = new Sort(new SortField("foo", SortField.Type.LONG));
     IndexWriterConfig iwc1 = newIndexWriterConfig();
-    if (random().nextBoolean()) {
-      iwc1.setIndexSort(indexSort);
+    iwc1.setIndexSort(indexSort);
+    IndexWriter w = new IndexWriter(dir, iwc1);
+    w.addDocument(new Document());
+    List<Sort> indexSorts = Arrays.asList(null, new Sort(new SortField("bar", SortField.Type.LONG)));
+    for (Sort sort : indexSorts) {
+      Directory dir2 = newDirectory();
+      IndexWriterConfig iwc2 = newIndexWriterConfig();
+      if (sort != null) {
+        iwc2.setIndexSort(sort);
+      }
+      IndexWriter w2 = new IndexWriter(dir2, iwc2);
+      w2.addDocument(new Document());
+      final IndexReader reader = w2.getReader();
+      w2.close();
+      IllegalArgumentException expected = expectThrows(IllegalArgumentException.class, () -> w.addIndexes(dir2));
+      assertThat(expected.getMessage(), containsString("cannot change index sort"));
+      CodecReader[] codecReaders = new CodecReader[reader.leaves().size()];
+      for (int i = 0; i < codecReaders.length; ++i) {
+        codecReaders[i] = (CodecReader) reader.leaves().get(i).reader();
+      }
+      expected = expectThrows(IllegalArgumentException.class, () -> w.addIndexes(codecReaders));
+      assertThat(expected.getMessage(), containsString("cannot change index sort"));
+
+      reader.close();
+      dir2.close();
     }
-    RandomIndexWriter w = new RandomIndexWriter(random(), dir);
+    w.close();
+    dir.close();
+  }
+
+  public void testAddIndexes(boolean withDeletes, boolean useReaders) throws Exception {
+    Directory dir = newDirectory();
+    IndexWriterConfig iwc1 = newIndexWriterConfig();
+    Sort indexSort = new Sort(new SortField("foo", SortField.Type.LONG), new SortField("bar", SortField.Type.LONG));
+    iwc1.setIndexSort(indexSort);
+    RandomIndexWriter w = new RandomIndexWriter(random(), dir, iwc1);
     final int numDocs = atLeast(100);
     for (int i = 0; i < numDocs; ++i) {
       Document doc = new Document();
       doc.add(new StringField("id", Integer.toString(i), Store.NO));
       doc.add(new NumericDocValuesField("foo", random().nextInt(20)));
+      doc.add(new NumericDocValuesField("bar", random().nextInt(20)));
       w.addDocument(doc);
     }
     if (withDeletes) {
@@ -897,7 +2084,12 @@ public class TestIndexSorting extends LuceneTestCase {
 
     Directory dir2 = newDirectory();
     IndexWriterConfig iwc = new IndexWriterConfig(new MockAnalyzer(random()));
-    iwc.setIndexSort(indexSort);
+    if (indexSort != null && random().nextBoolean()) {
+      // test congruent index sort
+      iwc.setIndexSort(new Sort(new SortField("foo", SortField.Type.LONG)));
+    } else {
+      iwc.setIndexSort(indexSort);
+    }
     IndexWriter w2 = new IndexWriter(dir2, iwc);
 
     if (useReaders) {
@@ -916,11 +2108,17 @@ public class TestIndexSorting extends LuceneTestCase {
       Query query = new TermQuery(new Term("id", Integer.toString(i)));
       final TopDocs topDocs = searcher.search(query, 1);
       final TopDocs topDocs2 = searcher2.search(query, 1);
-      assertEquals(topDocs.totalHits, topDocs2.totalHits);
-      if (topDocs.totalHits == 1) {
-        assertEquals(
-            MultiDocValues.getNumericValues(reader, "foo").get(topDocs.scoreDocs[0].doc),
-            MultiDocValues.getNumericValues(reader2, "foo").get(topDocs2.scoreDocs[0].doc));
+      assertEquals(topDocs.totalHits.value, topDocs2.totalHits.value);
+      if (topDocs.totalHits.value == 1) {
+        NumericDocValues dvs1 = MultiDocValues.getNumericValues(reader, "foo");
+        int hitDoc1 = topDocs.scoreDocs[0].doc;
+        assertEquals(hitDoc1, dvs1.advance(hitDoc1));
+        long value1 = dvs1.longValue();
+        NumericDocValues dvs2 = MultiDocValues.getNumericValues(reader2, "foo");
+        int hitDoc2 = topDocs2.scoreDocs[0].doc;
+        assertEquals(hitDoc2, dvs2.advance(hitDoc2));
+        long value2 = dvs2.longValue();
+        assertEquals(value1, value2);
       }
     }
 
@@ -975,54 +2173,49 @@ public class TestIndexSorting extends LuceneTestCase {
   }
 
   static final class NormsSimilarity extends Similarity {
-    
+
     private final Similarity in;
-    
+
     public NormsSimilarity(Similarity in) {
       this.in = in;
     }
-    
+
     @Override
     public long computeNorm(FieldInvertState state) {
       if (state.getName().equals("norms")) {
-        return Float.floatToIntBits(state.getBoost());
+        return state.getLength();
       } else {
         return in.computeNorm(state);
       }
     }
-    
+
     @Override
-    public SimWeight computeWeight(float boost, CollectionStatistics collectionStats, TermStatistics... termStats) {
-      return in.computeWeight(boost, collectionStats, termStats);
+    public SimScorer scorer(float boost, CollectionStatistics collectionStats, TermStatistics... termStats) {
+      return in.scorer(boost, collectionStats, termStats);
     }
-    
-    @Override
-    public SimScorer simScorer(SimWeight weight, LeafReaderContext context) throws IOException {
-      return in.simScorer(weight, context);
-    }
-    
+
   }
-  
+
   static final class PositionsTokenStream extends TokenStream {
-    
+
     private final CharTermAttribute term;
     private final PayloadAttribute payload;
     private final OffsetAttribute offset;
-    
+
     private int pos, off;
-    
+
     public PositionsTokenStream() {
       term = addAttribute(CharTermAttribute.class);
       payload = addAttribute(PayloadAttribute.class);
       offset = addAttribute(OffsetAttribute.class);
     }
-    
+
     @Override
     public boolean incrementToken() throws IOException {
       if (pos == 0) {
         return false;
       }
-      
+
       clearAttributes();
       term.append("#all#");
       payload.setPayload(new BytesRef(Integer.toString(pos)));
@@ -1031,7 +2224,7 @@ public class TestIndexSorting extends LuceneTestCase {
       ++off;
       return true;
     }
-    
+
     void setId(int id) {
       pos = id / 10 + 1;
       off = 0;
@@ -1067,15 +2260,15 @@ public class TestIndexSorting extends LuceneTestCase {
       positions.setId(id);
       doc.add(new Field("positions", positions, POSITIONS_TYPE));
       doc.add(new NumericDocValuesField("numeric", id));
-      TextField norms = new TextField("norms", Integer.toString(id), Store.NO);
-      norms.setBoost(Float.intBitsToFloat(id));
+      String value = IntStream.range(0, id).mapToObj(k -> Integer.toString(id)).collect(Collectors.joining(" "));
+      TextField norms = new TextField("norms", value, Store.NO);
       doc.add(norms);
       doc.add(new BinaryDocValuesField("binary", new BytesRef(Integer.toString(id))));
       doc.add(new SortedDocValuesField("sorted", new BytesRef(Integer.toString(id))));
-      doc.add(new SortedSetDocValuesField("sorted_set", new BytesRef(Integer.toString(id))));
-      doc.add(new SortedSetDocValuesField("sorted_set", new BytesRef(Integer.toString(id + 1))));
-      doc.add(new SortedNumericDocValuesField("sorted_numeric", id));
-      doc.add(new SortedNumericDocValuesField("sorted_numeric", id + 1));
+      doc.add(new SortedSetDocValuesField("multi_valued_string", new BytesRef(Integer.toString(id))));
+      doc.add(new SortedSetDocValuesField("multi_valued_string", new BytesRef(Integer.toString(id + 1))));
+      doc.add(new SortedNumericDocValuesField("multi_valued_numeric", id));
+      doc.add(new SortedNumericDocValuesField("multi_valued_numeric", id + 1));
       doc.add(new Field("term_vectors", Integer.toString(id), TERM_VECTORS_TYPE));
       byte[] bytes = new byte[4];
       NumericUtils.intToSortableBytes(id, bytes, 0);
@@ -1088,7 +2281,7 @@ public class TestIndexSorting extends LuceneTestCase {
 
     // We add document alread in ID order for the first writer:
     Directory dir1 = newFSDirectory(createTempDir());
-    
+
     Random random1 = new Random(seed);
     IndexWriterConfig iwc1 = newIndexWriterConfig(random1, a);
     iwc1.setSimilarity(new NormsSimilarity(iwc1.getSimilarity())); // for testing norms field
@@ -1105,7 +2298,7 @@ public class TestIndexSorting extends LuceneTestCase {
 
     // We shuffle documents, but set index sort, for the second writer:
     Directory dir2 = newFSDirectory(createTempDir());
-    
+
     Random random2 = new Random(seed);
     IndexWriterConfig iwc2 = newIndexWriterConfig(random2, a);
     iwc2.setSimilarity(new NormsSimilarity(iwc2.getSimilarity())); // for testing norms field
@@ -1138,7 +2331,7 @@ public class TestIndexSorting extends LuceneTestCase {
     if (VERBOSE) {
       System.out.println("TEST: now compare r1=" + r1 + " r2=" + r2);
     }
-    assertEquals(sort, getOnlyLeafReader(r2).getIndexSort());
+    assertEquals(sort, getOnlyLeafReader(r2).getMetaData().getSort());
     assertReaderEquals("left: sorted by hand; right: sorted by Lucene", r1, r2);
     IOUtils.close(w1, w2, r1, r2, dir1, dir2);
   }
@@ -1146,10 +2339,16 @@ public class TestIndexSorting extends LuceneTestCase {
   private static final class RandomDoc {
     public final int id;
     public final int intValue;
+    public final int[] intValues;
     public final long longValue;
+    public final long[] longValues;
     public final float floatValue;
+    public final float[] floatValues;
     public final double doubleValue;
+    public final double[] doubleValues;
     public final byte[] bytesValue;
+    public final byte[][] bytesValues;
+
 
     public RandomDoc(int id) {
       this.id = id;
@@ -1159,16 +2358,28 @@ public class TestIndexSorting extends LuceneTestCase {
       doubleValue = random().nextDouble();
       bytesValue = new byte[TestUtil.nextInt(random(), 1, 50)];
       random().nextBytes(bytesValue);
+
+      int numValues = random().nextInt(10);
+      intValues = new int[numValues];
+      longValues = new long[numValues];
+      floatValues = new float[numValues];
+      doubleValues = new double[numValues];
+      bytesValues = new byte[numValues][];
+      for (int i = 0; i < numValues; i++) {
+        intValues[i] = random().nextInt();
+        longValues[i] = random().nextLong();
+        floatValues[i] = random().nextFloat();
+        doubleValues[i] = random().nextDouble();
+        bytesValues[i] = new byte[TestUtil.nextInt(random(), 1, 50)];
+        random().nextBytes(bytesValue);
+      }
     }
   }
 
-  private static Sort randomSort() {
-    int numFields = TestUtil.nextInt(random(), 1, 3);
-    SortField[] sortFields = new SortField[numFields];
-    for(int i=0;i<numFields-1;i++) {
-      boolean reversed = random().nextBoolean();
-      SortField sortField;
-      switch(random().nextInt(5)) {
+  private static SortField randomIndexSortField() {
+    boolean reversed = random().nextBoolean();
+    SortField sortField;
+    switch(random().nextInt(10)) {
       case 0:
         sortField = new SortField("int", SortField.Type.INT, reversed);
         if (random().nextBoolean()) {
@@ -1176,32 +2387,73 @@ public class TestIndexSorting extends LuceneTestCase {
         }
         break;
       case 1:
+        sortField = new SortedNumericSortField("multi_valued_int", SortField.Type.INT, reversed);
+        if (random().nextBoolean()) {
+          sortField.setMissingValue(random().nextInt());
+        }
+        break;
+      case 2:
         sortField = new SortField("long", SortField.Type.LONG, reversed);
         if (random().nextBoolean()) {
           sortField.setMissingValue(random().nextLong());
         }
         break;
-      case 2:
+      case 3:
+        sortField = new SortedNumericSortField("multi_valued_long", SortField.Type.LONG, reversed);
+        if (random().nextBoolean()) {
+          sortField.setMissingValue(random().nextLong());
+        }
+        break;
+      case 4:
         sortField = new SortField("float", SortField.Type.FLOAT, reversed);
         if (random().nextBoolean()) {
           sortField.setMissingValue(random().nextFloat());
         }
         break;
-      case 3:
+      case 5:
+        sortField = new SortedNumericSortField("multi_valued_float", SortField.Type.FLOAT, reversed);
+        if (random().nextBoolean()) {
+          sortField.setMissingValue(random().nextFloat());
+        }
+        break;
+      case 6:
         sortField = new SortField("double", SortField.Type.DOUBLE, reversed);
         if (random().nextBoolean()) {
           sortField.setMissingValue(random().nextDouble());
         }
         break;
-      case 4:
+      case 7:
+        sortField = new SortedNumericSortField("multi_valued_double", SortField.Type.DOUBLE, reversed);
+        if (random().nextBoolean()) {
+          sortField.setMissingValue(random().nextDouble());
+        }
+        break;
+      case 8:
         sortField = new SortField("bytes", SortField.Type.STRING, reversed);
         if (random().nextBoolean()) {
           sortField.setMissingValue(SortField.STRING_LAST);
         }
         break;
+      case 9:
+        sortField = new SortedSetSortField("multi_valued_bytes", reversed);
+        if (random().nextBoolean()) {
+          sortField.setMissingValue(SortField.STRING_LAST);
+        }
+        break;
       default:
-        throw new AssertionError();
-      }
+        sortField = null;
+        fail();
+    }
+    return sortField;
+  }
+
+
+  private static Sort randomSort() {
+    // at least 2
+    int numFields = TestUtil.nextInt(random(), 2, 4);
+    SortField[] sortFields = new SortField[numFields];
+    for(int i=0;i<numFields-1;i++) {
+      SortField sortField = randomIndexSortField();
       sortFields[i] = sortField;
     }
 
@@ -1213,12 +2465,7 @@ public class TestIndexSorting extends LuceneTestCase {
 
   // pits index time sorting against query time sorting
   public void testRandom3() throws Exception {
-    int numDocs;
-    if (TEST_NIGHTLY) {
-      numDocs = atLeast(100000);
-    } else {
-      numDocs = atLeast(1000);
-    }
+    int numDocs = atLeast(1000);
     List<RandomDoc> docs = new ArrayList<>();
 
     Sort sort = randomSort();
@@ -1261,6 +2508,27 @@ public class TestIndexSorting extends LuceneTestCase {
       doc.add(new DoubleDocValuesField("double", docValues.doubleValue));
       doc.add(new FloatDocValuesField("float", docValues.floatValue));
       doc.add(new SortedDocValuesField("bytes", new BytesRef(docValues.bytesValue)));
+
+      for (int value : docValues.intValues) {
+        doc.add(new SortedNumericDocValuesField("multi_valued_int", value));
+      }
+
+      for (long value : docValues.longValues) {
+        doc.add(new SortedNumericDocValuesField("multi_valued_long", value));
+      }
+
+      for (float value : docValues.floatValues) {
+        doc.add(new SortedNumericDocValuesField("multi_valued_float", NumericUtils.floatToSortableInt(value)));
+      }
+
+      for (double value : docValues.doubleValues) {
+        doc.add(new SortedNumericDocValuesField("multi_valued_double", NumericUtils.doubleToSortableLong(value)));
+      }
+
+      for (byte[] value : docValues.bytesValues) {
+        doc.add(new SortedSetDocValuesField("multi_valued_bytes", new BytesRef(value)));
+      }
+
       w1.addDocument(doc);
       w2.addDocument(doc);
       if (random().nextDouble() < deleteChance) {
@@ -1299,34 +2567,32 @@ public class TestIndexSorting extends LuceneTestCase {
         System.out.println("TEST: iter=" + iter + " numHits=" + numHits);
       }
 
-      TopFieldCollector c1 = TopFieldCollector.create(sort, numHits, true, true, true);
+      TopFieldCollector c1 = TopFieldCollector.create(sort, numHits, Integer.MAX_VALUE);
       s1.search(new MatchAllDocsQuery(), c1);
       TopDocs hits1 = c1.topDocs();
 
-      TopFieldCollector c2 = TopFieldCollector.create(sort, numHits, true, true, true);
-      EarlyTerminatingSortingCollector c3 = new EarlyTerminatingSortingCollector(c2, sort, numHits);
-      s2.search(new MatchAllDocsQuery(), c3);
+      TopFieldCollector c2 = TopFieldCollector.create(sort, numHits, 1);
+      s2.search(new MatchAllDocsQuery(), c2);
 
       TopDocs hits2 = c2.topDocs();
 
       if (VERBOSE) {
-        System.out.println("  topDocs query-time sort: totalHits=" + hits1.totalHits);
+        System.out.println("  topDocs query-time sort: totalHits=" + hits1.totalHits.value);
         for(ScoreDoc scoreDoc : hits1.scoreDocs) {
           System.out.println("    " + scoreDoc.doc);
         }
-        System.out.println("  topDocs index-time sort: totalHits=" + hits2.totalHits);
+        System.out.println("  topDocs index-time sort: totalHits=" + hits2.totalHits.value);
         for(ScoreDoc scoreDoc : hits2.scoreDocs) {
           System.out.println("    " + scoreDoc.doc);
         }
       }
 
-      assertTrue(hits2.totalHits <= hits1.totalHits);
       assertEquals(hits2.scoreDocs.length, hits1.scoreDocs.length);
       for(int i=0;i<hits2.scoreDocs.length;i++) {
         ScoreDoc hit1 = hits1.scoreDocs[i];
         ScoreDoc hit2 = hits2.scoreDocs[i];
         assertEquals(r1.document(hit1.doc).get("id"), r2.document(hit2.doc).get("id"));
-        assertEquals(((FieldDoc) hit1).fields, ((FieldDoc) hit2).fields);
+        assertArrayEquals(((FieldDoc) hit1).fields, ((FieldDoc) hit2).fields);
       }
     }
 
@@ -1366,5 +2632,185 @@ public class TestIndexSorting extends LuceneTestCase {
       assertEquals(expectedID, r.document(docID).getField("id").numericValue().intValue());
     }
     IOUtils.close(r, w, dir);
+  }
+
+  public void testIndexSortWithSparseField() throws Exception {
+    Directory dir = newDirectory();
+    IndexWriterConfig iwc = new IndexWriterConfig(new MockAnalyzer(random()));
+    SortField sortField = new SortField("dense_int", SortField.Type.INT, true);
+    Sort indexSort = new Sort(sortField);
+    iwc.setIndexSort(indexSort);
+    IndexWriter w = new IndexWriter(dir, iwc);
+    Field textField = newTextField("sparse_text", "", Field.Store.NO);
+    for (int i = 0; i < 128; i++) {
+      Document doc = new Document();
+      doc.add(new NumericDocValuesField("dense_int", i));
+      if (i < 64) {
+        doc.add(new NumericDocValuesField("sparse_int", i));
+        doc.add(new BinaryDocValuesField("sparse_binary", new BytesRef(Integer.toString(i))));
+        textField.setStringValue("foo");
+        doc.add(textField);
+      }
+      w.addDocument(doc);
+    }
+    w.commit();
+    w.forceMerge(1);
+    DirectoryReader r = DirectoryReader.open(w);
+    assertEquals(1, r.leaves().size());
+    LeafReader leafReader = r.leaves().get(0).reader();
+
+    NumericDocValues denseValues = leafReader.getNumericDocValues("dense_int");
+    NumericDocValues sparseValues = leafReader.getNumericDocValues("sparse_int");
+    BinaryDocValues sparseBinaryValues = leafReader.getBinaryDocValues("sparse_binary");
+    NumericDocValues normsValues = leafReader.getNormValues("sparse_text");
+    for(int docID = 0; docID < 128; docID++) {
+      assertTrue(denseValues.advanceExact(docID));
+      assertEquals(127-docID, (int) denseValues.longValue());
+      if (docID >= 64) {
+        assertTrue(denseValues.advanceExact(docID));
+        assertTrue(sparseValues.advanceExact(docID));
+        assertTrue(sparseBinaryValues.advanceExact(docID));
+        assertTrue(normsValues.advanceExact(docID));
+        assertEquals(1, normsValues.longValue());
+        assertEquals(127-docID, (int) sparseValues.longValue());
+        assertEquals(new BytesRef(Integer.toString(127-docID)), sparseBinaryValues.binaryValue());
+      } else {
+        assertFalse(sparseBinaryValues.advanceExact(docID));
+        assertFalse(sparseValues.advanceExact(docID));
+        assertFalse(normsValues.advanceExact(docID));
+      }
+    }
+    IOUtils.close(r, w, dir);
+  }
+
+  public void testIndexSortOnSparseField() throws Exception {
+    Directory dir = newDirectory();
+    IndexWriterConfig iwc = new IndexWriterConfig(new MockAnalyzer(random()));
+    SortField sortField = new SortField("sparse", SortField.Type.INT, false);
+    sortField.setMissingValue(Integer.MIN_VALUE);
+    Sort indexSort = new Sort(sortField);
+    iwc.setIndexSort(indexSort);
+    IndexWriter w = new IndexWriter(dir, iwc);
+    for (int i = 0; i < 128; i++) {
+      Document doc = new Document();
+      if (i < 64) {
+        doc.add(new NumericDocValuesField("sparse", i));
+      }
+      w.addDocument(doc);
+    }
+    w.commit();
+    w.forceMerge(1);
+    DirectoryReader r = DirectoryReader.open(w);
+    assertEquals(1, r.leaves().size());
+    LeafReader leafReader = r.leaves().get(0).reader();
+    NumericDocValues sparseValues = leafReader.getNumericDocValues("sparse");
+    for(int docID = 0; docID < 128; docID++) {
+      if (docID >= 64) {
+        assertTrue(sparseValues.advanceExact(docID));
+        assertEquals(docID-64, (int) sparseValues.longValue());
+      } else {
+        assertFalse(sparseValues.advanceExact(docID));
+      }
+    }
+    IOUtils.close(r, w, dir);
+  }
+
+  public void testWrongSortFieldType() throws Exception {
+    Directory dir = newDirectory();
+    List<Field> dvs = new ArrayList<>();
+    dvs.add(new SortedDocValuesField("field", new BytesRef("")));
+    dvs.add(new SortedSetDocValuesField("field", new BytesRef("")));
+    dvs.add(new NumericDocValuesField("field", 42));
+    dvs.add(new SortedNumericDocValuesField("field", 42));
+
+    List<SortField> sortFields = new ArrayList<>();
+    sortFields.add(new SortField("field", SortField.Type.STRING));
+    sortFields.add(new SortedSetSortField("field", false));
+    sortFields.add(new SortField("field", SortField.Type.INT));
+    sortFields.add(new SortedNumericSortField("field", SortField.Type.INT));
+
+    for (int i = 0; i < sortFields.size(); i++) {
+      for (int j = 0; j < dvs.size(); j++) {
+        if (i == j) {
+          continue;
+        }
+        Sort indexSort = new Sort(sortFields.get(i));
+        IndexWriterConfig iwc = new IndexWriterConfig(new MockAnalyzer(random()));
+        iwc.setIndexSort(indexSort);
+        IndexWriter w = new IndexWriter(dir, iwc);
+        Document doc = new Document();
+        doc.add(dvs.get(j));
+        IllegalArgumentException exc = expectThrows(IllegalArgumentException.class, () -> w.addDocument(doc));
+        assertThat(exc.getMessage(), containsString("invalid doc value type"));
+        doc.clear();
+        doc.add(dvs.get(i));
+        w.addDocument(doc);
+        doc.add(dvs.get(j));
+        exc = expectThrows(IllegalArgumentException.class, () -> w.addDocument(doc));
+        assertThat(exc.getMessage(), containsString("cannot change DocValues type"));
+        w.rollback();
+        IOUtils.close(w);
+      }
+    }
+    IOUtils.close(dir);
+  }
+
+  public void testDeleteByTermOrQuery() throws Exception {
+    Directory dir = newDirectory();
+    IndexWriterConfig config = newIndexWriterConfig();
+    config.setIndexSort(new Sort(new SortField("numeric", SortField.Type.LONG)));
+    IndexWriter w = new IndexWriter(dir, config);
+    Document doc = new Document();
+    int numDocs = random().nextInt(2000) + 5;
+    long[] expectedValues = new long[numDocs];
+
+    for (int i = 0; i < numDocs; i++) {
+      expectedValues[i] = random().nextInt(Integer.MAX_VALUE);
+      doc.clear();
+      doc.add(new StringField("id", Integer.toString(i), Store.YES));
+      doc.add(new NumericDocValuesField("numeric", expectedValues[i]));
+      w.addDocument(doc);
+    }
+    int numDeleted = random().nextInt(numDocs) + 1;
+    for (int i = 0; i < numDeleted; i++) {
+      int idToDelete = random().nextInt(numDocs);
+      if (random().nextBoolean()) {
+        w.deleteDocuments(new TermQuery(new Term("id", Integer.toString(idToDelete))));
+      } else {
+        w.deleteDocuments(new Term("id", Integer.toString(idToDelete)));
+      }
+
+      expectedValues[idToDelete] = -random().nextInt(Integer.MAX_VALUE); // force a reordering
+      doc.clear();
+      doc.add(new StringField("id", Integer.toString(idToDelete), Store.YES));
+      doc.add(new NumericDocValuesField("numeric", expectedValues[idToDelete]));
+      w.addDocument(doc);
+    }
+
+    int docCount = 0;
+    try (IndexReader reader = DirectoryReader.open(w)) {
+      for (LeafReaderContext leafCtx : reader.leaves()) {
+        final Bits liveDocs = leafCtx.reader().getLiveDocs();
+        final NumericDocValues values = leafCtx.reader().getNumericDocValues("numeric");
+        if (values == null) {
+          continue;
+        }
+        for (int id = 0; id < leafCtx.reader().maxDoc(); id++) {
+          if (liveDocs != null && liveDocs.get(id) == false) {
+            continue;
+          }
+          if (values.advanceExact(id) == false) {
+            continue;
+          }
+          int globalId = Integer.parseInt(leafCtx.reader().document(id).getField("id").stringValue());
+          assertTrue(values.advanceExact(id));
+          assertEquals(expectedValues[globalId], values.longValue());
+          docCount ++;
+        }
+      }
+      assertEquals(docCount, numDocs);
+    }
+    w.close();
+    dir.close();
   }
 }

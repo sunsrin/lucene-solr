@@ -30,7 +30,7 @@ import org.apache.solr.client.solrj.request.QueryRequest;
 import org.apache.solr.common.params.SolrParams;
 import org.apache.solr.common.util.NamedList;
 import org.apache.solr.common.util.Utils;
-import org.apache.solr.request.SmileWriterTest;
+import org.apache.solr.response.SmileWriterTest;
 import org.apache.solr.search.json.TestJsonRequest;
 import org.junit.AfterClass;
 import org.junit.BeforeClass;
@@ -42,6 +42,7 @@ public class TestSmileRequest extends SolrTestCaseJ4 {
 
   @BeforeClass
   public static void beforeTests() throws Exception {
+    systemSetPropertySolrDisableShardsWhitelist("true");
     JSONTestUtil.failRepeatedKeys = true;
     initCore("solrconfig-tlog.xml", "schema_latest.xml");
   }
@@ -59,6 +60,7 @@ public class TestSmileRequest extends SolrTestCaseJ4 {
       servers.stop();
       servers = null;
     }
+    systemClearPropertySolrDisableShardsWhitelist();
   }
 
   @Test
@@ -81,7 +83,7 @@ public class TestSmileRequest extends SolrTestCaseJ4 {
       }
     };
     client.queryDefaults().set("shards", servers.getShards());
-    TestJsonRequest.doJsonRequest(client);
+    TestJsonRequest.doJsonRequest(client, true);
 
   }
 

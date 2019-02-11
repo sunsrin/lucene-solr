@@ -16,7 +16,6 @@
  */
 package org.apache.lucene.util;
 
-
 /*
  * Some of this code came from the excellent Unicode
  * conversion examples from:
@@ -111,7 +110,7 @@ public class TestUnicodeUtil extends LuceneTestCase {
     int num = atLeast(50000);
     for (int i = 0; i < num; i++) {
       final String s = TestUtil.randomUnicodeString(random());
-      final byte[] utf8 = new byte[s.length() * UnicodeUtil.MAX_UTF8_BYTES_PER_CHAR];
+      final byte[] utf8 = new byte[UnicodeUtil.maxUTF8Length(s.length())];
       final int utf8Len = UnicodeUtil.UTF16toUTF8(s, 0, s.length(), utf8);
       assertEquals(s.codePointCount(0, s.length()),
                    UnicodeUtil.codePointCount(new BytesRef(utf8, 0, utf8Len)));
@@ -137,13 +136,13 @@ public class TestUnicodeUtil extends LuceneTestCase {
     int num = atLeast(50000);
     for (int i = 0; i < num; i++) {
       final String s = TestUtil.randomUnicodeString(random());
-      final byte[] utf8 = new byte[s.length() * UnicodeUtil.MAX_UTF8_BYTES_PER_CHAR];
+      final byte[] utf8 = new byte[UnicodeUtil.maxUTF8Length(s.length())];
       final int utf8Len = UnicodeUtil.UTF16toUTF8(s, 0, s.length(), utf8);
       utf32 = ArrayUtil.grow(utf32, utf8Len);
       final int utf32Len = UnicodeUtil.UTF8toUTF32(new BytesRef(utf8, 0, utf8Len), utf32);
       
       int[] codePoints = s.codePoints().toArray();
-      if (!ArrayUtil.equals(codePoints, 0, utf32, 0, codePoints.length)) {
+      if (!FutureArrays.equals(codePoints, 0, codePoints.length, utf32, 0, codePoints.length)) {
         System.out.println("FAILED");
         for(int j=0;j<s.length();j++) {
           System.out.println("  char[" + j + "]=" + Integer.toHexString(s.charAt(j)));
@@ -208,7 +207,7 @@ public class TestUnicodeUtil extends LuceneTestCase {
     int num = atLeast(5000);
     for (int i = 0; i < num; i++) {
       String unicode = TestUtil.randomUnicodeString(random());
-      byte[] utf8 = new byte[unicode.length() * UnicodeUtil.MAX_UTF8_BYTES_PER_CHAR];
+      byte[] utf8 = new byte[UnicodeUtil.maxUTF8Length(unicode.length())];
       int len = UnicodeUtil.UTF16toUTF8(unicode, 0, unicode.length(), utf8);
       assertEquals(len, UnicodeUtil.calcUTF16toUTF8Length(unicode, 0, unicode.length()));
     }

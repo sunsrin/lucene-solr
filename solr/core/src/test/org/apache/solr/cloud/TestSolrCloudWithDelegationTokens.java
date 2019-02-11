@@ -16,11 +16,13 @@
  */
 package org.apache.solr.cloud;
 
-import junit.framework.Assert;
 import org.apache.hadoop.util.Time;
 import org.apache.lucene.util.LuceneTestCase;
 import org.apache.solr.SolrTestCaseJ4;
+import org.apache.solr.client.solrj.impl.CloudSolrClient;
 import org.apache.solr.client.solrj.impl.HttpSolrClient;
+import org.apache.solr.client.solrj.impl.LBHttpSolrClient;
+import org.apache.solr.client.solrj.SolrClient;
 import org.apache.solr.client.solrj.SolrRequest;
 import org.apache.solr.client.solrj.embedded.JettySolrRunner;
 import org.apache.solr.client.solrj.request.CollectionAdminRequest;
@@ -40,7 +42,9 @@ import org.junit.BeforeClass;
 import org.junit.Test;
 
 import java.lang.invoke.MethodHandles;
+import java.util.Collections;
 import java.util.HashSet;
+import java.util.Optional;
 import java.util.Set;
 
 import org.slf4j.Logger;
@@ -171,30 +175,39 @@ public class TestSolrCloudWithDelegationTokens extends SolrTestCaseJ4 {
 
   private int getStatusCode(String token, final String user, final String op, HttpSolrClient client)
   throws Exception {
-    HttpSolrClient delegationTokenServer =
-        new HttpSolrClient.Builder(client.getBaseURL().toString())
-            .withDelegationToken(token)
+    SolrClient delegationTokenClient;
+    if (random().nextBoolean()) delegationTokenClient = new HttpSolrClient.Builder(client.getBaseURL().toString())
+        .withKerberosDelegationToken(token)
+        .withResponseParser(client.getParser())
+        .build();
+    else delegationTokenClient = new CloudSolrClient.Builder(Collections.singletonList(miniCluster.getZkServer().getZkAddress()), Optional.empty())
+        .withLBHttpSolrClientBuilder(new LBHttpSolrClient.Builder()
+            .withSocketTimeout(30000).withConnectionTimeout(15000)
             .withResponseParser(client.getParser())
-            .build();
+            .withHttpSolrClientBuilder(
+                new HttpSolrClient.Builder()
+                    .withKerberosDelegationToken(token)
+            ))
+        .build();
     try {
       ModifiableSolrParams p = new ModifiableSolrParams();
       if (user != null) p.set(USER_PARAM, user);
       if (op != null) p.set("op", op);
       SolrRequest req = getAdminRequest(p);
       if (user != null || op != null) {
-        Set<String> queryParams = new HashSet<String>();
+        Set<String> queryParams = new HashSet<>();
         if (user != null) queryParams.add(USER_PARAM);
         if (op != null) queryParams.add("op");
         req.setQueryParams(queryParams);
       }
       try {
-        delegationTokenServer.request(req, null, null);
+        delegationTokenClient.request(req, null);
         return HttpStatus.SC_OK;
       } catch (HttpSolrClient.RemoteSolrException re) {
         return re.code();
       }
     } finally {
-      delegationTokenServer.close();
+      delegationTokenClient.close();
     }
   }
 
@@ -315,6 +328,7 @@ public class TestSolrCloudWithDelegationTokens extends SolrTestCaseJ4 {
   }
 
   @Test
+  //commented 20-Sep-2018 @BadApple(bugUrl="https://issues.apache.org/jira/browse/SOLR-12028") // added 23-Aug-2018
   public void testDelegationTokenRenew() throws Exception {
     // test with specifying renewer
     verifyDelegationTokenRenew("bar", "bar");
@@ -370,33 +384,31 @@ public class TestSolrCloudWithDelegationTokens extends SolrTestCaseJ4 {
     SolrRequest request = getAdminRequest(new ModifiableSolrParams());
 
     // test without token
-    HttpSolrClient ss =
-        new HttpSolrClient.Builder(solrClientPrimary.getBaseURL().toString())
-            .withResponseParser(solrClientPrimary.getParser())
-            .build();
+    final HttpSolrClient ssWoToken =
+      new HttpSolrClient.Builder(solrClientPrimary.getBaseURL().toString())
+          .withResponseParser(solrClientPrimary.getParser())
+          .build();
     try {
-      doSolrRequest(ss, request, ErrorCode.UNAUTHORIZED.code);
+      doSolrRequest(ssWoToken, request, ErrorCode.UNAUTHORIZED.code);
     } finally {
-      ss.close();
+      ssWoToken.close();
     }
 
-    ss = new HttpSolrClient.Builder(solrClientPrimary.getBaseURL().toString())
-        .withDelegationToken(token)
+    final HttpSolrClient ssWToken = new HttpSolrClient.Builder(solrClientPrimary.getBaseURL().toString())
+        .withKerberosDelegationToken(token)
         .withResponseParser(solrClientPrimary.getParser())
         .build();
     try {
       // test with token via property
-      doSolrRequest(ss, request, HttpStatus.SC_OK);
+      doSolrRequest(ssWToken, request, HttpStatus.SC_OK);
 
       // test with param -- should throw an exception
       ModifiableSolrParams tokenParam = new ModifiableSolrParams();
       tokenParam.set("delegation", "invalidToken");
-      try {
-        doSolrRequest(ss, getAdminRequest(tokenParam), ErrorCode.FORBIDDEN.code);
-        Assert.fail("Expected exception");
-      } catch (IllegalArgumentException ex) {}
+      expectThrows(IllegalArgumentException.class,
+          () -> doSolrRequest(ssWToken, getAdminRequest(tokenParam), ErrorCode.FORBIDDEN.code));
     } finally {
-      ss.close();
+      ssWToken.close();
     }
   }
 }

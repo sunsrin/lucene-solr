@@ -64,7 +64,7 @@ public class Field implements IndexableField {
   /**
    * Field's type
    */
-  protected final FieldType type;
+  protected final IndexableFieldType type;
 
   /**
    * Field's name
@@ -81,12 +81,6 @@ public class Field implements IndexableField {
   protected TokenStream tokenStream;
 
   /**
-   * Field's boost
-   * @see #boost()
-   */
-  protected float boost = 1.0f;
-
-  /**
    * Expert: creates a field with no initial value.
    * Intended only for custom Field subclasses.
    * @param name field name
@@ -94,7 +88,7 @@ public class Field implements IndexableField {
    * @throws IllegalArgumentException if either the name or type
    *         is null.
    */
-  protected Field(String name, FieldType type) {
+  protected Field(String name, IndexableFieldType type) {
     if (name == null) {
       throw new IllegalArgumentException("name must not be null");
     }
@@ -115,7 +109,7 @@ public class Field implements IndexableField {
    *         if tokenized() is false.
    * @throws NullPointerException if the reader is null
    */
-  public Field(String name, Reader reader, FieldType type) {
+  public Field(String name, Reader reader, IndexableFieldType type) {
     if (name == null) {
       throw new IllegalArgumentException("name must not be null");
     }
@@ -147,7 +141,7 @@ public class Field implements IndexableField {
    *         if tokenized() is false, or if indexed() is false.
    * @throws NullPointerException if the tokenStream is null
    */
-  public Field(String name, TokenStream tokenStream, FieldType type) {
+  public Field(String name, TokenStream tokenStream, IndexableFieldType type) {
     if (name == null) {
       throw new IllegalArgumentException("name must not be null");
     }
@@ -175,11 +169,10 @@ public class Field implements IndexableField {
    * @param name field name
    * @param value byte array pointing to binary content (not copied)
    * @param type field type
-   * @throws IllegalArgumentException if the field name is null,
-   *         or the field's type is indexed()
-   * @throws NullPointerException if the type is null
+   * @throws IllegalArgumentException if the field name, value or type
+   *         is null, or the field's type is indexed().
    */
-  public Field(String name, byte[] value, FieldType type) {
+  public Field(String name, byte[] value, IndexableFieldType type) {
     this(name, value, 0, value.length, type);
   }
 
@@ -193,12 +186,11 @@ public class Field implements IndexableField {
    * @param offset starting position of the byte array
    * @param length valid length of the byte array
    * @param type field type
-   * @throws IllegalArgumentException if the field name is null,
-   *         or the field's type is indexed()
-   * @throws NullPointerException if the type is null
+   * @throws IllegalArgumentException if the field name, value or type
+   *         is null, or the field's type is indexed().
    */
-  public Field(String name, byte[] value, int offset, int length, FieldType type) {
-    this(name, new BytesRef(value, offset, length), type);
+  public Field(String name, byte[] value, int offset, int length, IndexableFieldType type) {
+    this(name, value != null ? new BytesRef(value, offset, length) : null, type);
   }
 
   /**
@@ -209,20 +201,22 @@ public class Field implements IndexableField {
    * @param name field name
    * @param bytes BytesRef pointing to binary content (not copied)
    * @param type field type
-   * @throws IllegalArgumentException if the field name is null,
-   *         or the field's type is indexed()
-   * @throws NullPointerException if the type is null
+   * @throws IllegalArgumentException if the field name, bytes or type
+   *         is null, or the field's type is indexed().
    */
-  public Field(String name, BytesRef bytes, FieldType type) {
+  public Field(String name, BytesRef bytes, IndexableFieldType type) {
     if (name == null) {
       throw new IllegalArgumentException("name must not be null");
     }
     if (bytes == null) {
       throw new IllegalArgumentException("bytes must not be null");
     }
+    if (type == null) {
+      throw new IllegalArgumentException("type must not be null");
+    }
+    this.name = name;
     this.fieldsData = bytes;
     this.type = type;
-    this.name = name;
   }
 
   // TODO: allow direct construction of int, long, float, double value too..?
@@ -232,25 +226,27 @@ public class Field implements IndexableField {
    * @param name field name
    * @param value string value
    * @param type field type
-   * @throws IllegalArgumentException if either the name or value
+   * @throws IllegalArgumentException if either the name, value or type
    *         is null, or if the field's type is neither indexed() nor stored(), 
    *         or if indexed() is false but storeTermVectors() is true.
-   * @throws NullPointerException if the type is null
    */
-  public Field(String name, String value, FieldType type) {
+  public Field(String name, CharSequence value, IndexableFieldType type) {
     if (name == null) {
       throw new IllegalArgumentException("name must not be null");
     }
     if (value == null) {
       throw new IllegalArgumentException("value must not be null");
     }
+    if (type == null) {
+      throw new IllegalArgumentException("type must not be null");
+    }
     if (!type.stored() && type.indexOptions() == IndexOptions.NONE) {
       throw new IllegalArgumentException("it doesn't make sense to have a field that "
         + "is neither indexed nor stored");
     }
-    this.type = type;
     this.name = name;
     this.fieldsData = value;
+    this.type = type;
   }
 
   /**
@@ -260,13 +256,19 @@ public class Field implements IndexableField {
    */
   @Override
   public String stringValue() {
-    if (fieldsData instanceof String || fieldsData instanceof Number) {
+    if (fieldsData instanceof CharSequence || fieldsData instanceof Number) {
       return fieldsData.toString();
     } else {
       return null;
     }
   }
-  
+
+  @Override
+  public CharSequence getCharSequenceValue() {
+    return fieldsData instanceof CharSequence ?
+        (CharSequence) fieldsData : stringValue();
+  }
+
   /**
    * The value of the field as a Reader, or null. If null, the String value or
    * binary value is used. Exactly one of stringValue(), readerValue(), and
@@ -432,32 +434,6 @@ public class Field implements IndexableField {
   public String name() {
     return name;
   }
-  
-  /** 
-   * {@inheritDoc}
-   * <p>
-   * The default value is <code>1.0f</code> (no boost).
-   * @see #setBoost(float)
-   */
-  @Override
-  public float boost() {
-    return boost;
-  }
-
-  /** 
-   * Sets the boost factor on this field.
-   * @throws IllegalArgumentException if this field is not indexed, 
-   *         or if it omits norms. 
-   * @see #boost()
-   */
-  public void setBoost(float boost) {
-    if (boost != 1.0f) {
-      if (type.indexOptions() == IndexOptions.NONE || type.omitNorms()) {
-        throw new IllegalArgumentException("You cannot set an index-time boost on an unindexed field, or one that omits norms");
-      }
-    }
-    this.boost = boost;
-  }
 
   @Override
   public Number numericValue() {
@@ -476,7 +452,7 @@ public class Field implements IndexableField {
       return null;
     }
   }
-  
+
   /** Prints a Field for human consumption. */
   @Override
   public String toString() {
@@ -496,7 +472,7 @@ public class Field implements IndexableField {
   
   /** Returns the {@link FieldType} for this field. */
   @Override
-  public FieldType fieldType() {
+  public IndexableFieldType fieldType() {
     return type;
   }
 

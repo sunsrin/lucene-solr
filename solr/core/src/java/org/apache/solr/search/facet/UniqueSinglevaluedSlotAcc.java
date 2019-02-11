@@ -18,26 +18,32 @@
 package org.apache.solr.search.facet;
 
 import java.io.IOException;
+import java.util.function.IntFunction;
 
 import org.apache.lucene.index.LeafReaderContext;
 import org.apache.lucene.index.MultiDocValues;
+import org.apache.lucene.index.OrdinalMap;
 import org.apache.lucene.index.SortedDocValues;
 import org.apache.lucene.util.BytesRef;
 import org.apache.lucene.util.FixedBitSet;
 import org.apache.lucene.util.LongValues;
-import org.apache.solr.search.SolrIndexSearcher;
+import org.apache.solr.schema.SchemaField;
 
 class UniqueSinglevaluedSlotAcc extends UniqueSlotAcc {
-  final SortedDocValues topLevel;
-  final SortedDocValues[] subDvs;
-  final MultiDocValues.OrdinalMap ordMap;
+  SortedDocValues topLevel;
+  SortedDocValues[] subDvs;
+  OrdinalMap ordMap;
   LongValues toGlobal;
   SortedDocValues subDv;
 
-  public UniqueSinglevaluedSlotAcc(FacetContext fcontext, String field, int numSlots, HLLAgg.HLLFactory factory) throws IOException {
+  public UniqueSinglevaluedSlotAcc(FacetContext fcontext, SchemaField field, int numSlots, HLLAgg.HLLFactory factory) throws IOException {
     super(fcontext, field, numSlots, factory);
-    SolrIndexSearcher searcher = fcontext.qcontext.searcher();
-    topLevel = FieldUtil.getSortedDocValues(fcontext.qcontext, searcher.getSchema().getField(field), null);
+  }
+
+  @Override
+  public void resetIterators() throws IOException {
+    super.resetIterators();
+    topLevel = FieldUtil.getSortedDocValues(fcontext.qcontext, field, null);
     nTerms = topLevel.getValueCount();
     if (topLevel instanceof MultiDocValues.MultiSortedDocValues) {
       ordMap = ((MultiDocValues.MultiSortedDocValues)topLevel).mapping;
@@ -49,7 +55,7 @@ class UniqueSinglevaluedSlotAcc extends UniqueSlotAcc {
   }
 
   @Override
-  protected BytesRef lookupOrd(int ord) {
+  protected BytesRef lookupOrd(int ord) throws IOException {
     return topLevel.lookupOrd(ord);
   }
 
@@ -59,18 +65,25 @@ class UniqueSinglevaluedSlotAcc extends UniqueSlotAcc {
     if (subDvs != null) {
       subDv = subDvs[readerContext.ord];
       toGlobal = ordMap.getGlobalOrds(readerContext.ord);
+      assert toGlobal != null;
     } else {
       assert readerContext.ord==0 || topLevel.getValueCount() == 0;
       subDv = topLevel;
     }
+    assert subDv.docID() == -1; // make sure we haven't used this iterator before
   }
 
   @Override
-  public void collect(int doc, int slotNum) {
-    int segOrd = subDv.getOrd(doc);
-    if (segOrd < 0) return;  // -1 means missing
-    int ord = toGlobal==null ? segOrd : (int)toGlobal.get(segOrd);
+  public void collect(int doc, int slotNum, IntFunction<SlotContext> slotContext) throws IOException {
+    if (subDv.advanceExact(doc)) {
+      int segOrd = subDv.ordValue();
+      int ord = toGlobal==null ? segOrd : (int)toGlobal.get(segOrd);
 
+      collectOrdToSlot(slotNum, ord);
+    }
+  }
+
+  protected void collectOrdToSlot(int slotNum, int ord) {
     FixedBitSet bits = arr[slotNum];
     if (bits == null) {
       bits = new FixedBitSet(nTerms);

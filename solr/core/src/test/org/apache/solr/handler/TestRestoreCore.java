@@ -57,7 +57,7 @@ public class TestRestoreCore extends SolrJettyTestBase {
   private static String context = "/solr";
   private static long docsSeed; // see indexDocs()
 
-  private static JettySolrRunner createJetty(TestReplicationHandler.SolrInstance instance) throws Exception {
+  private static JettySolrRunner createAndStartJetty(TestReplicationHandler.SolrInstance instance) throws Exception {
     FileUtils.copyFile(new File(SolrTestCaseJ4.TEST_HOME(), "solr.xml"), new File(instance.getHomeDir(), "solr.xml"));
     Properties nodeProperties = new Properties();
     nodeProperties.setProperty("solr.data.dir", instance.getDataDir());
@@ -71,9 +71,7 @@ public class TestRestoreCore extends SolrJettyTestBase {
     try {
       // setup the client...
       final String baseUrl = buildUrl(port, context);
-      HttpSolrClient client = getHttpSolrClient(baseUrl);
-      client.setConnectionTimeout(15000);
-      client.setSoTimeout(60000);
+      HttpSolrClient client = getHttpSolrClient(baseUrl, 15000, 60000);
       return client;
     }
     catch (Exception ex) {
@@ -91,7 +89,7 @@ public class TestRestoreCore extends SolrJettyTestBase {
     master.setUp();
     master.copyConfigFile(CONF_DIR + configFile, "solrconfig.xml");
 
-    masterJetty = createJetty(master);
+    masterJetty = createAndStartJetty(master);
     masterClient = createNewSolrClient(masterJetty.getLocalPort());
     docsSeed = random().nextLong();
   }
@@ -224,7 +222,7 @@ public class TestRestoreCore extends SolrJettyTestBase {
 
   public static boolean fetchRestoreStatus (String baseUrl, String coreName) throws IOException {
     String masterUrl = baseUrl + "/" + coreName +
-        ReplicationHandler.PATH + "?command=" + ReplicationHandler.CMD_RESTORE_STATUS;
+        ReplicationHandler.PATH + "?wt=xml&command=" + ReplicationHandler.CMD_RESTORE_STATUS;
     final Pattern pException = Pattern.compile("<str name=\"exception\">(.*?)</str>");
 
     InputStream stream = null;

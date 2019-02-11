@@ -25,7 +25,6 @@ import org.apache.lucene.index.LeafReaderContext;
 import org.apache.lucene.index.SortedSetDocValues;
 import org.apache.lucene.index.Terms;
 import org.apache.lucene.index.TermsEnum;
-import org.apache.lucene.util.Bits;
 import org.apache.lucene.util.LongBitSet;
 
 /**
@@ -73,31 +72,36 @@ public final class DocValuesRewriteMethod extends MultiTermQuery.RewriteMethod {
     public final String getField() { return query.getField(); }
     
     @Override
-    public Weight createWeight(IndexSearcher searcher, boolean needsScores, float boost) throws IOException {
-      return new RandomAccessWeight(this, boost) {
+    public Weight createWeight(IndexSearcher searcher, ScoreMode scoreMode, float boost) throws IOException {
+      return new ConstantScoreWeight(this, boost) {
+
         @Override
-        protected Bits getMatchingDocs(LeafReaderContext context) throws IOException {
+        public Matches matches(LeafReaderContext context, int doc) throws IOException {
           final SortedSetDocValues fcsi = DocValues.getSortedSet(context.reader(), query.field);
-          TermsEnum termsEnum = query.getTermsEnum(new Terms() {
-            
+          return MatchesUtils.forField(query.field, () -> DisjunctionMatchesIterator.fromTermsEnum(context, doc, query, query.field, getTermsEnum(fcsi)));
+        }
+
+        private TermsEnum getTermsEnum(SortedSetDocValues fcsi) throws IOException {
+          return query.getTermsEnum(new Terms() {
+
             @Override
-            public TermsEnum iterator() {
+            public TermsEnum iterator() throws IOException {
               return fcsi.termsEnum();
             }
 
             @Override
             public long getSumTotalTermFreq() {
-              return -1;
+              throw new UnsupportedOperationException();
             }
 
             @Override
             public long getSumDocFreq() {
-              return -1;
+              throw new UnsupportedOperationException();
             }
 
             @Override
             public int getDocCount() {
-              return -1;
+              throw new UnsupportedOperationException();
             }
 
             @Override
@@ -119,13 +123,18 @@ public final class DocValuesRewriteMethod extends MultiTermQuery.RewriteMethod {
             public boolean hasPositions() {
               return false;
             }
-            
+
             @Override
             public boolean hasPayloads() {
               return false;
             }
           });
-          
+        }
+
+        @Override
+        public Scorer scorer(LeafReaderContext context) throws IOException {
+          final SortedSetDocValues fcsi = DocValues.getSortedSet(context.reader(), query.field);
+          TermsEnum termsEnum = getTermsEnum(fcsi);
           assert termsEnum != null;
           if (termsEnum.next() == null) {
             // no matching terms
@@ -141,11 +150,10 @@ public final class DocValuesRewriteMethod extends MultiTermQuery.RewriteMethod {
             }
           } while (termsEnum.next() != null);
 
-          return new Bits() {
+          return new ConstantScoreScorer(this, score(), scoreMode, new TwoPhaseIterator(fcsi) {
 
             @Override
-            public boolean get(int doc) {
-              fcsi.setDocument(doc);
+            public boolean matches() throws IOException {
               for (long ord = fcsi.nextOrd(); ord != SortedSetDocValues.NO_MORE_ORDS; ord = fcsi.nextOrd()) {
                 if (termSet.get(ord)) {
                   return true;
@@ -155,16 +163,21 @@ public final class DocValuesRewriteMethod extends MultiTermQuery.RewriteMethod {
             }
 
             @Override
-            public int length() {
-              return context.reader().maxDoc();
+            public float matchCost() {
+              return 3; // lookup in a bitset
             }
-
-          };
+          });
         }
+
+        @Override
+        public boolean isCacheable(LeafReaderContext ctx) {
+          return DocValues.isCacheable(ctx, query.field);
+        }
+
       };
     }
   }
-  
+
   @Override
   public boolean equals(Object other) {
     return other != null &&

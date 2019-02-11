@@ -24,18 +24,19 @@ import java.util.List;
 import org.apache.lucene.codecs.BlockTermState;
 import org.apache.lucene.codecs.CodecUtil;
 import org.apache.lucene.codecs.FieldsConsumer;
+import org.apache.lucene.codecs.NormsProducer;
 import org.apache.lucene.codecs.PostingsWriterBase;
-import org.apache.lucene.index.IndexOptions;
 import org.apache.lucene.index.FieldInfo;
 import org.apache.lucene.index.FieldInfos;
 import org.apache.lucene.index.Fields;
 import org.apache.lucene.index.IndexFileNames;
+import org.apache.lucene.index.IndexOptions;
 import org.apache.lucene.index.SegmentWriteState;
 import org.apache.lucene.index.Terms;
 import org.apache.lucene.index.TermsEnum;
+import org.apache.lucene.store.ByteBuffersDataOutput;
 import org.apache.lucene.store.DataOutput;
 import org.apache.lucene.store.IndexOutput;
-import org.apache.lucene.store.RAMOutputStream;
 import org.apache.lucene.util.BytesRef;
 import org.apache.lucene.util.FixedBitSet;
 import org.apache.lucene.util.IOUtils;
@@ -158,7 +159,7 @@ public class FSTTermsWriter extends FieldsConsumer {
   }
 
   @Override
-  public void write(Fields fields) throws IOException {
+  public void write(Fields fields, NormsProducer norms) throws IOException {
     for(String field : fields) {
       Terms terms = fields.terms(field);
       if (terms == null) {
@@ -179,7 +180,7 @@ public class FSTTermsWriter extends FieldsConsumer {
           break;
         }
             
-        BlockTermState termState = postingsWriter.writeTerm(term, termsEnum, docsSeen);
+        BlockTermState termState = postingsWriter.writeTerm(term, termsEnum, docsSeen, norms);
         if (termState != null) {
           termsWriter.finishTerm(term, termState);
           sumTotalTermFreq += termState.totalTermFreq;
@@ -253,7 +254,7 @@ public class FSTTermsWriter extends FieldsConsumer {
     private long numTerms;
 
     private final IntsRefBuilder scratchTerm = new IntsRefBuilder();
-    private final RAMOutputStream metaWriter = new RAMOutputStream();
+    private final ByteBuffersDataOutput metaWriter = ByteBuffersDataOutput.newResettableInstance();
 
     TermsWriter(FieldInfo fieldInfo) {
       this.numTerms = 0;
@@ -271,10 +272,8 @@ public class FSTTermsWriter extends FieldsConsumer {
       meta.docFreq = state.docFreq;
       meta.totalTermFreq = state.totalTermFreq;
       postingsWriter.encodeTerm(meta.longs, metaWriter, fieldInfo, state, true);
-      final int bytesSize = (int)metaWriter.getFilePointer();
-      if (bytesSize > 0) {
-        meta.bytes = new byte[bytesSize];
-        metaWriter.writeTo(meta.bytes, 0);
+      if (metaWriter.size() > 0) {
+        meta.bytes = metaWriter.toArrayCopy();
         metaWriter.reset();
       }
       builder.add(Util.toIntsRef(text, scratchTerm), meta);

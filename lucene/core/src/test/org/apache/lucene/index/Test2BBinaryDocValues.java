@@ -33,7 +33,7 @@ import org.apache.lucene.util.LuceneTestCase;
 import org.apache.lucene.util.TimeUnits;
 import com.carrotsearch.randomizedtesting.annotations.TimeoutSuite;
 
-@SuppressCodecs({"SimpleText", "Memory", "Direct"})
+@SuppressCodecs({"SimpleText", "Direct"})
 @TimeoutSuite(millis = 80 * TimeUnits.HOUR) // effectively no limit
 // The six hour time was achieved on a Linux 3.13 system with these specs:
 // 3-core AMD at 2.5Ghz, 12 GB RAM, 5GB test heap, 2 test JVMs, 2TB SATA.
@@ -91,7 +91,8 @@ public class Test2BBinaryDocValues extends LuceneTestCase {
         bytes[1] = (byte)(expectedValue >> 16);
         bytes[2] = (byte)(expectedValue >> 8);
         bytes[3] = (byte) expectedValue;
-        final BytesRef term = dv.get(i);
+        assertEquals(i, dv.nextDoc());
+        final BytesRef term = dv.binaryValue();
         assertEquals(data, term);
         expectedValue++;
       }
@@ -148,7 +149,8 @@ public class Test2BBinaryDocValues extends LuceneTestCase {
       LeafReader reader = context.reader();
       BinaryDocValues dv = reader.getBinaryDocValues("dv");
       for (int i = 0; i < reader.maxDoc(); i++) {
-        final BytesRef term = dv.get(i);
+        assertEquals(i, dv.nextDoc());
+        final BytesRef term = dv.binaryValue();
         input.reset(term.bytes, term.offset, term.length);
         assertEquals(expectedValue % 65535, input.readVInt());
         assertTrue(input.eof());

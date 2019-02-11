@@ -79,7 +79,7 @@ public class SurroundQParserPlugin extends QParserPlugin {
         try {
           this.maxBasicQueries = Integer.parseInt(mbqparam);
         } catch (Exception e) {
-          LOG.warn("Couldn't parse maxBasicQueries value " + mbqparam +", using default of 1000");
+          log.warn("Couldn't parse maxBasicQueries value " + mbqparam +", using default of 1000");
           this.maxBasicQueries = DEFMAXBASICQUERIES;
         }
       }
@@ -95,7 +95,7 @@ public class SurroundQParserPlugin extends QParserPlugin {
       // processing based on example in LIA Ch 9
 
       BasicQueryFactory bqFactory = new BasicQueryFactory(this.maxBasicQueries);
-      String defaultField = QueryParsing.getDefaultField(getReq().getSchema(),getParam(CommonParams.DF));
+      String defaultField = getParam(CommonParams.DF);
       Query lquery = sq.makeLuceneQueryField(defaultField, bqFactory);
       return lquery;
     }

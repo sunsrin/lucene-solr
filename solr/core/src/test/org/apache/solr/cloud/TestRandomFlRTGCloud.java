@@ -16,9 +16,8 @@
  */
 package org.apache.solr.cloud;
 
-import java.lang.invoke.MethodHandles;
-
 import java.io.IOException;
+import java.lang.invoke.MethodHandles;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayList;
@@ -33,36 +32,29 @@ import java.util.Random;
 import java.util.Set;
 import java.util.TreeSet;
 
+import org.apache.commons.io.FilenameUtils;
+import org.apache.lucene.util.TestUtil;
 import org.apache.solr.client.solrj.SolrClient;
 import org.apache.solr.client.solrj.SolrServerException;
 import org.apache.solr.client.solrj.embedded.JettySolrRunner;
-import org.apache.solr.client.solrj.impl.HttpSolrClient;
 import org.apache.solr.client.solrj.impl.CloudSolrClient;
+import org.apache.solr.client.solrj.impl.HttpSolrClient;
+import org.apache.solr.client.solrj.request.CollectionAdminRequest;
 import org.apache.solr.client.solrj.response.QueryResponse;
-
-import org.apache.solr.cloud.SolrCloudTestCase;
-
 import org.apache.solr.common.SolrDocument;
 import org.apache.solr.common.SolrDocumentList;
 import org.apache.solr.common.SolrInputDocument;
 import org.apache.solr.common.params.ModifiableSolrParams;
 import org.apache.solr.common.params.SolrParams;
 import org.apache.solr.common.util.NamedList;
-import org.apache.solr.response.transform.DocTransformer; // jdoc
-import org.apache.solr.response.transform.RawValueTransformerFactory; // jdoc
+import org.apache.solr.response.transform.DocTransformer;
+import org.apache.solr.response.transform.RawValueTransformerFactory;
 import org.apache.solr.response.transform.TransformerFactory;
-
-
 import org.apache.solr.util.RandomizeSSL;
-import org.apache.lucene.util.TestUtil;
-
-import org.apache.commons.io.FilenameUtils;
-
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-
 import org.junit.AfterClass;
 import org.junit.BeforeClass;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /** @see TestCloudPseudoReturnFields */
 @RandomizeSSL(clientAuth=0.0,reason="client auth uses too much RAM")
@@ -74,10 +66,13 @@ public class TestRandomFlRTGCloud extends SolrCloudTestCase {
   /** A basic client for operations at the cloud level, default collection will be set */
   private static CloudSolrClient CLOUD_CLIENT;
   /** One client per node */
-  private static ArrayList<HttpSolrClient> CLIENTS = new ArrayList<>(5);
+  private static List<HttpSolrClient> CLIENTS = Collections.synchronizedList(new ArrayList<>(5));
 
   /** Always included in fl so we can vet what doc we're looking at */
   private static final FlValidator ID_VALIDATOR = new SimpleFieldValueValidator("id");
+
+  /** Since nested documents are not tested, when _root_ is declared in schema, it is always the same as id */
+  private static final FlValidator ROOT_VALIDATOR = new RenameFieldValueValidator("id" , "_root_");
   
   /** 
    * Types of things we will randomly ask for in fl param, and validate in response docs.
@@ -125,7 +120,7 @@ public class TestRandomFlRTGCloud extends SolrCloudTestCase {
       new NotIncludedValidator("score","score_alias:score")));
   
   @BeforeClass
-  private static void createMiniSolrCloudCluster() throws Exception {
+  public static void createMiniSolrCloudCluster() throws Exception {
 
     // 50% runs use single node/shard a FL_VALIDATORS with all validators known to work on single node
     // 50% runs use multi node/shard with FL_VALIDATORS only containing stuff that works in cloud
@@ -142,18 +137,16 @@ public class TestRandomFlRTGCloud extends SolrCloudTestCase {
     final Path configDir = Paths.get(TEST_HOME(), "collection1", "conf");
     
     configureCluster(numNodes).addConfig(configName, configDir).configure();
-    
-    Map<String, String> collectionProperties = new HashMap<>();
-    collectionProperties.put("config", "solrconfig-tlog.xml");
-    collectionProperties.put("schema", "schema-psuedo-fields.xml");
 
-    assertNotNull(cluster.createCollection(COLLECTION_NAME, numShards, repFactor,
-                                           configName, null, null, collectionProperties));
-    
     CLOUD_CLIENT = cluster.getSolrClient();
     CLOUD_CLIENT.setDefaultCollection(COLLECTION_NAME);
 
-    waitForRecoveriesToFinish(CLOUD_CLIENT);
+    CollectionAdminRequest.createCollection(COLLECTION_NAME, configName, numShards, repFactor)
+        .withProperty("config", "solrconfig-tlog.xml")
+        .withProperty("schema", "schema-psuedo-fields.xml")
+        .process(CLOUD_CLIENT);
+
+    cluster.waitForActiveCollection(COLLECTION_NAME, numShards, repFactor * numShards); 
 
     for (JettySolrRunner jetty : cluster.getJettySolrRunners()) {
       CLIENTS.add(getHttpSolrClient(jetty.getBaseUrl() + "/" + COLLECTION_NAME + "/"));
@@ -170,7 +163,7 @@ public class TestRandomFlRTGCloud extends SolrCloudTestCase {
   }
 
   /** 
-   * Tests thta all TransformerFactories that are implicitly provided by Solr are tested in this class
+   * Tests that all TransformerFactories that are implicitly provided by Solr are tested in this class
    *
    * @see FlValidator#getDefaultTransformerFactoryName
    * @see #FL_VALIDATORS
@@ -362,6 +355,7 @@ public class TestRandomFlRTGCloud extends SolrCloudTestCase {
     
     final Set<FlValidator> validators = new LinkedHashSet<>();
     validators.add(ID_VALIDATOR); // always include id so we can be confident which doc we're looking at
+    validators.add(ROOT_VALIDATOR); // always added in a nested schema, with the same value as id
     addRandomFlValidators(random(), validators);
     FlValidator.addParams(validators, params);
 
@@ -389,12 +383,12 @@ public class TestRandomFlRTGCloud extends SolrCloudTestCase {
         params.add("ids", idsToRequest.get(0));
       } else {
         if (random().nextBoolean()) {
-          // each id in it's own param
+          // each id in its own param
           for (String id : idsToRequest) {
             params.add("id",id);
           }
         } else {
-          // add one or more comma seperated ids params
+          // add one or more comma separated ids params
           params.add(buildCommaSepParams(random(), "ids", idsToRequest));
         }
       }
@@ -951,7 +945,7 @@ public class TestRandomFlRTGCloud extends SolrCloudTestCase {
   }
 
   /**
-   * Given an ordered list of values to include in a (key) param, randomly groups them (ie: comma seperated) 
+   * Given an ordered list of values to include in a (key) param, randomly groups them (ie: comma separated) 
    * into actual param key=values which are returned as a new SolrParams instance
    */
   private static SolrParams buildCommaSepParams(final Random rand, final String key, Collection<String> values) {

@@ -19,6 +19,7 @@ package org.apache.lucene.search;
 import java.io.IOException;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Set;
 
 import org.apache.lucene.document.Document;
 import org.apache.lucene.document.Field;
@@ -27,7 +28,6 @@ import org.apache.lucene.document.SortedDocValuesField;
 import org.apache.lucene.document.StoredField;
 import org.apache.lucene.index.BinaryDocValues;
 import org.apache.lucene.index.DocValues;
-import org.apache.lucene.index.FieldInvertState;
 import org.apache.lucene.index.IndexReader;
 import org.apache.lucene.index.LeafReaderContext;
 import org.apache.lucene.index.MultiDocValues;
@@ -36,7 +36,6 @@ import org.apache.lucene.index.RandomIndexWriter;
 import org.apache.lucene.index.SortedDocValues;
 import org.apache.lucene.index.Term;
 import org.apache.lucene.search.BooleanClause.Occur;
-import org.apache.lucene.search.similarities.Similarity;
 import org.apache.lucene.store.Directory;
 import org.apache.lucene.util.BytesRef;
 import org.apache.lucene.util.LuceneTestCase;
@@ -127,11 +126,37 @@ public class TestDiversifiedTopDocsCollector extends LuceneTestCase {
     protected NumericDocValues getKeys(final LeafReaderContext context) {
 
       return new NumericDocValues() {
+
         @Override
-        public long get(int docID) {
+        public int docID() {
+          return sdv.docID() - context.docBase;
+        }
+
+        @Override
+        public int nextDoc() throws IOException {
+          return sdv.nextDoc() - context.docBase;
+        }
+
+        @Override
+        public int advance(int target) throws IOException {
+          return sdv.advance(target + context.docBase);
+        }
+
+        @Override
+        public boolean advanceExact(int target) throws IOException {
+          return sdv.advanceExact(target + context.docBase);
+        }
+
+        @Override
+        public long cost() {
+          return 0;
+        }
+        
+        @Override
+        public long longValue() throws IOException {
           // Keys are always expressed as a long so we obtain the
           // ordinal for our String-based artist name here
-          return sdv.getOrd(context.docBase + docID);
+          return sdv.ordValue();
         }
       };
     }
@@ -139,8 +164,7 @@ public class TestDiversifiedTopDocsCollector extends LuceneTestCase {
 
   // Alternative, faster implementation for converting String keys to longs
   // but with the potential for hash collisions
-  private static final class HashedDocValuesDiversifiedCollector extends
-      DiversifiedTopDocsCollector {
+  private static final class HashedDocValuesDiversifiedCollector extends DiversifiedTopDocsCollector {
 
     private final String field;
     private BinaryDocValues vals;
@@ -155,8 +179,28 @@ public class TestDiversifiedTopDocsCollector extends LuceneTestCase {
     protected NumericDocValues getKeys(LeafReaderContext context) {
       return new NumericDocValues() {
         @Override
-        public long get(int docID) {
-          return vals == null ? -1 : vals.get(docID).hashCode();
+        public int docID() {
+          return vals.docID();
+        }
+        @Override
+        public int nextDoc() throws IOException {
+          return vals.nextDoc();
+        }
+        @Override
+        public int advance(int target) throws IOException {
+          return vals.advance(target);
+        }
+        @Override
+        public boolean advanceExact(int target) throws IOException {
+          return vals.advanceExact(target);
+        }
+        @Override
+        public long cost() {
+          return vals.cost();
+        }
+        @Override
+        public long longValue() throws IOException {
+          return vals == null ? -1 : vals.binaryValue().hashCode();
         }
       };
     }
@@ -277,7 +321,7 @@ public class TestDiversifiedTopDocsCollector extends LuceneTestCase {
 
   private DiversifiedTopDocsCollector doDiversifiedSearch(int numResults,
       int maxResultsPerArtist) throws IOException {
-    // Alternate between implementations used for key lookups 
+    // Alternate between implementations used for key lookups
     if (random().nextBoolean()) {
       // Faster key lookup but with potential for collisions on larger datasets
       return doFuzzyDiversifiedSearch(numResults, maxResultsPerArtist);
@@ -313,7 +357,7 @@ public class TestDiversifiedTopDocsCollector extends LuceneTestCase {
         Occur.SHOULD));
     testQuery.add(new BooleanClause(new TermQuery(new Term("year", "1969")),
         Occur.SHOULD));
-    return testQuery.build();
+    return new DocValueScoreQuery(testQuery.build(), "weeksAtNumberOne");
   }
 
   @Override
@@ -347,7 +391,7 @@ public class TestDiversifiedTopDocsCollector extends LuceneTestCase {
     for (int i = 0; i < hitsOfThe60s.length; i++) {
       String cols[] = hitsOfThe60s[i].split("\t");
       Record record = new Record(String.valueOf(i), cols[0], cols[1], cols[2],
-          Float.valueOf(cols[3]));
+          Float.parseFloat(cols[3]));
       parsedRecords.put(record.id, record);
       idField.setStringValue(record.id);
       yearField.setStringValue(record.year);
@@ -366,10 +410,6 @@ public class TestDiversifiedTopDocsCollector extends LuceneTestCase {
     writer.close();
     searcher = newSearcher(reader);
     artistDocValues = MultiDocValues.getSortedValues(reader, "artist");
-
-    // All searches sort by song popularity 
-    final Similarity base = searcher.getSimilarity(true);
-    searcher.setSimilarity(new DocValueSimilarity(base, "weeksAtNumberOne"));
   }
 
   @Override
@@ -397,60 +437,105 @@ public class TestDiversifiedTopDocsCollector extends LuceneTestCase {
     return result;
   }
 
-  /**
-   * Similarity that wraps another similarity and replaces the final score
-   * according to whats in a docvalues field.
-   * 
-   * @lucene.experimental
-   */
-  static class DocValueSimilarity extends Similarity {
-    private final Similarity sim;
-    private final String scoreValueField;
+  private static final class DocValueScoreQuery extends Query {
 
-    public DocValueSimilarity(Similarity sim, String scoreValueField) {
-      this.sim = sim;
-      this.scoreValueField = scoreValueField;
+    private final Query query;
+    private final String scoreField;
+    
+    DocValueScoreQuery(Query query, String scoreField) {
+      this.query = query;
+      this.scoreField = scoreField;
+    }
+    
+    @Override
+    public String toString(String field) {
+      return "DocValueScore(" + query.toString(field) + ")";
     }
 
     @Override
-    public long computeNorm(FieldInvertState state) {
-      return sim.computeNorm(state);
+    public boolean equals(Object obj) {
+      if (obj instanceof DocValueScoreQuery == false) {
+        return false;
+      }
+      return query.equals(((DocValueScoreQuery) obj).query);
     }
 
     @Override
-    public SimWeight computeWeight(float boost,
-        CollectionStatistics collectionStats, TermStatistics... termStats) {
-      return sim.computeWeight(boost, collectionStats, termStats);
+    public int hashCode() {
+      int h = getClass().hashCode();
+      h = 31 * h + query.hashCode();
+      h = 31 * h + scoreField.hashCode();
+      return h;
     }
 
     @Override
-    public SimScorer simScorer(SimWeight stats, LeafReaderContext context)
-        throws IOException {
-      final SimScorer sub = sim.simScorer(stats, context);
-      final NumericDocValues values = DocValues.getNumeric(context.reader(),
-          scoreValueField);
+    public Query rewrite(IndexReader reader) throws IOException {
+      Query rewritten = query.rewrite(reader);
+      if (rewritten != query) {
+        return new DocValueScoreQuery(rewritten, scoreField);
+      }
+      return super.rewrite(reader);
+    }
 
-      return new SimScorer() {
+    @Override
+    public Weight createWeight(IndexSearcher searcher, ScoreMode scoreMode, float boost) throws IOException {
+      if (scoreMode.needsScores() == false) {
+        return query.createWeight(searcher, scoreMode, boost);
+      }
+      Weight inner = query.createWeight(searcher, ScoreMode.COMPLETE_NO_SCORES, boost);
+      return new Weight(this) {
+        
         @Override
-        public float score(int doc, float freq) {
-          return Float.intBitsToFloat((int) values.get(doc));
+        public boolean isCacheable(LeafReaderContext ctx) {
+          return true;
         }
-
+        
         @Override
-        public float computeSlopFactor(int distance) {
-          return sub.computeSlopFactor(distance);
+        public Scorer scorer(LeafReaderContext context) throws IOException {
+          Scorer innerScorer = inner.scorer(context);
+          NumericDocValues scoreFactors = DocValues.getNumeric(context.reader(), scoreField);
+          return new Scorer(this) {
+            
+            @Override
+            public float score() throws IOException {
+              if (scoreFactors.advanceExact(docID())) {
+                return Float.intBitsToFloat((int) scoreFactors.longValue());
+              }
+              return 0;
+            }
+            
+            @Override
+            public float getMaxScore(int upTo) throws IOException {
+              return Float.POSITIVE_INFINITY;
+            }
+            
+            @Override
+            public DocIdSetIterator iterator() {
+              return innerScorer.iterator();
+            }
+            
+            @Override
+            public int docID() {
+              return innerScorer.docID();
+            }
+          };
         }
-
+        
         @Override
-        public float computePayloadFactor(int doc, int start, int end,
-            BytesRef payload) {
-          return sub.computePayloadFactor(doc, start, end, payload);
+        public void extractTerms(Set<Term> terms) {
+          inner.extractTerms(terms);
         }
-
+        
         @Override
-        public Explanation explain(int doc, Explanation freq) {
-          return Explanation.match(Float.intBitsToFloat((int) values.get(doc)),
-              "indexDocValue(" + scoreValueField + ")");
+        public Explanation explain(LeafReaderContext context, int doc) throws IOException {
+          Scorer s = scorer(context);
+          if (s != null) {
+            int advanced = s.iterator().advance(doc);
+            if (doc != advanced) {
+              return Explanation.match(s.score(), "match");
+            }
+          }
+          return Explanation.noMatch("no match");
         }
       };
     }

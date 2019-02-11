@@ -16,6 +16,7 @@
  */
 package org.apache.lucene.util.bkd;
 
+import org.apache.lucene.index.CheckIndex;
 import org.apache.lucene.store.Directory;
 import org.apache.lucene.store.FSDirectory;
 import org.apache.lucene.store.IOContext;
@@ -40,8 +41,8 @@ public class Test2BBKDPoints extends LuceneTestCase {
 
     final int numDocs = (Integer.MAX_VALUE / 26) + 100;
 
-    BKDWriter w = new BKDWriter(numDocs, dir, "_0", 1, Long.BYTES,
-                                BKDWriter.DEFAULT_MAX_POINTS_IN_LEAF_NODE, BKDWriter.DEFAULT_MAX_MB_SORT_IN_HEAP, 26L * numDocs, false);
+    BKDWriter w = new BKDWriter(numDocs, dir, "_0", 1, 1, Long.BYTES,
+                                BKDWriter.DEFAULT_MAX_POINTS_IN_LEAF_NODE, BKDWriter.DEFAULT_MAX_MB_SORT_IN_HEAP, 26L * numDocs);
     int counter = 0;
     byte[] packedBytes = new byte[Long.BYTES];
     for (int docID = 0; docID < numDocs; docID++) {
@@ -64,7 +65,10 @@ public class Test2BBKDPoints extends LuceneTestCase {
     IndexInput in = dir.openInput("1d.bkd", IOContext.DEFAULT);
     in.seek(indexFP);
     BKDReader r = new BKDReader(in);
-    r.verify(numDocs);
+    CheckIndex.VerifyPointsVisitor visitor = new CheckIndex.VerifyPointsVisitor("1d", numDocs, r);
+    r.intersect(visitor);
+    assertEquals(r.size(), visitor.getPointCountSeen());
+    assertEquals(r.getDocCount(), visitor.getDocCountSeen());
     in.close();
     dir.close();
   }
@@ -74,8 +78,8 @@ public class Test2BBKDPoints extends LuceneTestCase {
 
     final int numDocs = (Integer.MAX_VALUE / 26) + 100;
 
-    BKDWriter w = new BKDWriter(numDocs, dir, "_0", 2, Long.BYTES,
-                                BKDWriter.DEFAULT_MAX_POINTS_IN_LEAF_NODE, BKDWriter.DEFAULT_MAX_MB_SORT_IN_HEAP, 26L * numDocs, false);
+    BKDWriter w = new BKDWriter(numDocs, dir, "_0", 2, 2, Long.BYTES,
+                                BKDWriter.DEFAULT_MAX_POINTS_IN_LEAF_NODE, BKDWriter.DEFAULT_MAX_MB_SORT_IN_HEAP, 26L * numDocs);
     int counter = 0;
     byte[] packedBytes = new byte[2*Long.BYTES];
     for (int docID = 0; docID < numDocs; docID++) {
@@ -101,7 +105,10 @@ public class Test2BBKDPoints extends LuceneTestCase {
     IndexInput in = dir.openInput("2d.bkd", IOContext.DEFAULT);
     in.seek(indexFP);
     BKDReader r = new BKDReader(in);
-    r.verify(numDocs);
+    CheckIndex.VerifyPointsVisitor visitor = new CheckIndex.VerifyPointsVisitor("2d", numDocs, r);
+    r.intersect(visitor);
+    assertEquals(r.size(), visitor.getPointCountSeen());
+    assertEquals(r.getDocCount(), visitor.getDocCountSeen());
     in.close();
     dir.close();
   }

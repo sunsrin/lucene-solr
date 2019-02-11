@@ -27,6 +27,7 @@ import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.util.Collections;
 import java.util.List;
+import java.util.Objects;
 import java.util.Properties;
 
 import com.google.common.base.Preconditions;
@@ -43,6 +44,7 @@ import org.apache.solr.common.util.Utils;
 import org.apache.solr.core.backup.repository.BackupRepository;
 import org.apache.solr.core.backup.repository.BackupRepository.PathType;
 import org.apache.solr.util.PropertiesInputStream;
+import org.apache.zookeeper.CreateMode;
 import org.apache.zookeeper.KeeperException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -67,9 +69,9 @@ public class BackupManager {
   protected final ZkStateReader zkStateReader;
   protected final BackupRepository repository;
 
-  public BackupManager(BackupRepository repository, ZkStateReader zkStateReader, String collectionName) {
-    this.repository = Preconditions.checkNotNull(repository);
-    this.zkStateReader = Preconditions.checkNotNull(zkStateReader);
+  public BackupManager(BackupRepository repository, ZkStateReader zkStateReader) {
+    this.repository = Objects.requireNonNull(repository);
+    this.zkStateReader = Objects.requireNonNull(zkStateReader);
   }
 
   /**
@@ -87,12 +89,12 @@ public class BackupManager {
    * @return the configuration parameters for the specified backup.
    * @throws IOException In case of errors.
    */
-  public Properties readBackupProperties(String backupLoc, String backupId) throws IOException {
-    Preconditions.checkNotNull(backupLoc);
-    Preconditions.checkNotNull(backupId);
+  public Properties readBackupProperties(URI backupLoc, String backupId) throws IOException {
+    Objects.requireNonNull(backupLoc);
+    Objects.requireNonNull(backupId);
 
     // Backup location
-    URI backupPath = repository.createURI(backupLoc, backupId);
+    URI backupPath = repository.resolve(backupLoc, backupId);
     if (!repository.exists(backupPath)) {
       throw new SolrException(ErrorCode.SERVER_ERROR, "Couldn't restore since doesn't exist: " + backupPath);
     }
@@ -113,8 +115,8 @@ public class BackupManager {
    * @param props The backup properties
    * @throws IOException in case of I/O error
    */
-  public void writeBackupProperties(String backupLoc, String backupId, Properties props) throws IOException {
-    URI dest = repository.createURI(backupLoc, backupId, BACKUP_PROPS_FILE);
+  public void writeBackupProperties(URI backupLoc, String backupId, Properties props) throws IOException {
+    URI dest = repository.resolve(backupLoc, backupId, BACKUP_PROPS_FILE);
     try (Writer propsWriter = new OutputStreamWriter(repository.createOutput(dest), StandardCharsets.UTF_8)) {
       props.store(propsWriter, "Backup properties file");
     }
@@ -125,13 +127,14 @@ public class BackupManager {
    *
    * @param backupLoc The base path used to store the backup data.
    * @param backupId The unique name for the backup.
+   * @param collectionName The name of the collection whose meta-data is to be returned.
    * @return the meta-data information for the backed-up collection.
    * @throws IOException in case of errors.
    */
-  public DocCollection readCollectionState(String backupLoc, String backupId, String collectionName) throws IOException {
-    Preconditions.checkNotNull(collectionName);
+  public DocCollection readCollectionState(URI backupLoc, String backupId, String collectionName) throws IOException {
+    Objects.requireNonNull(collectionName);
 
-    URI zkStateDir = repository.createURI(backupLoc, backupId, ZK_STATE_DIR);
+    URI zkStateDir = repository.resolve(backupLoc, backupId, ZK_STATE_DIR);
     try (IndexInput is = repository.openInput(zkStateDir, COLLECTION_PROPS_FILE, IOContext.DEFAULT)) {
       byte[] arr = new byte[(int) is.length()]; // probably ok since the json file should be small.
       is.readBytes(arr, 0, (int) is.length());
@@ -149,9 +152,9 @@ public class BackupManager {
    * @param collectionState The collection meta-data to be stored.
    * @throws IOException in case of I/O errors.
    */
-  public void writeCollectionState(String backupLoc, String backupId, String collectionName,
+  public void writeCollectionState(URI backupLoc, String backupId, String collectionName,
                                    DocCollection collectionState) throws IOException {
-    URI dest = repository.createURI(backupLoc, backupId, ZK_STATE_DIR, COLLECTION_PROPS_FILE);
+    URI dest = repository.resolve(backupLoc, backupId, ZK_STATE_DIR, COLLECTION_PROPS_FILE);
     try (OutputStream collectionStateOs = repository.createOutput(dest)) {
       collectionStateOs.write(Utils.toJSON(Collections.singletonMap(collectionName, collectionState)));
     }
@@ -166,9 +169,9 @@ public class BackupManager {
    * @param targetConfigName  The name of the config to be created.
    * @throws IOException in case of I/O errors.
    */
-  public void uploadConfigDir(String backupLoc, String backupId, String sourceConfigName, String targetConfigName)
+  public void uploadConfigDir(URI backupLoc, String backupId, String sourceConfigName, String targetConfigName)
       throws IOException {
-    URI source = repository.createURI(backupLoc, backupId, ZK_STATE_DIR, CONFIG_STATE_DIR, sourceConfigName);
+    URI source = repository.resolve(backupLoc, backupId, ZK_STATE_DIR, CONFIG_STATE_DIR, sourceConfigName);
     String zkPath = ZkConfigManager.CONFIGS_ZKNODE + "/" + targetConfigName;
     uploadToZk(zkStateReader.getZkClient(), source, zkPath);
   }
@@ -181,13 +184,53 @@ public class BackupManager {
    * @param configName The name of the config to be saved.
    * @throws IOException in case of I/O errors.
    */
-  public void downloadConfigDir(String backupLoc, String backupId, String configName) throws IOException {
-    URI dest = repository.createURI(backupLoc, backupId, ZK_STATE_DIR, CONFIG_STATE_DIR, configName);
-    repository.createDirectory(repository.createURI(backupLoc, backupId, ZK_STATE_DIR));
-    repository.createDirectory(repository.createURI(backupLoc, backupId, ZK_STATE_DIR, CONFIG_STATE_DIR));
+  public void downloadConfigDir(URI backupLoc, String backupId, String configName) throws IOException {
+    URI dest = repository.resolve(backupLoc, backupId, ZK_STATE_DIR, CONFIG_STATE_DIR, configName);
+    repository.createDirectory(repository.resolve(backupLoc, backupId, ZK_STATE_DIR));
+    repository.createDirectory(repository.resolve(backupLoc, backupId, ZK_STATE_DIR, CONFIG_STATE_DIR));
     repository.createDirectory(dest);
 
     downloadFromZK(zkStateReader.getZkClient(), ZkConfigManager.CONFIGS_ZKNODE + "/" + configName, dest);
+  }
+
+  public void uploadCollectionProperties(URI backupLoc, String backupId, String collectionName) throws IOException {
+    URI sourceDir = repository.resolve(backupLoc, backupId, ZK_STATE_DIR);
+    URI source = repository.resolve(sourceDir, ZkStateReader.COLLECTION_PROPS_ZKNODE);
+    if (!repository.exists(source)) {
+      // No collection properties to restore
+      return;
+    }
+    String zkPath = ZkStateReader.COLLECTIONS_ZKNODE + '/' + collectionName + '/' + ZkStateReader.COLLECTION_PROPS_ZKNODE;
+
+    try (IndexInput is = repository.openInput(sourceDir, ZkStateReader.COLLECTION_PROPS_ZKNODE, IOContext.DEFAULT)) {
+      byte[] arr = new byte[(int) is.length()];
+      is.readBytes(arr, 0, (int) is.length());
+      zkStateReader.getZkClient().create(zkPath, arr, CreateMode.PERSISTENT, true);
+    } catch (KeeperException | InterruptedException e) {
+      throw new IOException("Error uploading file to zookeeper path " + source.toString() + " to " + zkPath,
+          SolrZkClient.checkInterrupted(e));
+    }
+  }
+
+  public void downloadCollectionProperties(URI backupLoc, String backupId, String collectionName) throws IOException {
+    URI dest = repository.resolve(backupLoc, backupId, ZK_STATE_DIR, ZkStateReader.COLLECTION_PROPS_ZKNODE);
+    String zkPath = ZkStateReader.COLLECTIONS_ZKNODE + '/' + collectionName + '/' + ZkStateReader.COLLECTION_PROPS_ZKNODE;
+
+
+    try {
+      if (!zkStateReader.getZkClient().exists(zkPath, true)) {
+        // Nothing to back up
+        return;
+      }
+
+      try (OutputStream os = repository.createOutput(dest)) {
+        byte[] data = zkStateReader.getZkClient().getData(zkPath, null, null, true);
+        os.write(data);
+      }
+    } catch (KeeperException | InterruptedException e) {
+      throw new IOException("Error downloading file from zookeeper path " + zkPath + " to " + dest.toString(),
+          SolrZkClient.checkInterrupted(e));
+    }
   }
 
   private void downloadFromZK(SolrZkClient zkClient, String zkPath, URI dir) throws IOException {
@@ -199,13 +242,13 @@ public class BackupManager {
       for (String file : files) {
         List<String> children = zkClient.getChildren(zkPath + "/" + file, null, true);
         if (children.size() == 0) {
-          log.info("Writing file {}", file);
+          log.debug("Writing file {}", file);
           byte[] data = zkClient.getData(zkPath + "/" + file, null, null, true);
-          try (OutputStream os = repository.createOutput(repository.createURI(dir.getPath(), file))) {
+          try (OutputStream os = repository.createOutput(repository.resolve(dir, file))) {
             os.write(data);
           }
         } else {
-          downloadFromZK(zkClient, zkPath + "/" + file, repository.createURI(dir.getPath(), file));
+          downloadFromZK(zkClient, zkPath + "/" + file, repository.resolve(dir, file));
         }
       }
     } catch (KeeperException | InterruptedException e) {
@@ -221,7 +264,7 @@ public class BackupManager {
 
     for (String file : repository.listAll(sourceDir)) {
       String zkNodePath = destZkPath + "/" + file;
-      URI path = repository.createURI(sourceDir.getPath(), file);
+      URI path = repository.resolve(sourceDir, file);
       PathType t = repository.getPathType(path);
       switch (t) {
         case FILE: {
@@ -230,7 +273,7 @@ public class BackupManager {
             is.readBytes(arr, 0, (int) is.length());
             zkClient.makePath(zkNodePath, arr, true);
           } catch (KeeperException | InterruptedException e) {
-            throw new IOException(e);
+            throw new IOException(SolrZkClient.checkInterrupted(e));
           }
           break;
         }

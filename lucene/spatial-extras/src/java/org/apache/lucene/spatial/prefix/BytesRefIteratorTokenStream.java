@@ -26,11 +26,9 @@ import org.apache.lucene.util.BytesRefIterator;
 /**
  * A TokenStream used internally by {@link org.apache.lucene.spatial.prefix.PrefixTreeStrategy}.
  *
- * This is modelled after {@link org.apache.lucene.legacy.LegacyNumericTokenStream}.
- *
  * @lucene.internal
  */
-class BytesRefIteratorTokenStream extends TokenStream {
+public class BytesRefIteratorTokenStream extends TokenStream {
 
   public BytesRefIterator getBytesRefIterator() {
     return bytesIter;

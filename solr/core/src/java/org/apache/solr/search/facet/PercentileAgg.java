@@ -21,6 +21,7 @@ import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.function.IntFunction;
 
 import com.tdunning.math.stats.AVLTreeDigest;
 import org.apache.lucene.queries.function.ValueSource;
@@ -109,7 +110,7 @@ public class PercentileAgg extends SimpleAggValueSource {
       digests = new AVLTreeDigest[numSlots];
     }
 
-    public void collect(int doc, int slotNum) {
+    public void collect(int doc, int slotNum, IntFunction<SlotContext> slotContext) throws IOException {
       if (!values.exists(doc)) return;
       double val = values.doubleVal(doc);
 
@@ -149,7 +150,7 @@ public class PercentileAgg extends SimpleAggValueSource {
       }
       if (sortvals != null && percentiles.size()==1) {
         // we've already calculated everything we need
-        return sortvals[slotNum];
+        return digests[slotNum] != null ? sortvals[slotNum] : null;
       }
       return getValueFromDigest( digests[slotNum] );
     }
@@ -192,6 +193,7 @@ public class PercentileAgg extends SimpleAggValueSource {
     @Override
     public void merge(Object facetResult, Context mcontext) {
       byte[] arr = (byte[])facetResult;
+      if (arr == null) return; // an explicit null can mean no values in the field
       AVLTreeDigest subDigest = AVLTreeDigest.fromBytes(ByteBuffer.wrap(arr));
       if (digest == null) {
         digest = subDigest;
@@ -202,7 +204,7 @@ public class PercentileAgg extends SimpleAggValueSource {
 
     @Override
     public Object getMergedResult() {
-      if (percentiles.size() == 1) return getSortVal();
+      if (percentiles.size() == 1 && digest != null) return getSortVal();
       return getValueFromDigest(digest);
     }
 
@@ -213,7 +215,7 @@ public class PercentileAgg extends SimpleAggValueSource {
 
     private Double getSortVal() {
       if (sortVal == null) {
-        sortVal = digest.quantile( percentiles.get(0) * 0.01 );
+        sortVal = digest==null ? Double.NEGATIVE_INFINITY : digest.quantile( percentiles.get(0) * 0.01 );
       }
       return sortVal;
     }

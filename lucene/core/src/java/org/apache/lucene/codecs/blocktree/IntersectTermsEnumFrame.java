@@ -77,8 +77,6 @@ final class IntersectTermsEnumFrame {
   int transitionIndex;
   int transitionCount;
 
-  final boolean versionAutoPrefix;
-
   FST.Arc<BytesRef> arc;
 
   final BlockTermState termState;
@@ -97,17 +95,6 @@ final class IntersectTermsEnumFrame {
   int startBytePos;
   int suffix;
 
-  // When we are on an auto-prefix term this is the starting lead byte
-  // of the suffix (e.g. 'a' for the foo[a-m]* case):
-  int floorSuffixLeadStart;
-
-  // When we are on an auto-prefix term this is the ending lead byte
-  // of the suffix (e.g. 'm' for the foo[a-m]* case):
-  int floorSuffixLeadEnd;
-
-  // True if the term we are currently on is an auto-prefix term:
-  boolean isAutoPrefixTerm;
-
   private final IntersectTermsEnum ite;
 
   public IntersectTermsEnumFrame(IntersectTermsEnum ite, int ord) throws IOException {
@@ -116,7 +103,6 @@ final class IntersectTermsEnumFrame {
     this.termState = ite.fr.parent.postingsReader.newTermState();
     this.termState.totalTermFreq = -1;
     this.longs = new long[ite.fr.longsSize];
-    this.versionAutoPrefix = ite.fr.parent.anyAutoPrefixTerms;
   }
 
   void loadNextFloorBlock() throws IOException {
@@ -222,10 +208,6 @@ final class IntersectTermsEnumFrame {
       // written one after another -- tail recurse:
       fpEnd = ite.in.getFilePointer();
     }
-
-    // Necessary in case this ord previously was an auto-prefix
-    // term but now we recurse to a new leaf block
-    isAutoPrefixTerm = false;
   }
 
   // TODO: maybe add scanToLabel; should give perf boost
@@ -252,64 +234,17 @@ final class IntersectTermsEnumFrame {
     assert nextEnt != -1 && nextEnt < entCount: "nextEnt=" + nextEnt + " entCount=" + entCount + " fp=" + fp;
     nextEnt++;
     final int code = suffixesReader.readVInt();
-    if (versionAutoPrefix == false) {
-      suffix = code >>> 1;
-      startBytePos = suffixesReader.getPosition();
-      suffixesReader.skipBytes(suffix);
-      if ((code & 1) == 0) {
-        // A normal term
-        termState.termBlockOrd++;
-        return false;
-      } else {
-        // A sub-block; make sub-FP absolute:
-        lastSubFP = fp - suffixesReader.readVLong();
-        return true;
-      }
+    suffix = code >>> 1;
+    startBytePos = suffixesReader.getPosition();
+    suffixesReader.skipBytes(suffix);
+    if ((code & 1) == 0) {
+      // A normal term
+      termState.termBlockOrd++;
+      return false;
     } else {
-      suffix = code >>> 2;
-      startBytePos = suffixesReader.getPosition();
-      suffixesReader.skipBytes(suffix);
-      switch (code & 3) {
-      case 0:
-        // A normal term
-        isAutoPrefixTerm = false;
-        termState.termBlockOrd++;
-        return false;
-      case 1:
-        // A sub-block; make sub-FP absolute:
-        isAutoPrefixTerm = false;
-        lastSubFP = fp - suffixesReader.readVLong();
-        return true;
-      case 2:
-        // A normal prefix term, suffix leads with empty string
-        floorSuffixLeadStart = -1;
-        termState.termBlockOrd++;
-        floorSuffixLeadEnd = suffixesReader.readByte() & 0xff;
-        if (floorSuffixLeadEnd == 0xff) {
-          floorSuffixLeadEnd = -1;
-        }
-        isAutoPrefixTerm = true;
-        return false;
-      case 3:
-        // A floor'd prefix term, suffix leads with real byte
-        if (suffix == 0) {
-          // TODO: this is messy, but necessary because we are an auto-prefix term, but our suffix is the empty string here, so we have to
-          // look at the parent block to get the lead suffix byte:
-          assert ord > 0;
-          IntersectTermsEnumFrame parent = ite.stack[ord-1];
-          floorSuffixLeadStart = parent.suffixBytes[parent.startBytePos+parent.suffix-1] & 0xff;
-        } else {
-          floorSuffixLeadStart = suffixBytes[startBytePos+suffix-1] & 0xff;
-        }
-        termState.termBlockOrd++;
-        isAutoPrefixTerm = true;
-        floorSuffixLeadEnd = suffixesReader.readByte() & 0xff;
-        return false;
-      default:
-        // Silly javac:
-        assert false;
-        return false;
-      }
+      // A sub-block; make sub-FP absolute:
+      lastSubFP = fp - suffixesReader.readVLong();
+      return true;
     }
   }
 
@@ -338,7 +273,9 @@ final class IntersectTermsEnumFrame {
 
       // stats
       termState.docFreq = statsReader.readVInt();
-      if (ite.fr.fieldInfo.getIndexOptions() != IndexOptions.DOCS) {
+      if (ite.fr.fieldInfo.getIndexOptions() == IndexOptions.DOCS) {
+        termState.totalTermFreq = termState.docFreq; // all postings have freq=1
+      } else {
         termState.totalTermFreq = termState.docFreq + statsReader.readVLong();
       }
       // metadata 

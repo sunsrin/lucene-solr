@@ -55,6 +55,7 @@ import org.apache.lucene.index.SegmentWriteState;
 import org.apache.lucene.index.Term;
 import org.apache.lucene.search.IndexSearcher;
 import org.apache.lucene.search.Query;
+import org.apache.lucene.search.ScoreMode;
 import org.apache.lucene.search.SimpleCollector;
 import org.apache.lucene.spatial3d.geom.GeoArea;
 import org.apache.lucene.spatial3d.geom.GeoAreaFactory;
@@ -74,25 +75,25 @@ import org.apache.lucene.spatial3d.geom.XYZSolidFactory;
 import org.apache.lucene.store.Directory;
 import org.apache.lucene.util.DocIdSetBuilder;
 import org.apache.lucene.util.FixedBitSet;
+import org.apache.lucene.util.FutureArrays;
 import org.apache.lucene.util.IOUtils;
 import org.apache.lucene.util.LuceneTestCase;
 import org.apache.lucene.util.NumericUtils;
-import org.apache.lucene.util.StringHelper;
 import org.apache.lucene.util.TestUtil;
 
-import com.carrotsearch.randomizedtesting.generators.RandomInts;
+import com.carrotsearch.randomizedtesting.generators.RandomNumbers;
 
 public class TestGeo3DPoint extends LuceneTestCase {
 
   private static Codec getCodec() {
-    if (Codec.getDefault().getName().equals("Lucene62")) {
+    if (Codec.getDefault().getName().equals("Lucene80")) {
       int maxPointsInLeafNode = TestUtil.nextInt(random(), 16, 2048);
       double maxMBSortInHeap = 3.0 + (3*random().nextDouble());
       if (VERBOSE) {
         System.out.println("TEST: using Lucene60PointsFormat with maxPointsInLeafNode=" + maxPointsInLeafNode + " and maxMBSortInHeap=" + maxMBSortInHeap);
       }
 
-      return new FilterCodec("Lucene62", Codec.getDefault()) {
+      return new FilterCodec("Lucene80", Codec.getDefault()) {
         @Override
         public PointsFormat pointsFormat() {
           return new PointsFormat() {
@@ -125,7 +126,7 @@ public class TestGeo3DPoint extends LuceneTestCase {
     // We can't wrap with "exotic" readers because the query must see the BKD3DDVFormat:
     IndexSearcher s = newSearcher(r, false);
     assertEquals(1, s.search(Geo3DPoint.newShapeQuery("field",
-                                                      GeoCircleFactory.makeGeoCircle(PlanetModel.WGS84, toRadians(50), toRadians(-97), Math.PI/180.)), 1).totalHits);
+                                                      GeoCircleFactory.makeGeoCircle(PlanetModel.WGS84, toRadians(50), toRadians(-97), Math.PI/180.)), 1).totalHits.value);
     w.close();
     r.close();
     dir.close();
@@ -206,7 +207,7 @@ public class TestGeo3DPoint extends LuceneTestCase {
 
     int iters = atLeast(10);
 
-    int recurseDepth = RandomInts.randomIntBetween(random(), 5, 15);
+    int recurseDepth = RandomNumbers.randomIntBetween(random(), 5, 15);
 
     iters = atLeast(50);
     
@@ -358,7 +359,7 @@ public class TestGeo3DPoint extends LuceneTestCase {
           case 0:
             // Split on X:
             {
-              int splitValue = RandomInts.randomIntBetween(random(), cell.xMinEnc, cell.xMaxEnc);
+              int splitValue = RandomNumbers.randomIntBetween(random(), cell.xMinEnc, cell.xMaxEnc);
               if (VERBOSE) {
                 log.println("    now split on x=" + splitValue);
               }
@@ -384,7 +385,7 @@ public class TestGeo3DPoint extends LuceneTestCase {
           case 1:
             // Split on Y:
             {
-              int splitValue = RandomInts.randomIntBetween(random(), cell.yMinEnc, cell.yMaxEnc);
+              int splitValue = RandomNumbers.randomIntBetween(random(), cell.yMinEnc, cell.yMaxEnc);
               if (VERBOSE) {
                 log.println("    now split on y=" + splitValue);
               }
@@ -410,7 +411,7 @@ public class TestGeo3DPoint extends LuceneTestCase {
           case 2:
             // Split on Z:
             {
-              int splitValue = RandomInts.randomIntBetween(random(), cell.zMinEnc, cell.zMaxEnc);
+              int splitValue = RandomNumbers.randomIntBetween(random(), cell.zMinEnc, cell.zMaxEnc);
               if (VERBOSE) {
                 log.println("    now split on z=" + splitValue);
               }
@@ -477,7 +478,7 @@ public class TestGeo3DPoint extends LuceneTestCase {
 
   @Nightly
   public void testRandomBig() throws Exception {
-    doTestRandom(200000);
+    doTestRandom(50000);
   }
 
   private void doTestRandom(int count) throws Exception {
@@ -791,8 +792,6 @@ public class TestGeo3DPoint extends LuceneTestCase {
 
     final int iters = atLeast(100);
 
-    NumericDocValues docIDToID = MultiDocValues.getNumericValues(r, "id");
-
     for (int iter=0;iter<iters;iter++) {
 
       /*
@@ -816,8 +815,8 @@ public class TestGeo3DPoint extends LuceneTestCase {
           private int docBase;
 
           @Override
-          public boolean needsScores() {
-            return false;
+          public ScoreMode scoreMode() {
+            return ScoreMode.COMPLETE_NO_SCORES;
           }
 
           @Override
@@ -835,8 +834,11 @@ public class TestGeo3DPoint extends LuceneTestCase {
         System.err.println("  hitCount: " + hits.cardinality());
       }
       
+      NumericDocValues docIDToID = MultiDocValues.getNumericValues(r, "id");
+
       for(int docID=0;docID<r.maxDoc();docID++) {
-        int id = (int) docIDToID.get(docID);
+        assertEquals(docID, docIDToID.nextDoc());
+        int id = (int) docIDToID.longValue();
         GeoPoint point = points[id];
         GeoPoint unquantizedPoint = unquantizedPoints[id];
         if (point != null && unquantizedPoint != null) {
@@ -1202,6 +1204,40 @@ public class TestGeo3DPoint extends LuceneTestCase {
     }
   }
 
+  public void testMinValueQuantization(){
+    int encoded = Geo3DUtil.MIN_ENCODED_VALUE;
+    double minValue= -PlanetModel.WGS84.getMaximumMagnitude();
+    //Normal encoding
+    double decoded = Geo3DUtil.decodeValue(encoded);
+    assertEquals(minValue, decoded, 0d);
+    assertEquals(encoded, Geo3DUtil.encodeValue(decoded));
+    //Encoding floor
+    double decodedFloor = Geo3DUtil.decodeValueFloor(encoded);
+    assertEquals(minValue, decodedFloor, 0d);
+    assertEquals(encoded, Geo3DUtil.encodeValue(decodedFloor));
+    //Encoding ceiling
+    double decodedCeiling = Geo3DUtil.decodeValueCeil(encoded);
+    assertTrue(decodedCeiling > minValue);
+    assertEquals(encoded, Geo3DUtil.encodeValue(decodedCeiling));
+  }
+
+  public void testMaxValueQuantization(){
+    int encoded = Geo3DUtil.MAX_ENCODED_VALUE;
+    double maxValue= PlanetModel.WGS84.getMaximumMagnitude();
+    //Normal encoding
+    double decoded = Geo3DUtil.decodeValue(encoded);
+    assertEquals(maxValue, decoded, 0d);
+    assertEquals(encoded, Geo3DUtil.encodeValue(decoded));
+    //Encoding floor
+    double decodedFloor = Geo3DUtil.decodeValueFloor(encoded);
+    assertTrue(decodedFloor <  maxValue);
+    assertEquals(encoded, Geo3DUtil.encodeValue(decodedFloor));
+    //Encoding ceiling
+    double decodedCeiling = Geo3DUtil.decodeValueCeil(encoded);
+    assertEquals(maxValue, decodedCeiling, 0d);
+    assertEquals(encoded, Geo3DUtil.encodeValue(decodedCeiling));
+  }
+
   // poached from TestGeoEncodingUtils.testLatitudeQuantization:
 
   /**
@@ -1213,10 +1249,10 @@ public class TestGeo3DPoint extends LuceneTestCase {
     Random random = random();
     for (int i = 0; i < 10000; i++) {
       int encoded = random.nextInt();
-      if (encoded < Geo3DUtil.MIN_ENCODED_VALUE) {
+      if (encoded <= Geo3DUtil.MIN_ENCODED_VALUE) {
         continue;
       }
-      if (encoded > Geo3DUtil.MAX_ENCODED_VALUE) {
+      if (encoded >= Geo3DUtil.MAX_ENCODED_VALUE) {
         continue;
       }
       double min = encoded * Geo3DUtil.DECODE;
@@ -1401,11 +1437,11 @@ public class TestGeo3DPoint extends LuceneTestCase {
         for(int dim=0;dim<numDims;dim++) {
           int offset = bytesPerDim * dim;
           // other.min < this.min?
-          if (StringHelper.compare(bytesPerDim, other.minPackedValue, offset, minPackedValue, offset) < 0) {
+          if (FutureArrays.compareUnsigned(other.minPackedValue, offset, offset + bytesPerDim, minPackedValue, offset, offset + bytesPerDim) < 0) {
             return false;
           }
           // other.max < this.max?
-          if (StringHelper.compare(bytesPerDim, other.maxPackedValue, offset, maxPackedValue, offset) > 0) {
+          if (FutureArrays.compareUnsigned(other.maxPackedValue, offset, offset + bytesPerDim, maxPackedValue, offset, offset + bytesPerDim) > 0) {
             return false;
           }
         }
@@ -1480,14 +1516,16 @@ public class TestGeo3DPoint extends LuceneTestCase {
     b.append("target is in leaf " + leafReader + " of full reader " + reader + "\n");
 
     DocIdSetBuilder hits = new DocIdSetBuilder(leafReader.maxDoc());
-    ExplainingVisitor visitor = new ExplainingVisitor(shape, targetDocPoint, scaledDocPoint, new PointInShapeIntersectVisitor(hits, shape, bounds), docID - reader.leaves().get(subIndex).docBase, 3, Integer.BYTES, b);
+    ExplainingVisitor visitor = new ExplainingVisitor(shape, targetDocPoint, scaledDocPoint,
+      new PointInShapeIntersectVisitor(hits, shape, bounds),
+      docID - reader.leaves().get(subIndex).docBase, 3, Integer.BYTES, b);
 
     // Do first phase, where we just figure out the "path" that leads to the target docID:
-    leafReader.getPointValues().intersect(fieldName, visitor);
+    leafReader.getPointValues(fieldName).intersect(visitor);
 
     // Do second phase, where we we see how the wrapped visitor responded along that path:
     visitor.startSecondPhase();
-    leafReader.getPointValues().intersect(fieldName, visitor);
+    leafReader.getPointValues(fieldName).intersect(visitor);
 
     return b.toString();
   }

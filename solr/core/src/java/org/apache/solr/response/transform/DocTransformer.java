@@ -73,13 +73,29 @@ public abstract class DocTransformer {
    * If implementations require a valid docId and index access, the {@link #needsSolrIndexSearcher} 
    * method must return true
    *
+   * Default implementation calls {@link #transform(SolrDocument, int)}.
+   *
    * @param doc The document to alter
    * @param docid The Lucene internal doc id, or -1 in cases where the <code>doc</code> did not come from the index
    * @param score the score for this document
    * @throws IOException If there is a low-level I/O error.
    * @see #needsSolrIndexSearcher
    */
-  public abstract void transform(SolrDocument doc, int docid, float score) throws IOException;
+  public void transform(SolrDocument doc, int docid, float score) throws IOException {
+    transform(doc, docid);
+  }
+
+  /**
+   * This is where implementations do the actual work.
+   * If implementations require a valid docId and index access, the {@link #needsSolrIndexSearcher} 
+   * method must return true
+   *
+   * @param doc The document to alter
+   * @param docid The Lucene internal doc id, or -1 in cases where the <code>doc</code> did not come from the index
+   * @throws IOException If there is a low-level I/O error.
+   * @see #needsSolrIndexSearcher
+   */
+  public abstract void transform(SolrDocument doc, int docid) throws IOException;
 
   /**
    * When a transformer needs access to fields that are not automatically derived from the
@@ -97,5 +113,28 @@ public abstract class DocTransformer {
   @Override
   public String toString() {
     return getName();
+  }
+
+  /**
+   * Trivial Impl that ensure that the specified field is requested as an "extra" field,
+   * but then does nothing during the transformation phase.
+   */
+  public static final class NoopFieldTransformer extends DocTransformer {
+    final String field;
+
+    public NoopFieldTransformer() {
+      this.field = null;
+    }
+
+    public NoopFieldTransformer(String field ) {
+      this.field = field;
+    }
+    public String getName() { return "noop"; }
+    public String[] getExtraRequestFields() {
+      return this.field==null? null: new String[] { field };
+    }
+    public void transform(SolrDocument doc, int docid) {
+      // No-Op
+    }
   }
 }

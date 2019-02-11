@@ -135,8 +135,12 @@ public interface FacetParams {
    * In SOLR-8599 and SOLR-8988, significant performance increase has been seen when enabling this optimization.
    *
    * Note: enabling this flag has no effect when the conditions above are not met. For those other cases the default behavior is sufficient.
+   *
+   * @deprecated
+   * This option is no longer used nor will if affect any queries as the fix has been built in. (SOLR-11711)
+   * This will be removed entirely in 8.0.0
    */
-
+  @Deprecated
   public static final String FACET_DISTRIB_MCO = FACET_DISTRIB + ".mco";
   
   /**
@@ -176,15 +180,33 @@ public interface FacetParams {
   public static final String FACET_CONTAINS = FACET + ".contains";
 
   /**
+   * Only return constraints of a facet field containing the given string.
+   */
+  public static final String FACET_MATCHES = FACET + ".matches";
+
+  /**
    * If using facet contains, ignore case when comparing values.
    */
   public static final String FACET_CONTAINS_IGNORE_CASE = FACET_CONTAINS + ".ignoreCase";
+
+  /**
+   * Only return constraints of a facet field excluding the given string.
+   */
+  public static final String FACET_EXCLUDETERMS = FACET + ".excludeTerms";
 
  /**
    * When faceting by enumerating the terms in a field,
    * only use the filterCache for terms with a df &gt;= to this parameter.
    */
   public static final String FACET_ENUM_CACHE_MINDF = FACET + ".enum.cache.minDf";
+  
+  /**
+   *  A boolean parameter that caps the facet counts at 1. 
+   *  With this set, a returned count will only be 0 or 1. 
+   *  For apps that don't need the count, this should be an optimization
+   */
+  public static final String FACET_EXISTS = FACET+".exists";
+  
   /**
    * Any field whose terms the user wants to enumerate over for
    * Facet Contraint Counts (multi-value)

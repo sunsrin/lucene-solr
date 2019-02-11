@@ -22,7 +22,7 @@ separate directory. To run a specific example, do:
   bin/solr -e <EXAMPLE> where <EXAMPLE> is one of:
   
     cloud        : SolrCloud example
-    dih          : Data Import Handler (rdbms, mail, rss, tika)
+    dih          : Data Import Handler (rdbms, mail, atom, tika)
     schemaless   : Schema-less example (schema is inferred from data during indexing)
     techproducts : Kitchen sink example providing comprehensive examples of Solr features
 
@@ -48,8 +48,8 @@ For more information about this example please read...
 
  * example/solr/README.txt
    For more information about the "Solr Home" and Solr specific configuration
- * http://lucene.apache.org/solr/quickstart.html
-   For a Tutorial using this example configuration
+ * https://lucene.apache.org/solr/guide/solr-tutorial.html
+   For a Solr tutorial
  * http://wiki.apache.org/solr/SolrResources 
    For a list of other tutorials and introductory articles.
 
@@ -63,7 +63,7 @@ statements in the solrconfig.xml file to reference plugin jars outside of
 this directory for loading "contrib" plugins via relative paths.  
 
 If you make a copy of this example server and wish to use the 
-ExtractingRequestHandler (SolrCell), DataImportHandler (DIH), UIMA, the 
+ExtractingRequestHandler (SolrCell), DataImportHandler (DIH), the 
 clustering component, or any other modules in "contrib", you will need to 
 copy the required jars or update the paths to those jars in your 
 solrconfig.xml.
@@ -72,7 +72,7 @@ solrconfig.xml.
 
 By default, Jetty & Solr will log to the console and logs/solr.log. This can
 be convenient when first getting started, but eventually you will want to
-log just to a file. To configure logging, edit the log4j.properties file in
-"resources".
+log just to a file. To configure logging, edit the log4j2.xml file in
+".../server/resources".
 It is also possible to setup log4j or other popular logging frameworks.
 

@@ -30,16 +30,15 @@ import org.junit.BeforeClass;
 public class SolrExampleXMLTest extends SolrExampleTests {
   @BeforeClass
   public static void beforeTest() throws Exception {
-    createJetty(legacyExampleCollection1SolrHome());
+    createAndStartJetty(legacyExampleCollection1SolrHome());
   }
   
   @Override
   public SolrClient createNewSolrClient() {
     try {
       String url = jetty.getBaseUrl().toString() + "/collection1";
-      HttpSolrClient client = getHttpSolrClient(url);
+      HttpSolrClient client = getHttpSolrClient(url, DEFAULT_CONNECTION_TIMEOUT);
       client.setUseMultiPartPost(random().nextBoolean());
-      client.setConnectionTimeout(DEFAULT_CONNECTION_TIMEOUT);
       client.setParser(new XMLResponseParser());
       client.setRequestWriter(new RequestWriter());
       return client;

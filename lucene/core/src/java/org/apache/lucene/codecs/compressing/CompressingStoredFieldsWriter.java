@@ -17,20 +17,25 @@
 package org.apache.lucene.codecs.compressing;
 
 
+import static org.apache.lucene.search.DocIdSetIterator.*;
+
 import java.io.IOException;
-import java.util.Arrays;
+import java.util.ArrayList;
+import java.util.List;
 
 import org.apache.lucene.codecs.CodecUtil;
 import org.apache.lucene.codecs.StoredFieldsReader;
 import org.apache.lucene.codecs.StoredFieldsWriter;
 import org.apache.lucene.codecs.compressing.CompressingStoredFieldsReader.SerializedDocument;
 import org.apache.lucene.index.CorruptIndexException;
+import org.apache.lucene.index.DocIDMerger;
 import org.apache.lucene.index.FieldInfo;
 import org.apache.lucene.index.FieldInfos;
 import org.apache.lucene.index.IndexFileNames;
 import org.apache.lucene.index.IndexableField;
 import org.apache.lucene.index.MergeState;
 import org.apache.lucene.index.SegmentInfo;
+import org.apache.lucene.store.ByteBuffersDataOutput;
 import org.apache.lucene.store.DataOutput;
 import org.apache.lucene.store.Directory;
 import org.apache.lucene.store.IOContext;
@@ -67,20 +72,19 @@ public final class CompressingStoredFieldsWriter extends StoredFieldsWriter {
 
   static final String CODEC_SFX_IDX = "Index";
   static final String CODEC_SFX_DAT = "Data";
-  static final int VERSION_START = 0;
-  static final int VERSION_CHUNK_STATS = 1;
-  static final int VERSION_CURRENT = VERSION_CHUNK_STATS;
+  static final int VERSION_START = 1;
+  static final int VERSION_CURRENT = VERSION_START;
 
   private final String segment;
   private CompressingStoredFieldsIndexWriter indexWriter;
   private IndexOutput fieldsStream;
 
-  private final Compressor compressor;
+  private Compressor compressor;
   private final CompressionMode compressionMode;
   private final int chunkSize;
   private final int maxDocsPerChunk;
 
-  private final GrowableByteArrayDataOutput bufferedDocs;
+  private final ByteBuffersDataOutput bufferedDocs;
   private int[] numStoredFields; // number of stored fields
   private int[] endOffsets; // end offsets in bufferedDocs
   private int docBase; // doc ID at the beginning of the chunk
@@ -99,7 +103,7 @@ public final class CompressingStoredFieldsWriter extends StoredFieldsWriter {
     this.chunkSize = chunkSize;
     this.maxDocsPerChunk = maxDocsPerChunk;
     this.docBase = 0;
-    this.bufferedDocs = new GrowableByteArrayDataOutput(chunkSize);
+    this.bufferedDocs = ByteBuffersDataOutput.newResettableInstance();
     this.numStoredFields = new int[16];
     this.endOffsets = new int[16];
     this.numBufferedDocs = 0;
@@ -135,10 +139,11 @@ public final class CompressingStoredFieldsWriter extends StoredFieldsWriter {
   @Override
   public void close() throws IOException {
     try {
-      IOUtils.close(fieldsStream, indexWriter);
+      IOUtils.close(fieldsStream, indexWriter, compressor);
     } finally {
       fieldsStream = null;
       indexWriter = null;
+      compressor = null;
     }
   }
 
@@ -152,12 +157,12 @@ public final class CompressingStoredFieldsWriter extends StoredFieldsWriter {
   public void finishDocument() throws IOException {
     if (numBufferedDocs == this.numStoredFields.length) {
       final int newLength = ArrayUtil.oversize(numBufferedDocs + 1, 4);
-      this.numStoredFields = Arrays.copyOf(this.numStoredFields, newLength);
-      endOffsets = Arrays.copyOf(endOffsets, newLength);
+      this.numStoredFields = ArrayUtil.growExact(this.numStoredFields, newLength);
+      endOffsets = ArrayUtil.growExact(endOffsets, newLength);
     }
     this.numStoredFields[numBufferedDocs] = numStoredFieldsInDoc;
     numStoredFieldsInDoc = 0;
-    endOffsets[numBufferedDocs] = bufferedDocs.length;
+    endOffsets[numBufferedDocs] = Math.toIntExact(bufferedDocs.size());
     ++numBufferedDocs;
     if (triggerFlush()) {
       flush();
@@ -210,7 +215,7 @@ public final class CompressingStoredFieldsWriter extends StoredFieldsWriter {
   }
 
   private boolean triggerFlush() {
-    return bufferedDocs.length >= chunkSize || // chunks of at least chunkSize bytes
+    return bufferedDocs.size() >= chunkSize || // chunks of at least chunkSize bytes
         numBufferedDocs >= maxDocsPerChunk;
   }
 
@@ -223,23 +228,29 @@ public final class CompressingStoredFieldsWriter extends StoredFieldsWriter {
       lengths[i] = endOffsets[i] - endOffsets[i - 1];
       assert lengths[i] >= 0;
     }
-    final boolean sliced = bufferedDocs.length >= 2 * chunkSize;
+    final boolean sliced = bufferedDocs.size() >= 2 * chunkSize;
     writeHeader(docBase, numBufferedDocs, numStoredFields, lengths, sliced);
 
-    // compress stored fields to fieldsStream
+    // compress stored fields to fieldsStream.
+    //
+    // TODO: do we need to slice it since we already have the slices in the buffer? Perhaps
+    // we should use max-block-bits restriction on the buffer itself, then we won't have to check it here.
+    byte [] content = bufferedDocs.toArrayCopy();
+    bufferedDocs.reset();
+
     if (sliced) {
       // big chunk, slice it
-      for (int compressed = 0; compressed < bufferedDocs.length; compressed += chunkSize) {
-        compressor.compress(bufferedDocs.bytes, compressed, Math.min(chunkSize, bufferedDocs.length - compressed), fieldsStream);
+      for (int compressed = 0; compressed < content.length; compressed += chunkSize) {
+        compressor.compress(content, compressed, Math.min(chunkSize, content.length - compressed), fieldsStream);
       }
     } else {
-      compressor.compress(bufferedDocs.bytes, 0, bufferedDocs.length, fieldsStream);
+      compressor.compress(content, 0, content.length, fieldsStream);
     }
 
     // reset
     docBase += numBufferedDocs;
     numBufferedDocs = 0;
-    bufferedDocs.length = 0;
+    bufferedDocs.reset();
     numChunks++;
   }
   
@@ -459,7 +470,7 @@ public final class CompressingStoredFieldsWriter extends StoredFieldsWriter {
       flush();
       numDirtyChunks++; // incomplete: we had to force this flush
     } else {
-      assert bufferedDocs.length == 0;
+      assert bufferedDocs.size() == 0;
     }
     if (docBase != numDocs) {
       throw new RuntimeException("Wrote " + docBase + " docs, finish called with numDocs=" + numDocs);
@@ -468,9 +479,9 @@ public final class CompressingStoredFieldsWriter extends StoredFieldsWriter {
     fieldsStream.writeVLong(numChunks);
     fieldsStream.writeVLong(numDirtyChunks);
     CodecUtil.writeFooter(fieldsStream);
-    assert bufferedDocs.length == 0;
+    assert bufferedDocs.size() == 0;
   }
-  
+
   // bulk merge is scary: its caused corruption bugs in the past.
   // we try to be extra safe with this impl, but add an escape hatch to
   // have a workaround for undiscovered bugs.
@@ -486,16 +497,45 @@ public final class CompressingStoredFieldsWriter extends StoredFieldsWriter {
 
   @Override
   public int merge(MergeState mergeState) throws IOException {
-    if (mergeState.segmentInfo.getIndexSort() != null) {
-      // TODO: can we gain back some optos even if index is sorted?  E.g. if sort results in large chunks of contiguous docs from one sub
-      // being copied over...?
-      return super.merge(mergeState);
-    }
-
     int docCount = 0;
     int numReaders = mergeState.maxDocs.length;
     
     MatchingReaders matching = new MatchingReaders(mergeState);
+    if (mergeState.needsIndexSort) {
+      /**
+       * If all readers are compressed and they have the same fieldinfos then we can merge the serialized document
+       * directly.
+       */
+      List<CompressingStoredFieldsMergeSub> subs = new ArrayList<>();
+      for(int i=0;i<mergeState.storedFieldsReaders.length;i++) {
+        if (matching.matchingReaders[i] &&
+            mergeState.storedFieldsReaders[i] instanceof CompressingStoredFieldsReader) {
+          CompressingStoredFieldsReader storedFieldsReader = (CompressingStoredFieldsReader) mergeState.storedFieldsReaders[i];
+          storedFieldsReader.checkIntegrity();
+          subs.add(new CompressingStoredFieldsMergeSub(storedFieldsReader, mergeState.docMaps[i], mergeState.maxDocs[i]));
+        } else {
+          return super.merge(mergeState);
+        }
+      }
+
+      final DocIDMerger<CompressingStoredFieldsMergeSub> docIDMerger =
+          DocIDMerger.of(subs, true);
+      while (true) {
+        CompressingStoredFieldsMergeSub sub = docIDMerger.next();
+        if (sub == null) {
+          break;
+        }
+        assert sub.mappedDocID == docCount;
+        SerializedDocument doc = sub.reader.document(sub.docID);
+        startDocument();
+        bufferedDocs.copyBytes(doc.in, doc.length);
+        numStoredFieldsInDoc = doc.numStoredFields;
+        finishDocument();
+        ++docCount;
+      }
+      finish(mergeState.mergeFieldInfos, docCount);
+      return docCount;
+    }
     
     for (int readerIndex=0;readerIndex<numReaders;readerIndex++) {
       MergeVisitor visitor = new MergeVisitor(mergeState, readerIndex);
@@ -628,5 +668,27 @@ public final class CompressingStoredFieldsWriter extends StoredFieldsWriter {
     // more than 1% dirty, or more than hard limit of 1024 dirty chunks
     return candidate.getNumDirtyChunks() > 1024 || 
            candidate.getNumDirtyChunks() * 100 > candidate.getNumChunks();
+  }
+
+  private static class CompressingStoredFieldsMergeSub extends DocIDMerger.Sub {
+    private final CompressingStoredFieldsReader reader;
+    private final int maxDoc;
+    int docID = -1;
+
+    public CompressingStoredFieldsMergeSub(CompressingStoredFieldsReader reader, MergeState.DocMap docMap, int maxDoc) {
+      super(docMap);
+      this.maxDoc = maxDoc;
+      this.reader = reader;
+    }
+
+    @Override
+    public int nextDoc() {
+      docID++;
+      if (docID == maxDoc) {
+        return NO_MORE_DOCS;
+      } else {
+        return docID;
+      }
+    }
   }
 }

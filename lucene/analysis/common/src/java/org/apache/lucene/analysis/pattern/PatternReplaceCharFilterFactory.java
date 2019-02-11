@@ -21,7 +21,6 @@ import java.io.Reader;
 import java.util.Map;
 import java.util.regex.Pattern;
 
-import org.apache.lucene.analysis.CharFilter;
 import org.apache.lucene.analysis.util.CharFilterFactory;
 
 /**
@@ -52,7 +51,12 @@ public class PatternReplaceCharFilterFactory extends CharFilterFactory {
   }
 
   @Override
-  public CharFilter create(Reader input) {
+  public Reader create(Reader input) {
     return new PatternReplaceCharFilter(pattern, replacement, input);
+  }
+
+  @Override
+  public Reader normalize(Reader input) {
+    return create(input);
   }
 }

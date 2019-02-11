@@ -16,6 +16,8 @@
  */
 package org.apache.solr.common.cloud;
 
+import org.apache.solr.common.AlreadyClosedException;
+import org.apache.solr.common.cloud.ConnectionManager.IsClosed;
 import org.apache.zookeeper.CreateMode;
 import org.apache.zookeeper.KeeperException;
 import org.apache.zookeeper.KeeperException.NodeExistsException;
@@ -25,6 +27,11 @@ public class ZkCmdExecutor {
   private long retryDelay = 1500L; // 1 second would match timeout, so 500 ms over for padding
   private int retryCount;
   private double timeouts;
+  private IsClosed isClosed;
+  
+  public ZkCmdExecutor(int timeoutms) {
+    this(timeoutms, null);
+  }
   
   /**
    * TODO: At this point, this should probably take a SolrZkClient in
@@ -34,9 +41,10 @@ public class ZkCmdExecutor {
    *          the client timeout for the ZooKeeper clients that will be used
    *          with this class.
    */
-  public ZkCmdExecutor(int timeoutms) {
+  public ZkCmdExecutor(int timeoutms, IsClosed isClosed) {
     timeouts = timeoutms / 1000.0;
     this.retryCount = Math.round(0.5f * ((float)Math.sqrt(8.0f * timeouts + 1.0f) - 1.0f)) + 1;
+    this.isClosed = isClosed;
   }
   
   public long getRetryDelay() {
@@ -57,6 +65,9 @@ public class ZkCmdExecutor {
     KeeperException exception = null;
     for (int i = 0; i < retryCount; i++) {
       try {
+        if (i > 0 && isClosed()) {
+          throw new AlreadyClosedException();
+        }
         return (T) operation.execute();
       } catch (KeeperException.ConnectionLossException e) {
         if (exception == null) {
@@ -74,18 +85,31 @@ public class ZkCmdExecutor {
     throw exception;
   }
   
+  private boolean isClosed() {
+    return isClosed != null && isClosed.isClosed();
+  }
+
   public void ensureExists(String path, final SolrZkClient zkClient) throws KeeperException, InterruptedException {
-    ensureExists(path, null, CreateMode.PERSISTENT, zkClient);
+    ensureExists(path, null, CreateMode.PERSISTENT, zkClient, 0);
+  }
+  
+  
+  public void ensureExists(String path, final byte[] data, final SolrZkClient zkClient) throws KeeperException, InterruptedException {
+    ensureExists(path, data, CreateMode.PERSISTENT, zkClient, 0);
+  }
+  
+  public void ensureExists(String path, final byte[] data, CreateMode createMode, final SolrZkClient zkClient) throws KeeperException, InterruptedException {
+    ensureExists(path, data, createMode, zkClient, 0);
   }
   
   public void ensureExists(final String path, final byte[] data,
-      CreateMode createMode, final SolrZkClient zkClient) throws KeeperException, InterruptedException {
+      CreateMode createMode, final SolrZkClient zkClient, int skipPathParts) throws KeeperException, InterruptedException {
     
     if (zkClient.exists(path, true)) {
       return;
     }
     try {
-      zkClient.makePath(path, data, createMode, true);
+      zkClient.makePath(path, data, createMode, null, true, true, skipPathParts);
     } catch (NodeExistsException e) {
       // it's okay if another beats us creating the node
     }

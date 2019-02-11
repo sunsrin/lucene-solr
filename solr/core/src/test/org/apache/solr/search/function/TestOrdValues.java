@@ -29,8 +29,8 @@ import org.apache.lucene.index.DirectoryReader;
 import org.apache.lucene.index.IndexReader;
 import org.apache.lucene.index.IndexWriterConfig;
 import org.apache.lucene.index.RandomIndexWriter;
-import org.apache.lucene.legacy.LegacyFloatField;
-import org.apache.lucene.legacy.LegacyIntField;
+import org.apache.solr.legacy.LegacyFloatField;
+import org.apache.solr.legacy.LegacyIntField;
 import org.apache.lucene.queries.function.FunctionQuery;
 import org.apache.lucene.queries.function.ValueSource;
 import org.apache.lucene.queries.function.valuesource.FloatFieldSource;
@@ -145,7 +145,7 @@ public class TestOrdValues extends LuceneTestCase {
     }
     Query q = new FunctionQuery(vs);
     TopDocs td = s.search(q, 1000);
-    assertEquals("All docs should be matched!", N_DOCS, td.totalHits);
+    assertEquals("All docs should be matched!", N_DOCS, td.totalHits.value);
     ScoreDoc sd[] = td.scoreDocs;
     for (int i = 0; i < sd.length; i++) {
       float score = sd[i].score;

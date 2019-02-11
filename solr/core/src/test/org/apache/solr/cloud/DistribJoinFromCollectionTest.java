@@ -16,8 +16,6 @@
  */
 package org.apache.solr.cloud;
 
-import static org.hamcrest.CoreMatchers.not;
-
 import java.io.IOException;
 import java.lang.invoke.MethodHandles;
 import java.nio.file.Path;
@@ -49,6 +47,8 @@ import org.junit.Test;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import static org.hamcrest.CoreMatchers.not;
+
 /**
  * Tests using fromIndex that points to a collection in SolrCloud mode.
  */
@@ -62,7 +62,7 @@ public class DistribJoinFromCollectionTest extends SolrCloudTestCase{
   private static String toColl = "to_2x2";
   private static String fromColl = "from_1x4";
 
-  private static Integer toDocId;
+  private static String toDocId;
   
   @BeforeClass
   public static void setupCluster() throws Exception {
@@ -83,10 +83,10 @@ public class DistribJoinFromCollectionTest extends SolrCloudTestCase{
     
     int shards = 2;
     int replicas = 2 ;
-    assertNotNull(cluster.createCollection(toColl, shards, replicas,
-        configName,
-        collectionProperties));
-    
+    CollectionAdminRequest.createCollection(toColl, configName, shards, replicas)
+        .setProperties(collectionProperties)
+        .process(cluster.getSolrClient());
+
     // get the set of nodes where replicas for the "to" collection exist
     Set<String> nodeSet = new HashSet<>();
     ZkStateReader zkStateReader = cluster.getSolrClient().getZkStateReader();
@@ -97,14 +97,11 @@ public class DistribJoinFromCollectionTest extends SolrCloudTestCase{
     assertTrue(nodeSet.size() > 0);
 
     // deploy the "from" collection to all nodes where the "to" collection exists
-    
-    assertNotNull(cluster.createCollection(fromColl, 1, 4,
-        configName, StringUtils.join(nodeSet,","), null,
-        collectionProperties));
-    
-    AbstractDistribZkTestBase.waitForRecoveriesToFinish(toColl, zkStateReader, false, true, 30);
-    AbstractDistribZkTestBase.waitForRecoveriesToFinish(fromColl, zkStateReader, false, true, 30);
-   
+    CollectionAdminRequest.createCollection(fromColl, configName, 1, 4)
+        .setCreateNodeSet(StringUtils.join(nodeSet, ","))
+        .setProperties(collectionProperties)
+        .process(cluster.getSolrClient());
+
     toDocId = indexDoc(toColl, 1001, "a", null, "b");
     indexDoc(fromColl, 2001, "a", "c", null);
 
@@ -115,13 +112,13 @@ public class DistribJoinFromCollectionTest extends SolrCloudTestCase{
   @Test
   public void testScore() throws Exception {
     //without score
-    testJoins(toColl, fromColl, toDocId, false);
+    testJoins(toColl, fromColl, toDocId, true);
   }
   
   @Test
   public void testNoScore() throws Exception {
     //with score
-    testJoins(toColl, fromColl, toDocId, true);
+    testJoins(toColl, fromColl, toDocId, false);
     
   }
   
@@ -143,8 +140,8 @@ public class DistribJoinFromCollectionTest extends SolrCloudTestCase{
     log.info("DistribJoinFromCollectionTest succeeded ... shutting down now!");
   }
 
-  private void testJoins(String toColl, String fromColl, Integer toDocId, boolean isScoresTest)
-      throws SolrServerException, IOException {
+  private void testJoins(String toColl, String fromColl, String toDocId, boolean isScoresTest)
+      throws SolrServerException, IOException, InterruptedException {
     // verify the join with fromIndex works
     final String fromQ = "match_s:c^2";
     CloudSolrClient client = cluster.getSolrClient();
@@ -167,8 +164,7 @@ public class DistribJoinFromCollectionTest extends SolrCloudTestCase{
 
     // create an alias for the fromIndex and then query through the alias
     String alias = fromColl+"Alias";
-    CollectionAdminRequest.CreateAlias request = CollectionAdminRequest.createAlias(alias,fromColl);
-    request.process(client);
+    CollectionAdminRequest.createAlias(alias, fromColl).process(client);
 
     {
       final String joinQ = "{!join " + anyScoreMode(isScoresTest)
@@ -222,12 +218,12 @@ public class DistribJoinFromCollectionTest extends SolrCloudTestCase{
     }
   }
 
-  protected static Integer indexDoc(String collection, int id, String joinField, String matchField, String getField) throws Exception {
+  protected static String indexDoc(String collection, int id, String joinField, String matchField, String getField) throws Exception {
     UpdateRequest up = new UpdateRequest();
     up.setCommitWithin(50);
     up.setParam("collection", collection);
     SolrInputDocument doc = new SolrInputDocument();
-    Integer docId = new Integer(id);
+    String docId = "" + id;
     doc.addField("id", docId);
     doc.addField("join_s", joinField);
     if (matchField != null)

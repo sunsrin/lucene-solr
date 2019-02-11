@@ -27,8 +27,10 @@ import org.apache.lucene.search.IndexSearcher;
 import org.apache.lucene.search.Query;
 import org.apache.lucene.search.ScoreDoc;
 import org.apache.lucene.search.TopDocs;
+import org.apache.lucene.search.spans.SpanQuery;
 import org.apache.lucene.util.LuceneTestCase;
 import org.junit.AfterClass;
+import org.xml.sax.SAXException;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -66,6 +68,18 @@ public class TestCoreParser extends LuceneTestCase {
     dumpResults("TermQuery", q, 5);
   }
 
+  public void test_DOCTYPE_TermQueryXML() throws ParserException, IOException {
+    SAXException saxe = LuceneTestCase.expectThrows(ParserException.class, SAXException.class,
+        () -> parse("DOCTYPE_TermQuery.xml"));
+    assertTrue(saxe.getMessage().startsWith("External Entity resolving unsupported:"));
+  }
+
+  public void test_ENTITY_TermQueryXML() throws ParserException, IOException {
+    SAXException saxe = LuceneTestCase.expectThrows(ParserException.class, SAXException.class,
+        () -> parse("ENTITY_TermQuery.xml"));
+    assertTrue(saxe.getMessage().startsWith("External Entity resolving unsupported:"));
+  }
+
   public void testTermQueryEmptyXML() throws ParserException, IOException {
     parseShouldFail("TermQueryEmpty.xml",
         "TermQuery has no text");
@@ -88,7 +102,7 @@ public class TestCoreParser extends LuceneTestCase {
     assertEquals(0.0f, d.getTieBreakerMultiplier(), 0.0001f);
     assertEquals(2, d.getDisjuncts().size());
     DisjunctionMaxQuery ndq = (DisjunctionMaxQuery) d.getDisjuncts().get(1);
-    assertEquals(1.2f, ndq.getTieBreakerMultiplier(), 0.0001f);
+    assertEquals(0.3f, ndq.getTieBreakerMultiplier(), 0.0001f);
     assertEquals(1, ndq.getDisjuncts().size());
   }
 
@@ -104,7 +118,7 @@ public class TestCoreParser extends LuceneTestCase {
 
   public void testCustomFieldUserQueryXML() throws ParserException, IOException {
     Query q = parse("UserInputQueryCustomField.xml");
-    int h = searcher().search(q, 1000).totalHits;
+    long h = searcher().search(q, 1000).totalHits.value;
     assertEquals("UserInputQueryCustomField should produce 0 result ", 0, h);
   }
 
@@ -116,6 +130,9 @@ public class TestCoreParser extends LuceneTestCase {
   public void testSpanTermXML() throws Exception {
     Query q = parse("SpanQuery.xml");
     dumpResults("Span Query", q, 5);
+    SpanQuery sq = parseAsSpan("SpanQuery.xml");
+    dumpResults("Span Query", sq, 5);
+    assertEquals(q, sq);
   }
 
   public void testConstantScoreQueryXML() throws Exception {
@@ -207,10 +224,21 @@ public class TestCoreParser extends LuceneTestCase {
   }
 
   protected Query parse(String xmlFileName) throws ParserException, IOException {
+    return implParse(xmlFileName, false);
+  }
+
+  protected SpanQuery parseAsSpan(String xmlFileName) throws ParserException, IOException {
+    return (SpanQuery)implParse(xmlFileName, true);
+  }
+
+  private Query implParse(String xmlFileName, boolean span) throws ParserException, IOException {
     try (InputStream xmlStream = TestCoreParser.class.getResourceAsStream(xmlFileName)) {
       assertNotNull("Test XML file " + xmlFileName + " cannot be found", xmlStream);
-      Query result = coreParser().parse(xmlStream);
-      return result;
+      if (span) {
+        return coreParser().parseAsSpanQuery(xmlStream);
+      } else {
+        return coreParser().parse(xmlStream);
+      }
     }
   }
 
@@ -224,13 +252,13 @@ public class TestCoreParser extends LuceneTestCase {
     }
     final IndexSearcher searcher = searcher();
     TopDocs hits = searcher.search(q, numDocs);
-    final boolean producedResults = (hits.totalHits > 0);
+    final boolean producedResults = (hits.totalHits.value > 0);
     if (!producedResults) {
       System.out.println("TEST: qType=" + qType + " numDocs=" + numDocs + " " + q.getClass().getCanonicalName() + " query=" + q);
     }
     if (VERBOSE) {
       ScoreDoc[] scoreDocs = hits.scoreDocs;
-      for (int i = 0; i < Math.min(numDocs, hits.totalHits); i++) {
+      for (int i = 0; i < Math.min(numDocs, hits.totalHits.value); i++) {
         Document ldoc = searcher.doc(scoreDocs[i].doc);
         System.out.println("[" + ldoc.get("date") + "]" + ldoc.get("contents"));
       }

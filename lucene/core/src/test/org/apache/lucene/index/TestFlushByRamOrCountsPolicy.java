@@ -74,16 +74,14 @@ public class TestFlushByRamOrCountsPolicy extends LuceneTestCase {
     iwc.setIndexerThreadPool(threadPool);
     iwc.setRAMBufferSizeMB(maxRamMB);
     iwc.setMaxBufferedDocs(IndexWriterConfig.DISABLE_AUTO_FLUSH);
-    iwc.setMaxBufferedDeleteTerms(IndexWriterConfig.DISABLE_AUTO_FLUSH);
     IndexWriter writer = new IndexWriter(dir, iwc);
     flushPolicy = (MockDefaultFlushPolicy) writer.getConfig().getFlushPolicy();
     assertFalse(flushPolicy.flushOnDocCount());
-    assertFalse(flushPolicy.flushOnDeleteTerms());
     assertTrue(flushPolicy.flushOnRAM());
     DocumentsWriter docsWriter = writer.getDocsWriter();
     assertNotNull(docsWriter);
     DocumentsWriterFlushControl flushControl = docsWriter.flushControl;
-    assertEquals(" bytes must be 0 after init", 0, flushControl.flushBytes());
+    assertEquals(" bytes must be 0 after init", 0, writer.getFlushingBytes());
 
     IndexThread[] threads = new IndexThread[numThreads];
     for (int x = 0; x < threads.length; x++) {
@@ -97,9 +95,9 @@ public class TestFlushByRamOrCountsPolicy extends LuceneTestCase {
     }
     final long maxRAMBytes = (long) (iwc.getRAMBufferSizeMB() * 1024. * 1024.);
     assertEquals(" all flushes must be due numThreads=" + numThreads, 0,
-        flushControl.flushBytes());
-    assertEquals(numDocumentsToIndex, writer.numDocs());
-    assertEquals(numDocumentsToIndex, writer.maxDoc());
+        writer.getFlushingBytes());
+    assertEquals(numDocumentsToIndex, writer.getDocStats().numDocs);
+    assertEquals(numDocumentsToIndex, writer.getDocStats().maxDoc);
     assertTrue("peak bytes without flush exceeded watermark",
         flushPolicy.peakBytesWithoutFlush <= maxRAMBytes);
     assertActiveBytesAfter(flushControl);
@@ -131,16 +129,14 @@ public class TestFlushByRamOrCountsPolicy extends LuceneTestCase {
       iwc.setIndexerThreadPool(threadPool);
       iwc.setMaxBufferedDocs(2 + atLeast(10));
       iwc.setRAMBufferSizeMB(IndexWriterConfig.DISABLE_AUTO_FLUSH);
-      iwc.setMaxBufferedDeleteTerms(IndexWriterConfig.DISABLE_AUTO_FLUSH);
       IndexWriter writer = new IndexWriter(dir, iwc);
       flushPolicy = (MockDefaultFlushPolicy) writer.getConfig().getFlushPolicy();
       assertTrue(flushPolicy.flushOnDocCount());
-      assertFalse(flushPolicy.flushOnDeleteTerms());
       assertFalse(flushPolicy.flushOnRAM());
       DocumentsWriter docsWriter = writer.getDocsWriter();
       assertNotNull(docsWriter);
       DocumentsWriterFlushControl flushControl = docsWriter.flushControl;
-      assertEquals(" bytes must be 0 after init", 0, flushControl.flushBytes());
+      assertEquals(" bytes must be 0 after init", 0, writer.getFlushingBytes());
 
       IndexThread[] threads = new IndexThread[numThreads[i]];
       for (int x = 0; x < threads.length; x++) {
@@ -154,9 +150,9 @@ public class TestFlushByRamOrCountsPolicy extends LuceneTestCase {
       }
 
       assertEquals(" all flushes must be due numThreads=" + numThreads[i], 0,
-          flushControl.flushBytes());
-      assertEquals(numDocumentsToIndex, writer.numDocs());
-      assertEquals(numDocumentsToIndex, writer.maxDoc());
+          writer.getFlushingBytes());
+      assertEquals(numDocumentsToIndex, writer.getDocStats().numDocs);
+      assertEquals(numDocumentsToIndex, writer.getDocStats().maxDoc);
       assertTrue("peak bytes without flush exceeded watermark",
           flushPolicy.peakDocCountWithoutFlush <= iwc.getMaxBufferedDocs());
       assertActiveBytesAfter(flushControl);
@@ -186,7 +182,7 @@ public class TestFlushByRamOrCountsPolicy extends LuceneTestCase {
     assertNotNull(docsWriter);
     DocumentsWriterFlushControl flushControl = docsWriter.flushControl;
 
-    assertEquals(" bytes must be 0 after init", 0, flushControl.flushBytes());
+    assertEquals(" bytes must be 0 after init", 0, writer.getFlushingBytes());
 
     IndexThread[] threads = new IndexThread[numThreads];
     for (int x = 0; x < threads.length; x++) {
@@ -198,11 +194,10 @@ public class TestFlushByRamOrCountsPolicy extends LuceneTestCase {
     for (int x = 0; x < threads.length; x++) {
       threads[x].join();
     }
-    assertEquals(" all flushes must be due", 0, flushControl.flushBytes());
-    assertEquals(numDocumentsToIndex, writer.numDocs());
-    assertEquals(numDocumentsToIndex, writer.maxDoc());
-    if (flushPolicy.flushOnRAM() && !flushPolicy.flushOnDocCount()
-        && !flushPolicy.flushOnDeleteTerms()) {
+    assertEquals(" all flushes must be due", 0, writer.getFlushingBytes());
+    assertEquals(numDocumentsToIndex, writer.getDocStats().numDocs);
+    assertEquals(numDocumentsToIndex, writer.getDocStats().maxDoc);
+    if (flushPolicy.flushOnRAM() && !flushPolicy.flushOnDocCount()) {
       final long maxRAMBytes = (long) (iwc.getRAMBufferSizeMB() * 1024. * 1024.);
       assertTrue("peak bytes without flush exceeded watermark",
           flushPolicy.peakBytesWithoutFlush <= maxRAMBytes);
@@ -239,7 +234,6 @@ public class TestFlushByRamOrCountsPolicy extends LuceneTestCase {
       dir.setThrottling(MockDirectoryWrapper.Throttling.SOMETIMES);
       IndexWriterConfig iwc = newIndexWriterConfig(analyzer);
       iwc.setMaxBufferedDocs(IndexWriterConfig.DISABLE_AUTO_FLUSH);
-      iwc.setMaxBufferedDeleteTerms(IndexWriterConfig.DISABLE_AUTO_FLUSH);
       FlushPolicy flushPolicy = new FlushByRamOrCountsPolicy();
       iwc.setFlushPolicy(flushPolicy);
       
@@ -261,9 +255,9 @@ public class TestFlushByRamOrCountsPolicy extends LuceneTestCase {
       DocumentsWriter docsWriter = writer.getDocsWriter();
       assertNotNull(docsWriter);
       DocumentsWriterFlushControl flushControl = docsWriter.flushControl;
-      assertEquals(" all flushes must be due", 0, flushControl.flushBytes());
-      assertEquals(numDocumentsToIndex, writer.numDocs());
-      assertEquals(numDocumentsToIndex, writer.maxDoc());
+      assertEquals(" all flushes must be due", 0, writer.getFlushingBytes());
+      assertEquals(numDocumentsToIndex, writer.getDocStats().numDocs);
+      assertEquals(numDocumentsToIndex, writer.getDocStats().maxDoc);
       if (numThreads[i] == 1) {
         assertFalse(
             "single thread must not block numThreads: " + numThreads[i],
@@ -290,7 +284,7 @@ public class TestFlushByRamOrCountsPolicy extends LuceneTestCase {
     assertEquals(bytesUsed, flushControl.activeBytes());
   }
 
-  public class IndexThread extends Thread {
+  public static class IndexThread extends Thread {
     IndexWriter writer;
     LiveIndexWriterConfig iwc;
     LineFileDocs docs;
@@ -345,10 +339,6 @@ public class TestFlushByRamOrCountsPolicy extends LuceneTestCase {
       final boolean flushCurrent = state.flushPending;
       final ThreadState toFlush;
       if (state.flushPending) {
-        toFlush = state;
-      } else if (flushOnDeleteTerms()
-          && state.dwpt.pendingUpdates.numTermDeletes.get() >= indexWriterConfig
-              .getMaxBufferedDeleteTerms()) {
         toFlush = state;
       } else {
         toFlush = null;

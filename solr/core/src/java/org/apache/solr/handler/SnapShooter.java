@@ -19,6 +19,7 @@ package org.apache.solr.handler;
 import java.io.IOException;
 import java.lang.invoke.MethodHandles;
 import java.net.URI;
+import java.nio.file.Paths;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Collection;
@@ -26,10 +27,10 @@ import java.util.Collections;
 import java.util.Date;
 import java.util.List;
 import java.util.Locale;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.function.Consumer;
 
-import com.google.common.base.Preconditions;
 import org.apache.lucene.index.IndexCommit;
 import org.apache.lucene.store.Directory;
 import org.apache.solr.common.SolrException;
@@ -42,8 +43,6 @@ import org.apache.solr.core.backup.repository.BackupRepository;
 import org.apache.solr.core.backup.repository.BackupRepository.PathType;
 import org.apache.solr.core.backup.repository.LocalFileSystemRepository;
 import org.apache.solr.core.snapshots.SolrSnapshotMetaDataManager;
-import org.apache.solr.search.SolrIndexSearcher;
-import org.apache.solr.util.RefCounted;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -55,7 +54,7 @@ import org.slf4j.LoggerFactory;
  * @since solr 1.4
  */
 public class SnapShooter {
-  private static final Logger LOG = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
+  private static final Logger log = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
   private SolrCore solrCore;
   private String snapshotName = null;
   private String directoryName = null;
@@ -75,17 +74,17 @@ public class SnapShooter {
     } else {
       snapDirStr = core.getCoreDescriptor().getInstanceDir().resolve(location).normalize().toString();
     }
-    initialize(new LocalFileSystemRepository(), core, snapDirStr, snapshotName, null);
+    initialize(new LocalFileSystemRepository(), core, Paths.get(snapDirStr).toUri(), snapshotName, null);
   }
 
-  public SnapShooter(BackupRepository backupRepo, SolrCore core, String location, String snapshotName, String commitName) {
+  public SnapShooter(BackupRepository backupRepo, SolrCore core, URI location, String snapshotName, String commitName) {
     initialize(backupRepo, core, location, snapshotName, commitName);
   }
 
-  private void initialize(BackupRepository backupRepo, SolrCore core, String location, String snapshotName, String commitName) {
-    this.solrCore = Preconditions.checkNotNull(core);
-    this.backupRepo = Preconditions.checkNotNull(backupRepo);
-    this.baseSnapDirPath = backupRepo.createURI(Preconditions.checkNotNull(location)).normalize();
+  private void initialize(BackupRepository backupRepo, SolrCore core, URI location, String snapshotName, String commitName) {
+    this.solrCore = Objects.requireNonNull(core);
+    this.backupRepo = Objects.requireNonNull(backupRepo);
+    this.baseSnapDirPath = location;
     this.snapshotName = snapshotName;
     if (snapshotName != null) {
       directoryName = "snapshot." + snapshotName;
@@ -93,7 +92,7 @@ public class SnapShooter {
       SimpleDateFormat fmt = new SimpleDateFormat(DATE_FMT, Locale.ROOT);
       directoryName = "snapshot." + fmt.format(new Date());
     }
-    this.snapshotDirPath = backupRepo.createURI(location, directoryName);
+    this.snapshotDirPath = backupRepo.resolve(location, directoryName);
     this.commitName = commitName;
   }
 
@@ -110,7 +109,7 @@ public class SnapShooter {
   }
 
   public void validateDeleteSnapshot() {
-    Preconditions.checkNotNull(this.snapshotName);
+    Objects.requireNonNull(this.snapshotName);
 
     boolean dirFound = false;
     String[] paths;
@@ -150,43 +149,64 @@ public class SnapShooter {
   }
 
   public NamedList createSnapshot() throws Exception {
-    RefCounted<SolrIndexSearcher> searcher = solrCore.getSearcher();
-    try {
-      if (commitName != null) {
-        SolrSnapshotMetaDataManager snapshotMgr = solrCore.getSnapshotMetaDataManager();
-        Optional<IndexCommit> commit = snapshotMgr.getIndexCommitByName(commitName);
-        if(commit.isPresent()) {
-          return createSnapshot(commit.get());
-        }
-        throw new SolrException(ErrorCode.SERVER_ERROR, "Unable to find an index commit with name " + commitName +
-            " for core " + solrCore.getName());
-      } else {
-        //TODO should we try solrCore.getDeletionPolicy().getLatestCommit() first?
-        IndexDeletionPolicyWrapper deletionPolicy = solrCore.getDeletionPolicy();
-        IndexCommit indexCommit = searcher.get().getIndexReader().getIndexCommit();
-        deletionPolicy.saveCommitPoint(indexCommit.getGeneration());
-        try {
-          return createSnapshot(indexCommit);
-        } finally {
-          deletionPolicy.releaseCommitPoint(indexCommit.getGeneration());
-        }
+    IndexCommit indexCommit;
+    if (commitName != null) {
+      indexCommit = getIndexCommitFromName();
+      return createSnapshot(indexCommit);
+    } else {
+      indexCommit = getIndexCommit();
+      IndexDeletionPolicyWrapper deletionPolicy = solrCore.getDeletionPolicy();
+      deletionPolicy.saveCommitPoint(indexCommit.getGeneration());
+      try {
+        return createSnapshot(indexCommit);
+      } finally {
+        deletionPolicy.releaseCommitPoint(indexCommit.getGeneration());
       }
-    } finally {
-      searcher.decref();
     }
   }
 
-  public void createSnapAsync(final IndexCommit indexCommit, final int numberToKeep, Consumer<NamedList> result) {
-    solrCore.getDeletionPolicy().saveCommitPoint(indexCommit.getGeneration());
+  private IndexCommit getIndexCommit() throws IOException {
+    IndexDeletionPolicyWrapper delPolicy = solrCore.getDeletionPolicy();
+    IndexCommit indexCommit = delPolicy.getLatestCommit();
+    if (indexCommit != null) {
+      return indexCommit;
+    }
+    return solrCore.withSearcher(searcher -> searcher.getIndexReader().getIndexCommit());
+  }
 
+  private IndexCommit getIndexCommitFromName() throws IOException {
+    assert commitName !=null;
+    IndexCommit indexCommit;
+    SolrSnapshotMetaDataManager snapshotMgr = solrCore.getSnapshotMetaDataManager();
+    Optional<IndexCommit> commit = snapshotMgr.getIndexCommitByName(commitName);
+    if (commit.isPresent()) {
+      indexCommit = commit.get();
+    } else {
+      throw new SolrException(ErrorCode.BAD_REQUEST, "Unable to find an index commit with name " + commitName +
+          " for core " + solrCore.getName());
+    }
+    return indexCommit;
+  }
+
+  public void createSnapAsync(final int numberToKeep, Consumer<NamedList> result) throws IOException {
+    IndexCommit indexCommit;
+    if (commitName != null) {
+      indexCommit = getIndexCommitFromName();
+    } else {
+      indexCommit = getIndexCommit();
+    }
+    createSnapAsync(indexCommit, numberToKeep, result);
+  }
+
+  private void createSnapAsync(final IndexCommit indexCommit, final int numberToKeep, Consumer<NamedList> result) {
     //TODO should use Solr's ExecutorUtil
     new Thread(() -> {
       try {
         result.accept(createSnapshot(indexCommit));
       } catch (Exception e) {
-        LOG.error("Exception while creating snapshot", e);
+        log.error("Exception while creating snapshot", e);
         NamedList snapShootDetails = new NamedList<>();
-        snapShootDetails.add("snapShootException", e.getMessage());
+        snapShootDetails.add("exception", e.getMessage());
         result.accept(snapShootDetails);
       } finally {
         solrCore.getDeletionPolicy().releaseCommitPoint(indexCommit.getGeneration());
@@ -195,7 +215,7 @@ public class SnapShooter {
         try {
           deleteOldBackups(numberToKeep);
         } catch (IOException e) {
-          LOG.warn("Unable to delete old snapshots ", e);
+          log.warn("Unable to delete old snapshots ", e);
         }
       }
     }).start();
@@ -204,7 +224,8 @@ public class SnapShooter {
 
   // note: remember to reserve the indexCommit first so it won't get deleted concurrently
   protected NamedList createSnapshot(final IndexCommit indexCommit) throws Exception {
-    LOG.info("Creating backup snapshot " + (snapshotName == null ? "<not named>" : snapshotName) + " at " + baseSnapDirPath);
+    assert indexCommit != null;
+    log.info("Creating backup snapshot " + (snapshotName == null ? "<not named>" : snapshotName) + " at " + baseSnapDirPath);
     boolean success = false;
     try {
       NamedList<Object> details = new NamedList<>();
@@ -224,13 +245,17 @@ public class SnapShooter {
       details.add("status", "success");
       details.add("snapshotCompletedAt", new Date().toString());//bad; should be Instant.now().toString()
       details.add("snapshotName", snapshotName);
-      LOG.info("Done creating backup snapshot: " + (snapshotName == null ? "<not named>" : snapshotName) +
+      log.info("Done creating backup snapshot: " + (snapshotName == null ? "<not named>" : snapshotName) +
           " at " + baseSnapDirPath);
       success = true;
       return details;
     } finally {
       if (!success) {
-        backupRepo.deleteDirectory(snapshotDirPath);
+        try {
+          backupRepo.deleteDirectory(snapshotDirPath);
+        } catch (Exception excDuringDelete) {
+          log.warn("Failed to delete "+snapshotDirPath+" after snapshot creation failed due to: "+excDuringDelete);
+        }
       }
     }
   }
@@ -259,7 +284,7 @@ public class SnapShooter {
   }
 
   protected void deleteNamedSnapshot(ReplicationHandler replicationHandler) {
-    LOG.info("Deleting snapshot: " + snapshotName);
+    log.info("Deleting snapshot: " + snapshotName);
 
     NamedList<Object> details = new NamedList<>();
 
@@ -272,7 +297,7 @@ public class SnapShooter {
 
     } catch (IOException e) {
       details.add("status", "Unable to delete snapshot: " + snapshotName);
-      LOG.warn("Unable to delete snapshot: " + snapshotName, e);
+      log.warn("Unable to delete snapshot: " + snapshotName, e);
     }
 
     replicationHandler.snapShootDetails = details;

@@ -16,8 +16,6 @@
  */
 package org.apache.solr.util;
 
-import java.io.File;
-import java.util.Random;
 import java.security.KeyManagementException;
 import java.security.KeyStore;
 import java.security.KeyStoreException;
@@ -25,112 +23,114 @@ import java.security.NoSuchAlgorithmException;
 import java.security.SecureRandom;
 import java.security.SecureRandomSpi;
 import java.security.UnrecoverableKeyException;
+import java.util.Random;
 
 import javax.net.ssl.SSLContext;
-import java.net.MalformedURLException;
 
 import org.apache.http.config.Registry;
 import org.apache.http.config.RegistryBuilder;
 import org.apache.http.conn.socket.ConnectionSocketFactory;
 import org.apache.http.conn.socket.PlainConnectionSocketFactory;
+import org.apache.http.conn.ssl.NoopHostnameVerifier;
 import org.apache.http.conn.ssl.SSLConnectionSocketFactory;
-import org.apache.http.conn.ssl.SSLContexts;
-import org.apache.http.conn.ssl.SSLContextBuilder;
-import org.apache.http.conn.ssl.SSLSocketFactory;
 import org.apache.http.conn.ssl.TrustSelfSignedStrategy;
+import org.apache.http.ssl.SSLContextBuilder;
+import org.apache.http.ssl.SSLContexts;
 import org.apache.solr.client.solrj.embedded.SSLConfig;
 import org.apache.solr.client.solrj.impl.HttpClientUtil;
 import org.apache.solr.client.solrj.impl.HttpClientUtil.SchemaRegistryProvider;
+import org.apache.solr.client.solrj.util.Constants;
 import org.eclipse.jetty.util.resource.Resource;
 import org.eclipse.jetty.util.security.CertificateUtils;
 import org.eclipse.jetty.util.ssl.SslContextFactory;
 
 /**
- * An {@link SSLConfig} that supports reading key/trust store information directly from resource 
- * files provided with the Solr test-framework classes
+ * An SSLConfig that provides {@link SSLConfig} and {@link SchemaRegistryProvider} for both clients and servers
+ * that supports reading key/trust store information directly from resource files provided with the
+ * Solr test-framework classes
  */
-public class SSLTestConfig extends SSLConfig {
+public class SSLTestConfig {
 
-  /** @deprecated No longer used except by {@link #setSSLSystemProperties} */
-  public static File TEST_KEYSTORE = ExternalPaths.SERVER_HOME == null ? null
-    : new File(ExternalPaths.SERVER_HOME, "../etc/test/solrtest.keystore");
-  
-  /** @deprecated No longer used except by {@link #setSSLSystemProperties} */
-  private static String TEST_KEYSTORE_PATH = TEST_KEYSTORE != null
-    && TEST_KEYSTORE.exists() ? TEST_KEYSTORE.getAbsolutePath() : null;
+  private static final String TEST_KEYSTORE_BOGUSHOST_RESOURCE = "SSLTestConfig.hostname-and-ip-missmatch.keystore";
+  private static final String TEST_KEYSTORE_LOCALHOST_RESOURCE = "SSLTestConfig.testing.keystore";
+  private static final String TEST_PASSWORD = "secret";
 
-  private static final String TEST_KEYSTORE_RESOURCE = "SSLTestConfig.testing.keystore";
-  private static final String TEST_KEYSTORE_PASSWORD = "secret";
-
+  private final boolean checkPeerName;
   private final Resource keyStore;
   private final Resource trustStore;
+  private boolean useSsl;
+  private boolean clientAuth;
   
   /** Creates an SSLTestConfig that does not use SSL or client authentication */
   public SSLTestConfig() {
     this(false, false);
   }
-
-  /** 
-   * Create an SSLTestConfig based on a few caller specified options.  As needed, 
-   * keystore/truststore information will be pulled from a hardocded resource file provided 
-   * by the solr test-framework.
+  
+  /**
+   * Create an SSLTestConfig based on a few caller specified options, 
+   * implicitly assuming <code>checkPeerName=false</code>.  
+   * <p>
+   * As needed, keystore/truststore information will be pulled from a hardcoded resource 
+   * file provided by the solr test-framework
+   * </p>
    *
-   * @param useSSL - wether SSL should be required.
+   * @param useSSL - whether SSL should be required.
    * @param clientAuth - whether client authentication should be required.
    */
   public SSLTestConfig(boolean useSSL, boolean clientAuth) {
-    super(useSSL, clientAuth, null, TEST_KEYSTORE_PASSWORD, null, TEST_KEYSTORE_PASSWORD);
-    trustStore = keyStore = Resource.newClassPathResource(TEST_KEYSTORE_RESOURCE);
+    this(useSSL, clientAuth, false);
+  }
+
+  // NOTE: if any javadocs below change, update create-keystores.sh
+  /**
+   * Create an SSLTestConfig based on a few caller specified options.  As needed, 
+   * keystore/truststore information will be pulled from a hardcoded resource files provided 
+   * by the solr test-framework based on the value of <code>checkPeerName</code>:
+   * <ul>
+   * <li><code>true</code> - A keystore resource file will be used that specifies 
+   *     a CN of <code>localhost</code> and a SAN IP of <code>127.0.0.1</code>, to 
+   *     ensure that all connections should be valid regardless of what machine runs the tests.</li> 
+   * <li><code>false</code> - A keystore resource file will be used that specifies 
+   *     a bogus hostname in the CN and reserved IP as the SAN, since no (valid) tests using this 
+   *     SSLTestConfig should care what CN/SAN are.</li> 
+   * </ul>
+   *
+   * @param useSSL - whether SSL should be required.
+   * @param clientAuth - whether client authentication should be required.
+   * @param checkPeerName - whether the client should validate the 'peer name' of the SSL Certificate (and which testing Cert should be used)
+   * @see HttpClientUtil#SYS_PROP_CHECK_PEER_NAME
+   */
+  public SSLTestConfig(boolean useSSL, boolean clientAuth, boolean checkPeerName) {
+    // @AwaitsFix: SOLR-12988 - ssl issues on Java 11/12
+    if (Constants.JRE_IS_MINIMUM_JAVA11) {
+      this.useSsl = false;
+    } else {
+      this.useSsl = useSSL;
+    }
+    this.clientAuth = clientAuth;
+    this.checkPeerName = checkPeerName;
+
+    final String resourceName = checkPeerName
+      ? TEST_KEYSTORE_LOCALHOST_RESOURCE : TEST_KEYSTORE_BOGUSHOST_RESOURCE;
+    trustStore = keyStore = Resource.newClassPathResource(resourceName);
     if (null == keyStore || ! keyStore.exists() ) {
       throw new IllegalStateException("Unable to locate keystore resource file in classpath: "
-                                      + TEST_KEYSTORE_RESOURCE);
+                                      + resourceName);
     }
   }
 
-  /** 
-   * Create an SSLTestConfig using explicit paths for files 
-   * @deprecated - use {@link SSLConfig} directly
-   */
-  @Deprecated
-  public SSLTestConfig(boolean useSSL, boolean clientAuth, String keyStore, String keyStorePassword, String trustStore, String trustStorePassword) {
-    super(useSSL, clientAuth, keyStore, keyStorePassword, trustStore, trustStorePassword);
-    this.keyStore = tryNewResource(keyStore, "KeyStore");
-    this.trustStore = tryNewResource(trustStore, "TrustStore");
+  /** If true, then servers hostname/ip should be validated against the SSL Cert metadata */
+  public boolean getCheckPeerName() {
+    return checkPeerName;
   }
 
-  /**
-   * Helper utility for building resources from arbitrary user input paths/urls
-   * if input is null, returns null; otherwise attempts to build Resource and verifies that Resource exists.
-   */
-  private static final Resource tryNewResource(String userInput, String type) {
-    if (null == userInput) {
-      return null;
-    }
-    Resource result;
-    try {
-      result = Resource.newResource(userInput);
-    } catch (MalformedURLException e) {
-      throw new IllegalArgumentException("Can't build " + type + " Resource: " + e.getMessage(), e);
-    }
-    if (! result.exists()) {
-      throw new IllegalArgumentException(type + " Resource does not exist " + result.getName());
-    }
-    return result;
+  /** All other settings on this object are ignored unless this is true */
+  public boolean isSSLMode() {
+    return useSsl;
   }
 
-  /** NOTE: This method is meaningless unless you explicitly provide paths when constructing this instance 
-   * @see #SSLTestConfig(boolean,boolean,String,String,String,String)
-   */
-  @Override
-  public String getKeyStore() {
-    return super.getKeyStore();
-  }
-  /** NOTE: This method is meaningless unless you explicitly provide paths when constructing this instance 
-   * @see #SSLTestConfig(boolean,boolean,String,String,String,String)
-   */
-  @Override
-  public String getTrustStore() {
-    return super.getTrustStore();
+  public boolean isClientAuthMode() {
+    return clientAuth;
   }
   
   /**
@@ -168,16 +168,35 @@ public class SSLTestConfig extends SSLConfig {
     
     // NOTE: KeyStore & TrustStore are swapped because they are from configured from server perspective...
     // we are a client - our keystore contains the keys the server trusts, and vice versa
-    builder.loadTrustMaterial(buildKeyStore(keyStore, getKeyStorePassword()), new TrustSelfSignedStrategy()).build();
+    builder.loadTrustMaterial(buildKeyStore(keyStore, TEST_PASSWORD), new TrustSelfSignedStrategy()).build();
 
     if (isClientAuthMode()) {
-      builder.loadKeyMaterial(buildKeyStore(trustStore, getTrustStorePassword()), getTrustStorePassword().toCharArray());
-      
+      builder.loadKeyMaterial(buildKeyStore(trustStore, TEST_PASSWORD), TEST_PASSWORD.toCharArray());
     }
 
     return builder.build();
   }
-  
+
+  public SSLConfig buildClientSSLConfig() {
+    if (!isSSLMode()) {
+      return null;
+    }
+
+    return new SSLConfig(isSSLMode(), isClientAuthMode(), null, null, null, null) {
+      @Override
+      public SslContextFactory createContextFactory() {
+        SslContextFactory factory = new SslContextFactory(false);
+        try {
+          factory.setSslContext(buildClientSSLContext());
+          factory.setNeedClientAuth(checkPeerName);
+        } catch (KeyManagementException | UnrecoverableKeyException | NoSuchAlgorithmException | KeyStoreException e) {
+          throw new IllegalStateException("Unable to setup https scheme for HTTPClient to test SSL.", e);
+        }
+        return factory;
+      }
+    };
+  }
+
   /**
    * Builds a new SSLContext for jetty servers which have been configured based on the settings of 
    * this object.
@@ -187,49 +206,39 @@ public class SSLTestConfig extends SSLConfig {
    * certificates (since that's what is almost always used during testing).
    * almost always used during testing). 
    */
-  public SSLContext buildServerSSLContext() throws KeyManagementException, 
-    UnrecoverableKeyException, NoSuchAlgorithmException, KeyStoreException {
-
-    assert isSSLMode();
-    
-    SSLContextBuilder builder = SSLContexts.custom();
-    builder.setSecureRandom(NotSecurePsuedoRandom.INSTANCE);
-    
-    builder.loadKeyMaterial(buildKeyStore(keyStore, getKeyStorePassword()), getKeyStorePassword().toCharArray());
-
-    if (isClientAuthMode()) {
-      builder.loadTrustMaterial(buildKeyStore(trustStore, getTrustStorePassword()), new TrustSelfSignedStrategy()).build();
-      
-    }
-
-    return builder.build();
-  }
-
-  /**
-   * Returns an SslContextFactory using {@link #buildServerSSLContext} if SSL should be used, else returns null.
-   */
-  @Override
-  public SslContextFactory createContextFactory() {
+  public SSLConfig buildServerSSLConfig() {
     if (!isSSLMode()) {
       return null;
     }
-    // else...
 
-    
-    SslContextFactory factory = new SslContextFactory(false);
-    try {
-      factory.setSslContext(buildServerSSLContext());
-    } catch (Exception e) { 
-      throw new RuntimeException("ssl context init failure: " + e.getMessage(), e); 
-    }
-    factory.setNeedClientAuth(isClientAuthMode());
-    return factory;
+    return new SSLConfig(isSSLMode(), isClientAuthMode(), null, null, null, null) {
+      @Override
+      public SslContextFactory createContextFactory() {
+        SslContextFactory factory = new SslContextFactory(false);
+        try {
+          SSLContextBuilder builder = SSLContexts.custom();
+          builder.setSecureRandom(NotSecurePsuedoRandom.INSTANCE);
+
+          builder.loadKeyMaterial(buildKeyStore(keyStore, TEST_PASSWORD), TEST_PASSWORD.toCharArray());
+
+          if (isClientAuthMode()) {
+            builder.loadTrustMaterial(buildKeyStore(trustStore, TEST_PASSWORD), new TrustSelfSignedStrategy()).build();
+
+          }
+          factory.setSslContext(builder.build());
+        } catch (Exception e) {
+          throw new RuntimeException("ssl context init failure: " + e.getMessage(), e);
+        }
+        factory.setNeedClientAuth(isClientAuthMode());
+        return factory;
+      }
+    };
   }
-  
+
   /**
    * Constructs a KeyStore using the specified filename and password
    */
-  protected static KeyStore buildKeyStore(Resource resource, String password) {
+  private static KeyStore buildKeyStore(Resource resource, String password) {
     try {
       return CertificateUtils.getKeyStore(resource, "JKS", null, password);
     } catch (Exception ex) {
@@ -248,11 +257,9 @@ public class SSLTestConfig extends SSLConfig {
     }
     SSLConnectionSocketFactory sslConnectionFactory;
     try {
-      boolean sslCheckPeerName = toBooleanDefaultIfNull(toBooleanObject(System.getProperty(HttpClientUtil.SYS_PROP_CHECK_PEER_NAME)), true);
       SSLContext sslContext = buildClientSSLContext();
-      if (sslCheckPeerName == false) {
-        sslConnectionFactory = new SSLConnectionSocketFactory
-          (sslContext, SSLSocketFactory.ALLOW_ALL_HOSTNAME_VERIFIER);
+      if (checkPeerName == false) {
+        sslConnectionFactory = new SSLConnectionSocketFactory(sslContext, NoopHostnameVerifier.INSTANCE);
       } else {
         sslConnectionFactory = new SSLConnectionSocketFactory(sslContext);
       }
@@ -283,47 +290,6 @@ public class SSLTestConfig extends SSLConfig {
         .register("http", PlainConnectionSocketFactory.getSocketFactory()).build();
     }
   };
-  
-  public static boolean toBooleanDefaultIfNull(Boolean bool, boolean valueIfNull) {
-    if (bool == null) {
-      return valueIfNull;
-    }
-    return bool.booleanValue() ? true : false;
-  }
-  
-  public static Boolean toBooleanObject(String str) {
-    if ("true".equalsIgnoreCase(str)) {
-      return Boolean.TRUE;
-    } else if ("false".equalsIgnoreCase(str)) {
-      return Boolean.FALSE;
-    }
-    // no match
-    return null;
-  }
-
-  /**
-   * @deprecated this method has very little practical use, in most cases you'll want to use 
-   * {@link SSLContext#setDefault} with {@link #buildClientSSLContext} instead.
-   */
-  @Deprecated
-  public static void setSSLSystemProperties() {
-    System.setProperty("javax.net.ssl.keyStore", TEST_KEYSTORE_PATH);
-    System.setProperty("javax.net.ssl.keyStorePassword", TEST_KEYSTORE_PASSWORD);
-    System.setProperty("javax.net.ssl.trustStore", TEST_KEYSTORE_PATH);
-    System.setProperty("javax.net.ssl.trustStorePassword", TEST_KEYSTORE_PASSWORD);
-  }
-  
-  /**
-   * @deprecated this method has very little practical use, in most cases you'll want to use 
-   * {@link SSLContext#setDefault} with {@link #buildClientSSLContext} instead.
-   */
-  @Deprecated
-  public static void clearSSLSystemProperties() {
-    System.clearProperty("javax.net.ssl.keyStore");
-    System.clearProperty("javax.net.ssl.keyStorePassword");
-    System.clearProperty("javax.net.ssl.trustStore");
-    System.clearProperty("javax.net.ssl.trustStorePassword");
-  }
 
   /**
    * A mocked up instance of SecureRandom that just uses {@link Random} under the covers.

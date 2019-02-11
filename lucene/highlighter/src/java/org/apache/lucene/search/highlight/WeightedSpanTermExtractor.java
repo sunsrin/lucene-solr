@@ -18,7 +18,6 @@ package org.apache.lucene.search.highlight;
 
 import java.io.IOException;
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
@@ -30,7 +29,6 @@ import org.apache.lucene.analysis.CachingTokenFilter;
 import org.apache.lucene.analysis.TokenStream;
 import org.apache.lucene.index.BinaryDocValues;
 import org.apache.lucene.index.FieldInfos;
-import org.apache.lucene.index.Fields;
 import org.apache.lucene.index.FilterLeafReader;
 import org.apache.lucene.index.IndexReader;
 import org.apache.lucene.index.LeafReader;
@@ -41,7 +39,7 @@ import org.apache.lucene.index.Term;
 import org.apache.lucene.index.Terms;
 import org.apache.lucene.index.memory.MemoryIndex;
 import org.apache.lucene.queries.CommonTermsQuery;
-import org.apache.lucene.queries.CustomScoreQuery;
+import org.apache.lucene.queries.function.FunctionScoreQuery;
 import org.apache.lucene.search.BooleanClause;
 import org.apache.lucene.search.BooleanQuery;
 import org.apache.lucene.search.BoostQuery;
@@ -53,25 +51,49 @@ import org.apache.lucene.search.MultiPhraseQuery;
 import org.apache.lucene.search.MultiTermQuery;
 import org.apache.lucene.search.PhraseQuery;
 import org.apache.lucene.search.Query;
+import org.apache.lucene.search.ScoreMode;
 import org.apache.lucene.search.SynonymQuery;
 import org.apache.lucene.search.TermQuery;
-import org.apache.lucene.search.join.ToChildBlockJoinQuery;
-import org.apache.lucene.search.join.ToParentBlockJoinQuery;
 import org.apache.lucene.search.spans.FieldMaskingSpanQuery;
 import org.apache.lucene.search.spans.SpanFirstQuery;
 import org.apache.lucene.search.spans.SpanNearQuery;
 import org.apache.lucene.search.spans.SpanNotQuery;
 import org.apache.lucene.search.spans.SpanOrQuery;
 import org.apache.lucene.search.spans.SpanQuery;
-import org.apache.lucene.search.spans.Spans;
 import org.apache.lucene.search.spans.SpanTermQuery;
 import org.apache.lucene.search.spans.SpanWeight;
+import org.apache.lucene.search.spans.Spans;
 import org.apache.lucene.util.Bits;
 import org.apache.lucene.util.IOUtils;
 
 /**
  * Class used to extract {@link WeightedSpanTerm}s from a {@link Query} based on whether 
  * {@link Term}s from the {@link Query} are contained in a supplied {@link TokenStream}.
+ *
+ * In order to support additional, by default unsupported queries, subclasses can override
+ * {@link #extract(Query, float, Map)} for extracting wrapped or delegate queries and
+ * {@link #extractUnknownQuery(Query, Map)} to process custom leaf queries:
+ * <pre>
+ * <code>
+ *    WeightedSpanTermExtractor extractor = new WeightedSpanTermExtractor() {
+ *        protected void extract(Query query, float boost, Map&lt;String, WeightedSpanTerm&gt;terms) throws IOException {
+ *          if (query instanceof QueryWrapper) {
+ *            extract(((QueryWrapper)query).getQuery(), boost, terms);
+ *          } else {
+ *            super.extract(query, boost, terms);
+ *          }
+ *        }
+ *
+ *        protected void extractUnknownQuery(Query query, Map&lt;String, WeightedSpanTerm&gt; terms) throws IOException {
+ *          if (query instanceOf CustomTermQuery) {
+ *            Term term = ((CustomTermQuery) query).getTerm();
+ *            terms.put(term.field(), new WeightedSpanTerm(1, term.text()));
+ *          }
+ *        }
+ *    };
+ * }
+ * </code>
+ * </pre>
  */
 public class WeightedSpanTermExtractor {
 
@@ -86,12 +108,11 @@ public class WeightedSpanTermExtractor {
   private LeafReader internalReader = null;
 
   public WeightedSpanTermExtractor() {
+    this(null);
   }
 
   public WeightedSpanTermExtractor(String defaultField) {
-    if (defaultField != null) {
-      this.defaultField = defaultField;
-    }
+    this.defaultField = defaultField;
   }
 
   /**
@@ -118,8 +139,7 @@ public class WeightedSpanTermExtractor {
       Term[] phraseQueryTerms = phraseQuery.getTerms();
       if (phraseQueryTerms.length == 1) {
         extractWeightedSpanTerms(terms, new SpanTermQuery(phraseQueryTerms[0]), boost);
-      }
-      else {
+      } else {
         SpanQuery[] clauses = new SpanQuery[phraseQueryTerms.length];
         for (int i = 0; i < phraseQueryTerms.length; i++) {
           clauses[i] = new SpanTermQuery(phraseQueryTerms[i]);
@@ -150,16 +170,12 @@ public class WeightedSpanTermExtractor {
       }
     } else if (query instanceof CommonTermsQuery) {
       // specialized since rewriting would change the result query 
-      // this query is TermContext sensitive.
+      // this query is index sensitive.
       extractWeightedTerms(terms, query, boost);
     } else if (query instanceof DisjunctionMaxQuery) {
-      for (Iterator<Query> iterator = ((DisjunctionMaxQuery) query).iterator(); iterator.hasNext();) {
-        extract(iterator.next(), boost, terms);
+      for (Query clause : ((DisjunctionMaxQuery) query)) {
+        extract(clause, boost, terms);
       }
-    } else if (query instanceof ToParentBlockJoinQuery) {
-      extract(((ToParentBlockJoinQuery) query).getChildQuery(), boost, terms);
-    } else if (query instanceof ToChildBlockJoinQuery) {
-      extract(((ToChildBlockJoinQuery) query).getParentQuery(), boost, terms);
     } else if (query instanceof MultiPhraseQuery) {
       final MultiPhraseQuery mpq = (MultiPhraseQuery) query;
       final Term[][] termArrays = mpq.getTermArrays();
@@ -184,16 +200,15 @@ public class WeightedSpanTermExtractor {
             disjuncts = (disjunctLists[positions[i]] = new ArrayList<>(termArray.length));
             ++distinctPositions;
           }
-          for (int j = 0; j < termArray.length; ++j) {
-            disjuncts.add(new SpanTermQuery(termArray[j]));
+          for (Term aTermArray : termArray) {
+            disjuncts.add(new SpanTermQuery(aTermArray));
           }
         }
 
         int positionGaps = 0;
         int position = 0;
         final SpanQuery[] clauses = new SpanQuery[distinctPositions];
-        for (int i = 0; i < disjunctLists.length; ++i) {
-          List<SpanQuery> disjuncts = disjunctLists[i];
+        for (List<SpanQuery> disjuncts : disjunctLists) {
           if (disjuncts != null) {
             clauses[position++] = new SpanOrQuery(disjuncts
                 .toArray(new SpanQuery[disjuncts.size()]));
@@ -202,26 +217,31 @@ public class WeightedSpanTermExtractor {
           }
         }
 
-        final int slop = mpq.getSlop();
-        final boolean inorder = (slop == 0);
+        if (clauses.length == 1) {
+          extractWeightedSpanTerms(terms, clauses[0], boost);
+        } else {
+          final int slop = mpq.getSlop();
+          final boolean inorder = (slop == 0);
 
-        SpanNearQuery sp = new SpanNearQuery(clauses, slop + positionGaps, inorder);
-        extractWeightedSpanTerms(terms, sp, boost);
+          SpanNearQuery sp = new SpanNearQuery(clauses, slop + positionGaps, inorder);
+          extractWeightedSpanTerms(terms, sp, boost);
+        }
       }
     } else if (query instanceof MatchAllDocsQuery) {
       //nothing
-    } else if (query instanceof CustomScoreQuery){
-      extract(((CustomScoreQuery) query).getSubQuery(), boost, terms);
+    } else if (query instanceof FunctionScoreQuery) {
+      extract(((FunctionScoreQuery) query).getWrappedQuery(), boost, terms);
     } else if (isQueryUnsupported(query.getClass())) {
       // nothing
     } else {
+      if (query instanceof MultiTermQuery &&
+          (!expandMultiTermQuery || !fieldNameComparator(((MultiTermQuery)query).getField()))) {
+        return;
+      }
       Query origQuery = query;
       final IndexReader reader = getLeafContext().reader();
       Query rewritten;
       if (query instanceof MultiTermQuery) {
-        if (!expandMultiTermQuery) {
-          return;
-        }
         rewritten = MultiTermQuery.SCORING_BOOLEAN_REWRITE.rewrite(reader, (MultiTermQuery) query);
       } else {
         rewritten = origQuery.rewrite(reader);
@@ -288,10 +308,10 @@ public class WeightedSpanTermExtractor {
       for (final String field : fieldNames) {
         final SpanQuery rewrittenQuery = (SpanQuery) spanQuery.rewrite(getLeafContext().reader());
         queries.put(field, rewrittenQuery);
-        rewrittenQuery.createWeight(searcher, false, boost).extractTerms(nonWeightedTerms);
+        rewrittenQuery.createWeight(searcher, ScoreMode.COMPLETE_NO_SCORES, boost).extractTerms(nonWeightedTerms);
       }
     } else {
-      spanQuery.createWeight(searcher, false, boost).extractTerms(nonWeightedTerms);
+      spanQuery.createWeight(searcher, ScoreMode.COMPLETE_NO_SCORES, boost).extractTerms(nonWeightedTerms);
     }
 
     List<PositionSpan> spanPositions = new ArrayList<>();
@@ -304,7 +324,7 @@ public class WeightedSpanTermExtractor {
         q = spanQuery;
       }
       LeafReaderContext context = getLeafContext();
-      SpanWeight w = (SpanWeight) searcher.createNormalizedWeight(q, false);
+      SpanWeight w = (SpanWeight) searcher.createWeight(searcher.rewrite(q), ScoreMode.COMPLETE_NO_SCORES, 1);
       Bits acceptDocs = context.reader().getLiveDocs();
       final Spans spans = w.getSpans(context, SpanWeight.Postings.POSITIONS);
       if (spans == null) {
@@ -358,7 +378,7 @@ public class WeightedSpanTermExtractor {
   protected void extractWeightedTerms(Map<String,WeightedSpanTerm> terms, Query query, float boost) throws IOException {
     Set<Term> nonWeightedTerms = new HashSet<>();
     final IndexSearcher searcher = new IndexSearcher(getLeafContext());
-    searcher.createNormalizedWeight(query, false).extractTerms(nonWeightedTerms);
+    searcher.createWeight(searcher.rewrite(query), ScoreMode.COMPLETE_NO_SCORES, 1).extractTerms(nonWeightedTerms);
 
     for (final Term queryTerm : nonWeightedTerms) {
 
@@ -426,30 +446,15 @@ public class WeightedSpanTermExtractor {
     DelegatingLeafReader(LeafReader in) {
       super(in);
     }
-    
+
     @Override
     public FieldInfos getFieldInfos() {
-      throw new UnsupportedOperationException();
+      throw new UnsupportedOperationException();//TODO merge them
     }
 
     @Override
-    public Fields fields() throws IOException {
-      return new FilterFields(super.fields()) {
-        @Override
-        public Terms terms(String field) throws IOException {
-          return super.terms(DelegatingLeafReader.FIELD_NAME);
-        }
-
-        @Override
-        public Iterator<String> iterator() {
-          return Collections.singletonList(DelegatingLeafReader.FIELD_NAME).iterator();
-        }
-
-        @Override
-        public int size() {
-          return 1;
-        }
-      };
+    public Terms terms(String field) throws IOException {
+      return super.terms(DelegatingLeafReader.FIELD_NAME);
     }
 
     @Override
@@ -473,8 +478,13 @@ public class WeightedSpanTermExtractor {
     }
 
     @Override
-    public Bits getDocsWithField(String field) throws IOException {
-      return super.getDocsWithField(FIELD_NAME);
+    public CacheHelper getCoreCacheHelper() {
+      return null;
+    }
+
+    @Override
+    public CacheHelper getReaderCacheHelper() {
+      return null;
     }
   }
 
@@ -511,11 +521,7 @@ public class WeightedSpanTermExtractor {
    */
   public Map<String,WeightedSpanTerm> getWeightedSpanTerms(Query query, float boost, TokenStream tokenStream,
       String fieldName) throws IOException {
-    if (fieldName != null) {
-      this.fieldName = fieldName;
-    } else {
-      this.fieldName = null;
-    }
+    this.fieldName = fieldName;
 
     Map<String,WeightedSpanTerm> terms = new PositionCheckingMap<>();
     this.tokenStream = tokenStream;

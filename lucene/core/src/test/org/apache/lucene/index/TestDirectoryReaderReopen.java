@@ -39,10 +39,11 @@ import org.apache.lucene.index.IndexWriterConfig.OpenMode;
 import org.apache.lucene.search.IndexSearcher;
 import org.apache.lucene.search.ScoreDoc;
 import org.apache.lucene.search.TermQuery;
+import org.apache.lucene.store.ByteBuffersDirectory;
 import org.apache.lucene.store.Directory;
 import org.apache.lucene.store.MockDirectoryWrapper;
 import org.apache.lucene.store.MockDirectoryWrapper.FakeIOException;
-import org.apache.lucene.store.RAMDirectory;
+import org.apache.lucene.util.IOUtils;
 import org.apache.lucene.util.LuceneTestCase;
 import org.apache.lucene.util.TestUtil;
 
@@ -204,6 +205,7 @@ public class TestDirectoryReaderReopen extends LuceneTestCase {
     final Directory dir = newDirectory();
     // NOTE: this also controls the number of threads!
     final int n = TestUtil.nextInt(random(), 20, 40);
+    
     IndexWriter writer = new IndexWriter(dir, newIndexWriterConfig(new MockAnalyzer(random())));
     for (int i = 0; i < n; i++) {
       writer.addDocument(createDocument(i, 3));
@@ -678,7 +680,7 @@ public class TestDirectoryReaderReopen extends LuceneTestCase {
     });
     
     IndexSearcher s = newSearcher(r);
-    assertEquals(1, s.search(new TermQuery(new Term("id", "id")), 1).totalHits);
+    assertEquals(1, s.count(new TermQuery(new Term("id", "id"))));
 
     r.close();
     w.close();
@@ -686,9 +688,9 @@ public class TestDirectoryReaderReopen extends LuceneTestCase {
   }
 
   public void testNPEAfterInvalidReindex1() throws Exception {
-    Directory dir = new RAMDirectory();
+    Directory dir = new ByteBuffersDirectory();
 
-    IndexWriter w = new IndexWriter(dir, new IndexWriterConfig(new MockAnalyzer(random())));
+    IndexWriter w = new IndexWriter(dir, new IndexWriterConfig(new MockAnalyzer(random())).setMergePolicy(NoMergePolicy.INSTANCE));
     Document doc = new Document();
     doc.add(newStringField("id", "id", Field.Store.NO));
     w.addDocument(doc);
@@ -733,9 +735,9 @@ public class TestDirectoryReaderReopen extends LuceneTestCase {
   }
 
   public void testNPEAfterInvalidReindex2() throws Exception {
-    Directory dir = new RAMDirectory();
+    Directory dir = new ByteBuffersDirectory();
 
-    IndexWriter w = new IndexWriter(dir, new IndexWriterConfig(new MockAnalyzer(random())));
+    IndexWriter w = new IndexWriter(dir, new IndexWriterConfig(new MockAnalyzer(random())).setMergePolicy(NoMergePolicy.INSTANCE));
     Document doc = new Document();
     doc.add(newStringField("id", "id", Field.Store.NO));
     w.addDocument(doc);
@@ -810,7 +812,8 @@ public class TestDirectoryReaderReopen extends LuceneTestCase {
     assertEquals(1, oldest.leaves().size());
     
     // sharing same core
-    assertSame(latest.leaves().get(0).reader().getCoreCacheKey(), oldest.leaves().get(0).reader().getCoreCacheKey());
+    assertSame(latest.leaves().get(0).reader().getCoreCacheHelper().getKey(),
+        oldest.leaves().get(0).reader().getCoreCacheHelper().getKey());
     
     latest.close();
     oldest.close();
@@ -860,7 +863,8 @@ public class TestDirectoryReaderReopen extends LuceneTestCase {
     assertEquals(1, oldest.leaves().size());
     
     // sharing same core
-    assertSame(latest.leaves().get(0).reader().getCoreCacheKey(), oldest.leaves().get(0).reader().getCoreCacheKey());
+    assertSame(latest.leaves().get(0).reader().getCoreCacheHelper().getKey(),
+        oldest.leaves().get(0).reader().getCoreCacheHelper().getKey());
     
     latest.close();
     oldest.close();
@@ -900,10 +904,16 @@ public class TestDirectoryReaderReopen extends LuceneTestCase {
     assertEquals(1, oldest.leaves().size());
     
     // sharing same core
-    assertSame(latest.leaves().get(0).reader().getCoreCacheKey(), oldest.leaves().get(0).reader().getCoreCacheKey());
-    
-    assertEquals(1, getOnlyLeafReader(oldest).getNumericDocValues("dv").get(0));
-    assertEquals(2, getOnlyLeafReader(latest).getNumericDocValues("dv").get(0));
+    assertSame(latest.leaves().get(0).reader().getCoreCacheHelper().getKey(),
+        oldest.leaves().get(0).reader().getCoreCacheHelper().getKey());
+
+    NumericDocValues values = getOnlyLeafReader(oldest).getNumericDocValues("dv");
+    assertEquals(0, values.nextDoc());
+    assertEquals(1, values.longValue());
+
+    values = getOnlyLeafReader(latest).getNumericDocValues("dv");
+    assertEquals(0, values.nextDoc());
+    assertEquals(2, values.longValue());
     
     latest.close();
     oldest.close();
@@ -942,10 +952,16 @@ public class TestDirectoryReaderReopen extends LuceneTestCase {
     assertEquals(1, oldest.leaves().size());
     
     // sharing same core
-    assertSame(latest.leaves().get(0).reader().getCoreCacheKey(), oldest.leaves().get(0).reader().getCoreCacheKey());
-    
-    assertEquals(1, getOnlyLeafReader(oldest).getNumericDocValues("dv").get(0));
-    assertEquals(2, getOnlyLeafReader(latest).getNumericDocValues("dv").get(0));
+    assertSame(latest.leaves().get(0).reader().getCoreCacheHelper().getKey(),
+        oldest.leaves().get(0).reader().getCoreCacheHelper().getKey());
+
+    NumericDocValues values = getOnlyLeafReader(oldest).getNumericDocValues("dv");
+    assertEquals(0, values.nextDoc());
+    assertEquals(1, values.longValue());
+
+    values = getOnlyLeafReader(latest).getNumericDocValues("dv");
+    assertEquals(0, values.nextDoc());
+    assertEquals(2, values.longValue());
     
     latest.close();
     oldest.close();
@@ -958,7 +974,7 @@ public class TestDirectoryReaderReopen extends LuceneTestCase {
   // LUCENE-5931: we make a "best effort" to catch this abuse and throw a clear(er)
   // exception than what would otherwise look like hard to explain index corruption during searching
   public void testDeleteIndexFilesWhileReaderStillOpen() throws Exception {
-    RAMDirectory dir = new RAMDirectory();
+    Directory dir = new ByteBuffersDirectory();
     IndexWriter w = new IndexWriter(dir,
                                     new IndexWriterConfig(new MockAnalyzer(random())));
     Document doc = new Document();
@@ -975,7 +991,7 @@ public class TestDirectoryReaderReopen extends LuceneTestCase {
     }
  
     w = new IndexWriter(dir,
-                        new IndexWriterConfig(new MockAnalyzer(random())));
+                        new IndexWriterConfig(new MockAnalyzer(random())).setMergePolicy(NoMergePolicy.INSTANCE));
     doc = new Document();
     doc.add(newStringField("field", "value", Field.Store.NO));
     w.addDocument(doc);
@@ -997,6 +1013,59 @@ public class TestDirectoryReaderReopen extends LuceneTestCase {
     expectThrows(IllegalStateException.class, () -> {
       DirectoryReader.openIfChanged(r);
     });
+  }
+
+  public void testReuseUnchangedLeafReaderOnDVUpdate() throws IOException {
+    Directory dir = newDirectory();
+    IndexWriterConfig indexWriterConfig = newIndexWriterConfig();
+    indexWriterConfig.setMergePolicy(NoMergePolicy.INSTANCE);
+    IndexWriter writer = new IndexWriter(dir, indexWriterConfig);
+
+    Document doc = new Document();
+    doc.add(new StringField("id", "1", Field.Store.YES));
+    doc.add(new StringField("version", "1", Field.Store.YES));
+    doc.add(new NumericDocValuesField("some_docvalue", 2));
+    writer.addDocument(doc);
+    doc = new Document();
+    doc.add(new StringField("id", "2", Field.Store.YES));
+    doc.add(new StringField("version", "1", Field.Store.YES));
+    writer.addDocument(doc);
+    writer.commit();
+    DirectoryReader reader = DirectoryReader.open(dir);
+    assertEquals(2, reader.numDocs());
+    assertEquals(2, reader.maxDoc());
+    assertEquals(0, reader.numDeletedDocs());
+
+    doc = new Document();
+    doc.add(new StringField("id", "1", Field.Store.YES));
+    doc.add(new StringField("version", "2", Field.Store.YES));
+    writer.updateDocValues(new Term("id", "1"), new NumericDocValuesField("some_docvalue", 1));
+    writer.commit();
+    DirectoryReader newReader = DirectoryReader.openIfChanged(reader);
+    assertNotSame(newReader, reader);
+    reader.close();
+    reader = newReader;
+    assertEquals(2, reader.numDocs());
+    assertEquals(2, reader.maxDoc());
+    assertEquals(0, reader.numDeletedDocs());
+
+    doc = new Document();
+    doc.add(new StringField("id", "3", Field.Store.YES));
+    doc.add(new StringField("version", "3", Field.Store.YES));
+    writer.updateDocument(new Term("id", "3"), doc);
+    writer.commit();
+
+    newReader = DirectoryReader.openIfChanged(reader);
+    assertNotSame(newReader, reader);
+    assertEquals(2, newReader.getSequentialSubReaders().size());
+    assertEquals(1, reader.getSequentialSubReaders().size());
+    assertSame(reader.getSequentialSubReaders().get(0), newReader.getSequentialSubReaders().get(0));
+    reader.close();
+    reader = newReader;
+    assertEquals(3, reader.numDocs());
+    assertEquals(3, reader.maxDoc());
+    assertEquals(0, reader.numDeletedDocs());
+    IOUtils.close(reader, writer, dir);
   }
 }
 

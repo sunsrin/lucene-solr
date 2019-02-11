@@ -18,12 +18,17 @@ package org.apache.solr.common.cloud;
 
 import java.util.Collection;
 import java.util.Collections;
+import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.function.Predicate;
+import java.util.stream.Collectors;
 
+import org.apache.solr.common.cloud.Replica.Type;
 import org.noggit.JSONUtil;
 import org.noggit.JSONWriter;
 
@@ -55,17 +60,17 @@ public class Slice extends ZkNodeProps implements Iterable<Replica> {
 
   /** The slice's state. */
   public enum State {
-    
+
     /** The normal/default state of a shard. */
     ACTIVE,
-    
+
     /**
      * A shard is put in that state after it has been successfully split. See
-     * <a href="https://cwiki.apache.org/confluence/display/solr/Collections+API#CollectionsAPI-api3">
+     * <a href="https://lucene.apache.org/solr/guide/collections-api.html#splitshard">
      * the reference guide</a> for more details.
      */
     INACTIVE,
-    
+
     /**
      * When a shard is split, the new sub-shards are put in that state while the
      * split operation is in progress. It's also used when the shard is undergoing data restoration.
@@ -74,26 +79,35 @@ public class Slice extends ZkNodeProps implements Iterable<Replica> {
      * in distributed search.
      */
     CONSTRUCTION,
-    
+
     /**
      * Sub-shards of a split shard are put in that state, when they need to
      * create replicas in order to meet the collection's replication factor. A
      * shard in that state still receives update requests from the parent shard
      * leader, however does not participate in distributed search.
      */
-    RECOVERY;
-    
+    RECOVERY,
+
+    /**
+     * Sub-shards of a split shard are put in that state when the split is deemed failed
+     * by the overseer even though all replicas are active because either the leader node is
+     * no longer live or has a different ephemeral owner (zk session id). Such conditions can potentially
+     * lead to data loss. See SOLR-9438 for details. A shard in that state will neither receive
+     * update requests from the parent shard leader, nor participate in distributed search.
+     */
+    RECOVERY_FAILED;
+
     @Override
     public String toString() {
       return super.toString().toLowerCase(Locale.ROOT);
     }
-    
+
     /** Converts the state string to a State instance. */
     public static State getState(String stateStr) {
       return State.valueOf(stateStr.toUpperCase(Locale.ROOT));
     }
   }
-  
+
   public static final String REPLICAS = "replicas";
   public static final String RANGE = "range";
   public static final String LEADER = "leader";       // FUTURE: do we want to record the leader as a slice property in the JSON (as opposed to isLeader as a replica property?)
@@ -190,7 +204,10 @@ public class Slice extends ZkNodeProps implements Iterable<Replica> {
 
   private Replica findLeader() {
     for (Replica replica : replicas.values()) {
-      if (replica.getStr(LEADER) != null) return replica;
+      if (replica.getStr(LEADER) != null) {
+        assert replica.getType() == Type.TLOG || replica.getType() == Type.NRT: "Pull replica should not become leader!";
+        return replica;
+      }
     }
     return null;
   }
@@ -203,10 +220,24 @@ public class Slice extends ZkNodeProps implements Iterable<Replica> {
   }
 
   /**
-   * Gets the list of replicas for this slice.
+   * Gets the list of all replicas for this slice.
    */
   public Collection<Replica> getReplicas() {
     return replicas.values();
+  }
+
+  /**
+   * Gets all replicas that match a predicate
+   */
+  public List<Replica> getReplicas(Predicate<Replica> pred) {
+    return replicas.values().stream().filter(pred).collect(Collectors.toList());
+  }
+
+  /**
+   * Gets the list of replicas that have a type present in s
+   */
+  public List<Replica> getReplicas(EnumSet<Replica.Type> s) {
+    return this.getReplicas(r->s.contains(r.getType()));
   }
 
   /**
@@ -253,4 +284,5 @@ public class Slice extends ZkNodeProps implements Iterable<Replica> {
   public void write(JSONWriter jsonWriter) {
     jsonWriter.write(propMap);
   }
+
 }

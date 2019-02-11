@@ -26,6 +26,7 @@ import org.apache.lucene.codecs.PointsReader;
 import org.apache.lucene.index.CorruptIndexException;
 import org.apache.lucene.index.FieldInfo;
 import org.apache.lucene.index.IndexFileNames;
+import org.apache.lucene.index.PointValues;
 import org.apache.lucene.index.SegmentReadState;
 import org.apache.lucene.store.BufferedChecksumIndexInput;
 import org.apache.lucene.store.ChecksumIndexInput;
@@ -35,7 +36,6 @@ import org.apache.lucene.util.BytesRef;
 import org.apache.lucene.util.BytesRefBuilder;
 import org.apache.lucene.util.IOUtils;
 import org.apache.lucene.util.StringHelper;
-import org.apache.lucene.util.bkd.BKDReader;
 
 import static org.apache.lucene.codecs.simpletext.SimpleTextPointsWriter.BLOCK_FP;
 import static org.apache.lucene.codecs.simpletext.SimpleTextPointsWriter.BYTES_PER_DIM;
@@ -47,7 +47,8 @@ import static org.apache.lucene.codecs.simpletext.SimpleTextPointsWriter.INDEX_C
 import static org.apache.lucene.codecs.simpletext.SimpleTextPointsWriter.MAX_LEAF_POINTS;
 import static org.apache.lucene.codecs.simpletext.SimpleTextPointsWriter.MAX_VALUE;
 import static org.apache.lucene.codecs.simpletext.SimpleTextPointsWriter.MIN_VALUE;
-import static org.apache.lucene.codecs.simpletext.SimpleTextPointsWriter.NUM_DIMS;
+import static org.apache.lucene.codecs.simpletext.SimpleTextPointsWriter.NUM_DATA_DIMS;
+import static org.apache.lucene.codecs.simpletext.SimpleTextPointsWriter.NUM_INDEX_DIMS;
 import static org.apache.lucene.codecs.simpletext.SimpleTextPointsWriter.POINT_COUNT;
 import static org.apache.lucene.codecs.simpletext.SimpleTextPointsWriter.SPLIT_COUNT;
 import static org.apache.lucene.codecs.simpletext.SimpleTextPointsWriter.SPLIT_DIM;
@@ -57,7 +58,7 @@ class SimpleTextPointsReader extends PointsReader {
 
   private final IndexInput dataIn;
   final SegmentReadState readState;
-  final Map<String,BKDReader> readers = new HashMap<>();
+  final Map<String,SimpleTextBKDReader> readers = new HashMap<>();
   final BytesRefBuilder scratch = new BytesRefBuilder();
 
   public SimpleTextPointsReader(SegmentReadState readState) throws IOException {
@@ -97,11 +98,14 @@ class SimpleTextPointsReader extends PointsReader {
     this.readState = readState;
   }
 
-  private BKDReader initReader(long fp) throws IOException {
+  private SimpleTextBKDReader initReader(long fp) throws IOException {
     // NOTE: matches what writeIndex does in SimpleTextPointsWriter
     dataIn.seek(fp);
     readLine(dataIn);
-    int numDims = parseInt(NUM_DIMS);
+    int numDataDims = parseInt(NUM_DATA_DIMS);
+
+    readLine(dataIn);
+    int numIndexDims = parseInt(NUM_INDEX_DIMS);
 
     readLine(dataIn);
     int bytesPerDim = parseInt(BYTES_PER_DIM);
@@ -115,12 +119,12 @@ class SimpleTextPointsReader extends PointsReader {
     readLine(dataIn);
     assert startsWith(MIN_VALUE);
     BytesRef minValue = SimpleTextUtil.fromBytesRefString(stripPrefix(MIN_VALUE));
-    assert minValue.length == numDims*bytesPerDim;
+    assert minValue.length == numIndexDims*bytesPerDim;
 
     readLine(dataIn);
     assert startsWith(MAX_VALUE);
     BytesRef maxValue = SimpleTextUtil.fromBytesRefString(stripPrefix(MAX_VALUE));
-    assert maxValue.length == numDims*bytesPerDim;
+    assert maxValue.length == numIndexDims*bytesPerDim;
 
     readLine(dataIn);
     assert startsWith(POINT_COUNT);
@@ -138,18 +142,29 @@ class SimpleTextPointsReader extends PointsReader {
     readLine(dataIn);
     count = parseInt(SPLIT_COUNT);
 
-    byte[] splitPackedValues = new byte[count * (1 + bytesPerDim)];
+    byte[] splitPackedValues;
+    int bytesPerIndexEntry;
+    if (numIndexDims == 1) {
+      bytesPerIndexEntry = bytesPerDim;
+    } else {
+      bytesPerIndexEntry = 1 + bytesPerDim;
+    }
+    splitPackedValues = new byte[count * bytesPerIndexEntry];
     for(int i=0;i<count;i++) {
       readLine(dataIn);
-      splitPackedValues[(1 + bytesPerDim) * i] = (byte) parseInt(SPLIT_DIM);
+      int address = bytesPerIndexEntry * i;
+      int splitDim = parseInt(SPLIT_DIM);
+      if (numIndexDims != 1) {
+        splitPackedValues[address++] = (byte) splitDim;
+      }
       readLine(dataIn);
       assert startsWith(SPLIT_VALUE);
       BytesRef br = SimpleTextUtil.fromBytesRefString(stripPrefix(SPLIT_VALUE));
       assert br.length == bytesPerDim;
-      System.arraycopy(br.bytes, br.offset, splitPackedValues, (1 + bytesPerDim) * i + 1, bytesPerDim);
+      System.arraycopy(br.bytes, br.offset, splitPackedValues, address, bytesPerDim);
     }
 
-    return new SimpleTextBKDReader(dataIn, numDims, maxPointsInLeafNode, bytesPerDim, leafBlockFPs, splitPackedValues, minValue.bytes, maxValue.bytes, pointCount, docCount);
+    return new SimpleTextBKDReader(dataIn, numDataDims, numIndexDims, maxPointsInLeafNode, bytesPerDim, leafBlockFPs, splitPackedValues, minValue.bytes, maxValue.bytes, pointCount, docCount);
   }
 
   private void readLine(IndexInput in) throws IOException {
@@ -174,27 +189,16 @@ class SimpleTextPointsReader extends PointsReader {
     return new String(scratch.bytes(), prefix.length, scratch.length() - prefix.length, StandardCharsets.UTF_8);
   }
 
-  private BKDReader getBKDReader(String fieldName) {
+  @Override
+  public PointValues getValues(String fieldName) throws IOException {
     FieldInfo fieldInfo = readState.fieldInfos.fieldInfo(fieldName);
     if (fieldInfo == null) {
       throw new IllegalArgumentException("field=\"" + fieldName + "\" is unrecognized");
     }
-    if (fieldInfo.getPointDimensionCount() == 0) {
+    if (fieldInfo.getPointDataDimensionCount() == 0) {
       throw new IllegalArgumentException("field=\"" + fieldName + "\" did not index points");
     }
     return readers.get(fieldName);
-  }
-
-  /** Finds all documents and points matching the provided visitor */
-  @Override
-  public void intersect(String fieldName, IntersectVisitor visitor) throws IOException {
-    BKDReader bkdReader = getBKDReader(fieldName);
-    if (bkdReader == null) {
-      // Schema ghost corner case!  This field did index points in the past, but
-      // now all docs having this field were deleted in this segment:
-      return;
-    }
-    bkdReader.intersect(visitor);
   }
 
   @Override
@@ -234,69 +238,4 @@ class SimpleTextPointsReader extends PointsReader {
     return "SimpleTextPointsReader(segment=" + readState.segmentInfo.name + " maxDoc=" + readState.segmentInfo.maxDoc() + ")";
   }
 
-  @Override
-  public byte[] getMinPackedValue(String fieldName) {
-    BKDReader bkdReader = getBKDReader(fieldName);
-    if (bkdReader == null) {
-      // Schema ghost corner case!  This field did index points in the past, but
-      // now all docs having this field were deleted in this segment:
-      return null;
-    }
-    return bkdReader.getMinPackedValue();
-  }
-
-  @Override
-  public byte[] getMaxPackedValue(String fieldName) {
-    BKDReader bkdReader = getBKDReader(fieldName);
-    if (bkdReader == null) {
-      // Schema ghost corner case!  This field did index points in the past, but
-      // now all docs having this field were deleted in this segment:
-      return null;
-    }
-    return bkdReader.getMaxPackedValue();
-  }
-
-  @Override
-  public int getNumDimensions(String fieldName) {
-    BKDReader bkdReader = getBKDReader(fieldName);
-    if (bkdReader == null) {
-      // Schema ghost corner case!  This field did index points in the past, but
-      // now all docs having this field were deleted in this segment:
-      return 0;
-    }
-    return bkdReader.getNumDimensions();
-  }
-
-  @Override
-  public int getBytesPerDimension(String fieldName) {
-    BKDReader bkdReader = getBKDReader(fieldName);
-    if (bkdReader == null) {
-      // Schema ghost corner case!  This field did index points in the past, but
-      // now all docs having this field were deleted in this segment:
-      return 0;
-    }
-    return bkdReader.getBytesPerDimension();
-  }
-
-  @Override
-  public long size(String fieldName) {
-    BKDReader bkdReader = getBKDReader(fieldName);
-    if (bkdReader == null) {
-      // Schema ghost corner case!  This field did index points in the past, but
-      // now all docs having this field were deleted in this segment:
-      return 0;
-    }
-    return bkdReader.getPointCount();
-  }
-
-  @Override
-  public int getDocCount(String fieldName) {
-    BKDReader bkdReader = getBKDReader(fieldName);
-    if (bkdReader == null) {
-      // Schema ghost corner case!  This field did index points in the past, but
-      // now all docs having this field were deleted in this segment:
-      return 0;
-    }
-    return bkdReader.getDocCount();
-  }
 }

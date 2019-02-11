@@ -34,6 +34,8 @@ import java.io.IOException;
 import java.lang.invoke.MethodHandles;
 import java.nio.file.Files;
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -45,7 +47,7 @@ import java.util.Properties;
  */
 public class TestSolrEntityProcessorEndToEnd extends AbstractDataImportHandlerTestCase {
   
-  private static final Logger LOG = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
+  private static final Logger log = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
   
   private static final String SOLR_CONFIG = "dataimport-solrconfig.xml";
   private static final String SOLR_SCHEMA = "dataimport-schema.xml";
@@ -125,7 +127,7 @@ public class TestSolrEntityProcessorEndToEnd extends AbstractDataImportHandlerTe
     // data source solr instance
     instance = new SolrInstance();
     instance.setUp();
-    jetty = createJetty(instance);
+    jetty = createAndStartJetty(instance);
   }
   
   @Override
@@ -134,13 +136,14 @@ public class TestSolrEntityProcessorEndToEnd extends AbstractDataImportHandlerTe
     try {
       deleteCore();
     } catch (Exception e) {
-      LOG.error("Error deleting core", e);
+      log.error("Error deleting core", e);
     }
     jetty.stop();
     instance.tearDown();
     super.tearDown();
   }
-  
+
+  //commented 23-AUG-2018  @BadApple(bugUrl="https://issues.apache.org/jira/browse/SOLR-12028") // added 20-Jul-2018
   public void testFullImport() {
     assertQ(req("*:*"), "//result[@numFound='0']");
     
@@ -148,7 +151,7 @@ public class TestSolrEntityProcessorEndToEnd extends AbstractDataImportHandlerTe
       addDocumentsToSolr(SOLR_DOCS);
       runFullImport(generateDIHConfig("query='*:*' rows='2' fl='id,desc' onError='skip'", false));
     } catch (Exception e) {
-      LOG.error(e.getMessage(), e);
+      log.error(e.getMessage(), e);
       fail(e.getMessage());
     }
     
@@ -166,7 +169,7 @@ public class TestSolrEntityProcessorEndToEnd extends AbstractDataImportHandlerTe
       map.put("rows", "50");
       runFullImport(generateDIHConfig("query='*:*' fq='desc:Description1*,desc:Description*2' rows='2'", false), map);
     } catch (Exception e) {
-      LOG.error(e.getMessage(), e);
+      log.error(e.getMessage(), e);
       fail(e.getMessage());
     }
     
@@ -179,9 +182,9 @@ public class TestSolrEntityProcessorEndToEnd extends AbstractDataImportHandlerTe
     
     try {
       addDocumentsToSolr(generateSolrDocuments(7));
-      runFullImport(generateDIHConfig("query='*:*' fl='id' rows='2'", false));
+      runFullImport(generateDIHConfig("query='*:*' fl='id' rows='2'"+(random().nextBoolean() ?" cursorMark='true' sort='id asc'":""), false));
     } catch (Exception e) {
-      LOG.error(e.getMessage(), e);
+      log.error(e.getMessage(), e);
       fail(e.getMessage());
     }
     
@@ -218,7 +221,7 @@ public class TestSolrEntityProcessorEndToEnd extends AbstractDataImportHandlerTe
       addDocumentsToSolr(DOCS);
       runFullImport(getDihConfigTagsInnerEntity());
     } catch (Exception e) {
-      LOG.error(e.getMessage(), e);
+      log.error(e.getMessage(), e);
       fail(e.getMessage());
     } finally {
       MockDataSource.clearCache();
@@ -241,7 +244,7 @@ public class TestSolrEntityProcessorEndToEnd extends AbstractDataImportHandlerTe
     try {
       runFullImport(generateDIHConfig("query='*:*' rows='2' fl='id,desc' onError='skip'", true /* use dead server */));
     } catch (Exception e) {
-      LOG.error(e.getMessage(), e);
+      log.error(e.getMessage(), e);
       fail(e.getMessage());
     }
     
@@ -252,15 +255,36 @@ public class TestSolrEntityProcessorEndToEnd extends AbstractDataImportHandlerTe
     assertQ(req("*:*"), "//result[@numFound='0']");
     
     try {
-      runFullImport(generateDIHConfig("query='bogus:3' rows='2' fl='id,desc' onError='abort'", false));
+      runFullImport(generateDIHConfig("query='bogus:3' rows='2' fl='id,desc' onError='"+
+            (random().nextBoolean() ? "abort" : "justtogetcoverage")+"'", false));
     } catch (Exception e) {
-      LOG.error(e.getMessage(), e);
+      log.error(e.getMessage(), e);
       fail(e.getMessage());
     }
     
     assertQ(req("*:*"), "//result[@numFound='0']");
   }
+  
+  public void testCursorMarkNoSort() throws SolrServerException, IOException {
+    assertQ(req("*:*"), "//result[@numFound='0']");
+    addDocumentsToSolr(generateSolrDocuments(7));
+    try {     
+      List<String> errors = Arrays.asList("sort='id'", //wrong sort spec
+          "", //no sort spec
+          "sort='id asc' timeout='12345'"); // sort is fine, but set timeout
+      Collections.shuffle(errors, random());
+      String attrs = "query='*:*' rows='2' fl='id,desc' cursorMark='true' "
+                                                            + errors.get(0);
+      runFullImport(generateDIHConfig(attrs,
+            false));
+    } catch (Exception e) {
+      log.error(e.getMessage(), e);
+      fail(e.getMessage());
+    }
     
+    assertQ(req("*:*"), "//result[@numFound='0']");
+  }
+  
   private static List<Map<String,Object>> generateSolrDocuments(int num) {
     List<Map<String,Object>> docList = new ArrayList<>();
     for (int i = 1; i <= num; i++) {
@@ -282,9 +306,7 @@ public class TestSolrEntityProcessorEndToEnd extends AbstractDataImportHandlerTe
       sidl.add(sd);
     }
 
-    try (HttpSolrClient solrServer = getHttpSolrClient(getSourceUrl())) {
-      solrServer.setConnectionTimeout(15000);
-      solrServer.setSoTimeout(30000);
+    try (HttpSolrClient solrServer = getHttpSolrClient(getSourceUrl(), 15000, 30000)) {
       solrServer.add(sidl);
       solrServer.commit(true, true);
     }
@@ -340,7 +362,7 @@ public class TestSolrEntityProcessorEndToEnd extends AbstractDataImportHandlerTe
     }
   }
   
-  private JettySolrRunner createJetty(SolrInstance instance) throws Exception {
+  private JettySolrRunner createAndStartJetty(SolrInstance instance) throws Exception {
     Properties nodeProperties = new Properties();
     nodeProperties.setProperty("solr.data.dir", instance.getDataDir());
     JettySolrRunner jetty = new JettySolrRunner(instance.getHomeDir(), nodeProperties, buildJettyConfig("/solr"));

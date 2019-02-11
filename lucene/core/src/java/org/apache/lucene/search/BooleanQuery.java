@@ -23,6 +23,7 @@ import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.EnumMap;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
@@ -109,7 +110,10 @@ public class BooleanQuery extends Query implements Iterable<BooleanClause> {
      * @throws TooManyClauses if the new number of clauses exceeds the maximum clause number
      */
     public Builder add(BooleanClause clause) {
-      add(clause.getQuery(), clause.getOccur());
+      if (clauses.size() >= maxClauseCount) {
+        throw new TooManyClauses();
+      }
+      clauses.add(clause);
       return this;
     }
 
@@ -120,11 +124,7 @@ public class BooleanQuery extends Query implements Iterable<BooleanClause> {
      * @throws TooManyClauses if the new number of clauses exceeds the maximum clause number
      */
     public Builder add(Query query, Occur occur) {
-      if (clauses.size() >= maxClauseCount) {
-        throw new TooManyClauses();
-      }
-      clauses.add(new BooleanClause(query, occur));
-      return this;
+      return add(new BooleanClause(query, occur));
     }
 
     /** Create a new {@link BooleanQuery} based on the parameters that have
@@ -183,8 +183,10 @@ public class BooleanQuery extends Query implements Iterable<BooleanClause> {
   }
 
   private BooleanQuery rewriteNoScoring() {
+    if (clauseSets.get(Occur.MUST).size() == 0) {
+      return this;
+    }
     BooleanQuery.Builder newQuery = new BooleanQuery.Builder();
-    // ignore disableCoord, which only matters for scores
     newQuery.setMinimumNumberShouldMatch(getMinimumNumberShouldMatch());
     for (BooleanClause clause : clauses) {
       if (clause.getOccur() == Occur.MUST) {
@@ -197,12 +199,12 @@ public class BooleanQuery extends Query implements Iterable<BooleanClause> {
   }
 
   @Override
-  public Weight createWeight(IndexSearcher searcher, boolean needsScores, float boost) throws IOException {
+  public Weight createWeight(IndexSearcher searcher, ScoreMode scoreMode, float boost) throws IOException {
     BooleanQuery query = this;
-    if (needsScores == false) {
+    if (scoreMode.needsScores() == false) {
       query = rewriteNoScoring();
     }
-    return new BooleanWeight(query, searcher, needsScores, boost);
+    return new BooleanWeight(query, searcher, scoreMode, boost);
   }
 
   @Override
@@ -334,6 +336,69 @@ public class BooleanQuery extends Query implements Iterable<BooleanClause> {
       }
     }
 
+    // Deduplicate SHOULD clauses by summing up their boosts
+    if (clauseSets.get(Occur.SHOULD).size() > 0 && minimumNumberShouldMatch <= 1) {
+      Map<Query, Double> shouldClauses = new HashMap<>();
+      for (Query query : clauseSets.get(Occur.SHOULD)) {
+        double boost = 1;
+        while (query instanceof BoostQuery) {
+          BoostQuery bq = (BoostQuery) query;
+          boost *= bq.getBoost();
+          query = bq.getQuery();
+        }
+        shouldClauses.put(query, shouldClauses.getOrDefault(query, 0d) + boost);
+      }
+      if (shouldClauses.size() != clauseSets.get(Occur.SHOULD).size()) {
+        BooleanQuery.Builder builder = new BooleanQuery.Builder()
+            .setMinimumNumberShouldMatch(minimumNumberShouldMatch);
+        for (Map.Entry<Query,Double> entry : shouldClauses.entrySet()) {
+          Query query = entry.getKey();
+          float boost = entry.getValue().floatValue();
+          if (boost != 1f) {
+            query = new BoostQuery(query, boost);
+          }
+          builder.add(query, Occur.SHOULD);
+        }
+        for (BooleanClause clause : clauses) {
+          if (clause.getOccur() != Occur.SHOULD) {
+            builder.add(clause);
+          }
+        }
+        return builder.build();
+      }
+    }
+
+    // Deduplicate MUST clauses by summing up their boosts
+    if (clauseSets.get(Occur.MUST).size() > 0) {
+      Map<Query, Double> mustClauses = new HashMap<>();
+      for (Query query : clauseSets.get(Occur.MUST)) {
+        double boost = 1;
+        while (query instanceof BoostQuery) {
+          BoostQuery bq = (BoostQuery) query;
+          boost *= bq.getBoost();
+          query = bq.getQuery();
+        }
+        mustClauses.put(query, mustClauses.getOrDefault(query, 0d) + boost);
+      }
+      if (mustClauses.size() != clauseSets.get(Occur.MUST).size()) {
+        BooleanQuery.Builder builder = new BooleanQuery.Builder()
+            .setMinimumNumberShouldMatch(minimumNumberShouldMatch);
+        for (Map.Entry<Query,Double> entry : mustClauses.entrySet()) {
+          Query query = entry.getKey();
+          float boost = entry.getValue().floatValue();
+          if (boost != 1f) {
+            query = new BoostQuery(query, boost);
+          }
+          builder.add(query, Occur.MUST);
+        }
+        for (BooleanClause clause : clauses) {
+          if (clause.getOccur() != Occur.MUST) {
+            builder.add(clause);
+          }
+        }
+        return builder.build();
+      }
+    }
 
     // Rewrite queries whose single scoring clause is a MUST clause on a
     // MatchAllDocsQuery to a ConstantScoreQuery

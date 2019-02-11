@@ -27,6 +27,7 @@ import org.apache.solr.request.SolrQueryRequest;
 import org.apache.solr.request.SolrRequestHandler;
 import org.apache.solr.response.SolrQueryResponse;
 import org.apache.solr.search.SolrIndexSearcher;
+import org.apache.solr.update.SolrCoreState;
 import org.apache.solr.util.DefaultSolrThreadFactory;
 import org.apache.solr.util.RefCounted;
 import org.apache.solr.util.plugin.SolrCoreAware;
@@ -86,6 +87,7 @@ public class SolrCoreTest extends SolrTestCaseJ4 {
 
     int ihCount = 0;
     {
+      ++ihCount; assertEquals(pathToClassMap.get("/admin/health"), "solr.HealthCheckHandler");
       ++ihCount; assertEquals(pathToClassMap.get("/admin/file"), "solr.ShowFileRequestHandler");
       ++ihCount; assertEquals(pathToClassMap.get("/admin/logging"), "solr.LoggingHandler");
       ++ihCount; assertEquals(pathToClassMap.get("/admin/luke"), "solr.LukeRequestHandler");
@@ -97,7 +99,7 @@ public class SolrCoreTest extends SolrTestCaseJ4 {
       ++ihCount; assertEquals(pathToClassMap.get("/admin/system"), "solr.SystemInfoHandler");
       ++ihCount; assertEquals(pathToClassMap.get("/admin/threads"), "solr.ThreadDumpHandler");
       ++ihCount; assertEquals(pathToClassMap.get("/config"), "solr.SolrConfigHandler");
-      ++ihCount; assertEquals(pathToClassMap.get("/export"), "solr.SearchHandler");
+      ++ihCount; assertEquals(pathToClassMap.get("/export"), "solr.ExportHandler");
       ++ihCount; assertEquals(pathToClassMap.get("/terms"), "solr.SearchHandler");
       ++ihCount; assertEquals(pathToClassMap.get("/get"), "solr.RealTimeGetHandler");
       ++ihCount; assertEquals(pathToClassMap.get(ReplicationHandler.PATH), "solr.ReplicationHandler");
@@ -109,6 +111,10 @@ public class SolrCoreTest extends SolrTestCaseJ4 {
       ++ihCount; assertEquals(pathToClassMap.get("/update/csv"), "solr.UpdateRequestHandler");
       ++ihCount; assertEquals(pathToClassMap.get("/update/json"), "solr.UpdateRequestHandler");
       ++ihCount; assertEquals(pathToClassMap.get("/update/json/docs"), "solr.UpdateRequestHandler");
+      ++ihCount; assertEquals(pathToClassMap.get("/analysis/document"), "solr.DocumentAnalysisRequestHandler");
+      ++ihCount; assertEquals(pathToClassMap.get("/analysis/field"), "solr.FieldAnalysisRequestHandler");
+      ++ihCount; assertEquals(pathToClassMap.get("/debug/dump"), "solr.DumpRequestHandler");
+      ++ihCount; assertEquals(pathToClassMap.get("update"), "solr.UpdateRequestHandlerApi");
     }
     assertEquals("wrong number of implicit handlers", ihCount, implicitHandlers.size());
   }
@@ -241,16 +247,16 @@ public class SolrCoreTest extends SolrTestCaseJ4 {
     //TEst that SolrInfoMBeans are registered, including SearchComponents
     SolrCore core = h.getCore();
 
-    Map<String, SolrInfoMBean> infoRegistry = core.getInfoRegistry();
+    Map<String, SolrInfoBean> infoRegistry = core.getInfoRegistry();
     assertTrue("infoRegistry Size: " + infoRegistry.size() + " is not greater than: " + 0, infoRegistry.size() > 0);
     //try out some that we know are in the config
-    SolrInfoMBean bean = infoRegistry.get(SpellCheckComponent.COMPONENT_NAME);
+    SolrInfoBean bean = infoRegistry.get(SpellCheckComponent.COMPONENT_NAME);
     assertNotNull("bean not registered", bean);
     //try a default one
     bean = infoRegistry.get(QueryComponent.COMPONENT_NAME);
     assertNotNull("bean not registered", bean);
     //try a Req Handler, which are stored by name, not clas
-    bean = infoRegistry.get("standard");
+    bean = infoRegistry.get("/select");
     assertNotNull("bean not registered", bean);
   }
 
@@ -305,6 +311,8 @@ public class SolrCoreTest extends SolrTestCaseJ4 {
           RefCounted<SolrIndexSearcher> newSearcher = null;
           try {
             newSearcher = core.openNewSearcher(true, true);
+          } catch (SolrCoreState.CoreIsClosedException e) {
+            // closed
           } finally {
             if (newSearcher != null) {
               newSearcher.decref();

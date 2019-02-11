@@ -65,6 +65,12 @@
       <not><matches pattern="^\Q${version.base}\E(|\-.*)$" casesensitive="true" string="${version}"/></not>
     </condition>
   </fail>
+  
+  <fail message="Your ~/.ant/lib folder or the main classpath of Ant contains some version of ASM. Please remove it, otherwise this build can't run correctly.">
+    <condition>
+      <available classname="org.objectweb.asm.ClassReader"/>
+    </condition>
+  </fail>
 
   <property name="year" value="2000-${current.year}"/>
   
@@ -74,19 +80,21 @@
   </condition>
 
   <!-- we exclude ext/*.jar because we don't want example/lib/ext logging jars on the cp -->
-  <property name="common.classpath.excludes" value="**/*.txt,**/*.template,**/*.sha1,ext/*.jar" />
+  <property name="common.classpath.excludes" value="**/*.txt,**/*.template,**/*.sha1,**/*.sha512,ext/*.jar" />
 
   <property name="build.dir" location="build"/>
   <!-- Needed in case a module needs the original build, also for compile-tools to be called from a module -->
   <property name="common.build.dir" location="${common.dir}/build"/>
 
-  <property name="ivy.bootstrap.version" value="2.3.0" />
+  <property name="ivy.bootstrap.version" value="2.4.0" /> <!-- UPGRADE NOTE: update disallowed_ivy_jars_regex below -->
+  <property name="disallowed_ivy_jars_regex" value="ivy-2\.[0123].*\.jar"/>
+
   <property name="ivy.default.configuration" value="*"/>
 
   <!-- Running ant targets in parralel may require this set to false because ivy:retrieve tasks may race with resolve -->
   <property name="ivy.sync" value="true"/>
   <property name="ivy.resolution-cache.dir" location="${common.build.dir}/ivy-resolution-cache"/>
-  <property name="ivy.lock-strategy" value="artifact-lock"/>
+  <property name="ivy.lock-strategy" value="artifact-lock-nio"/>
 
   <property name="local.caches" location="${common.dir}/../.caches" />
   <property name="tests.cachedir"  location="${local.caches}/test-stats" />
@@ -131,11 +139,11 @@
     <istrue value="${tests.asserts}"/>
   </condition>
 
-  <condition property="tests.heapsize" value="768M" else="512M">
+  <condition property="tests.heapsize" value="1024M" else="512M">
     <isset property="run.clover"/>
   </condition>
   
-  <condition property="tests.clover.args" value="-XX:ReservedCodeCacheSize=128m -XX:MaxPermSize=192m" else="">
+  <condition property="tests.clover.args" value="-XX:ReservedCodeCacheSize=192m -Dclover.pertest.coverage=off" else="">
     <isset property="run.clover"/>
   </condition>
 
@@ -158,6 +166,10 @@
 
   <!-- Display at most this many failures as a summary at the end of junit4 run. -->
   <property name="tests.showNumFailures" value="10" />
+  
+  <!-- If we detect Java 9+, should we test the patched classes of the
+   multi-release JAR or still run with our own classes? -->
+  <property name="tests.withJava9Patches" value="true" />
 
   <property name="javac.deprecation" value="off"/>
   <property name="javac.debug" value="on"/>
@@ -175,7 +187,8 @@
   <property name="javadoc.noindex" value="true"/>
 
   <property name="javadoc.doclint.args" value="-Xdoclint:all -Xdoclint:-missing"/>
-  <property name="javac.doclint.args" value="-Xdoclint:all/protected -Xdoclint:-missing"/>
+  <!---proc:none was added because of LOG4J2-1925 / JDK-8186647 -->
+  <property name="javac.doclint.args" value="-Xdoclint:all/protected -Xdoclint:-missing -proc:none"/>
   
   <!-- Javadoc classpath -->
   <path id="javadoc.classpath">
@@ -222,7 +235,6 @@
 
   <property name="filtered.pom.templates.dir" location="${common.dir}/build/poms"/>
 
-  <property name="clover.license.path" location="${common.dir}/tools/clover/clover.license"/>
   <property name="clover.db.dir" location="${common.dir}/build/clover/db"/>
   <property name="clover.report.dir" location="${common.dir}/build/clover/reports"/>
 
@@ -254,7 +266,7 @@
   </propertyset>
 
   <patternset id="lucene.local.src.package.patterns"
-              excludes="**/pom.xml,**/*.iml,**/*.jar,build/**,dist/**,benchmark/work/**,benchmark/temp/**,tools/javadoc/java8/**,tools/clover/**"
+              excludes="**/pom.xml,**/*.iml,**/*.jar,build/**,dist/**,benchmark/work/**,benchmark/temp/**,tools/javadoc/java8/**"
   />
 
   <!-- Default exclude sources and javadoc jars from Ivy fetch to save time and bandwidth -->
@@ -264,10 +276,23 @@
     <isset property="fetch.sources.javadocs"/>
   </condition>
 
+  <target name="install-ant-contrib" unless="ant-contrib.uptodate" depends="ivy-availability-check,ivy-fail,ivy-configure">
+    <property name="ant-contrib.uptodate" value="true"/>
+     <ivy:cachepath organisation="ant-contrib" module="ant-contrib" revision="1.0b3"
+       inline="true" conf="master" type="jar" pathid="ant-contrib.classpath"/>
+    <taskdef resource="ant-contrib.tasks" classpathref="ant-contrib.classpath"/>
+  </target>
+
   <!-- Check for minimum supported ANT version. -->
   <fail message="Minimum supported ANT version is 1.8.2. Yours: ${ant.version}">
     <condition>
       <not><antversion atleast="1.8.2" /></not>
+    </condition>
+  </fail>
+
+  <fail message="Cannot run with ANT version 1.10.2 - see https://issues.apache.org/jira/browse/LUCENE-8189">
+    <condition>
+      <antversion exactly="1.10.2"/>
     </condition>
   </fail>
 
@@ -413,13 +438,36 @@
   <property name="ivy_bootstrap_url1" value="http://repo1.maven.org/maven2"/>
   <!-- you might need to tweak this from china so it works -->
   <property name="ivy_bootstrap_url2" value="http://uk.maven.org/maven2"/>
-  <property name="ivy_checksum_sha1" value="c5ebf1c253ad4959a29f4acfe696ee48cdd9f473"/>
+  <property name="ivy_checksum_sha1" value="5abe4c24bbe992a9ac07ca563d5bd3e8d569e9ed"/>
 
   <target name="ivy-availability-check" unless="ivy.available">
+    <path id="disallowed.ivy.jars">
+      <fileset dir="${ivy_install_path}">
+        <filename regex="${disallowed_ivy_jars_regex}"/>
+      </fileset>
+    </path>
+    <loadresource property="disallowed.ivy.jars.list">
+      <string value="${toString:disallowed.ivy.jars}"/>
+      <filterchain><tokenfilter><replacestring from="jar:" to="jar, "/></tokenfilter></filterchain>
+    </loadresource>
+    <condition property="disallowed.ivy.jar.found">
+      <resourcecount when="greater" count="0">
+        <path refid="disallowed.ivy.jars"/>
+      </resourcecount>
+    </condition>
+    <antcall target="-ivy-fail-disallowed-ivy-version"/>
+
     <condition property="ivy.available">
       <typefound uri="antlib:org.apache.ivy.ant" name="configure" />
     </condition>
     <antcall target="ivy-fail" />
+  </target>
+
+  <target name="-ivy-fail-disallowed-ivy-version" if="disallowed.ivy.jar.found">
+    <sequential>
+      <echo message="Please delete the following disallowed Ivy jar(s): ${disallowed.ivy.jars.list}"/>
+      <fail>Found disallowed Ivy jar(s): ${disallowed.ivy.jars.list}</fail>
+    </sequential>
   </target>
 
   <target name="ivy-fail" unless="ivy.available">
@@ -459,19 +507,20 @@
     <fail>Ivy is not available</fail>
   </target>
 
-  <target name="ivy-bootstrap" description="Download and install Ivy in the users ant lib dir" depends="ivy-bootstrap1,ivy-bootstrap2,ivy-checksum"/>
+  <target name="ivy-bootstrap" description="Download and install Ivy in the users ant lib dir" 
+          depends="-ivy-bootstrap1,-ivy-bootstrap2,-ivy-checksum,-ivy-remove-old-versions"/>
 
   <!-- try to download from repo1.maven.org -->
-  <target name="ivy-bootstrap1">
+  <target name="-ivy-bootstrap1">
     <ivy-download src="${ivy_bootstrap_url1}" dest="${ivy_install_path}"/>
     <available file="${ivy_install_path}/ivy-${ivy.bootstrap.version}.jar" property="ivy.bootstrap1.success" />
   </target> 
 
-  <target name="ivy-bootstrap2" unless="ivy.bootstrap1.success">
+  <target name="-ivy-bootstrap2" unless="ivy.bootstrap1.success">
     <ivy-download src="${ivy_bootstrap_url2}" dest="${ivy_install_path}"/>
   </target>
 
-  <target name="ivy-checksum">
+  <target name="-ivy-checksum">
     <checksum file="${ivy_install_path}/ivy-${ivy.bootstrap.version}.jar"
               property="${ivy_checksum_sha1}"
               algorithm="SHA"
@@ -481,6 +530,14 @@
         <isfalse value="${ivy.checksum.success}"/>
       </condition>
     </fail>
+  </target>
+  
+  <target name="-ivy-remove-old-versions">
+    <delete verbose="true" failonerror="true">
+      <fileset dir="${ivy_install_path}">
+        <filename regex="${disallowed_ivy_jars_regex}"/>
+      </fileset>
+    </delete>
   </target>
    
   <macrodef name="ivy-download">
@@ -512,10 +569,48 @@
     <!-- convenience target to compile core -->
   </target>
 
-  <target name="jar-core" depends="compile-core">
+  <!-- Special targets to patch all class files by replacing some method calls with new Java 9 methods: -->
+  <target name="-mrjar-classes-uptodate">
+    <uptodate property="mrjar-classes-uptodate" targetfile="${build.dir}/patch-mrjar.stamp">
+      <srcfiles dir= "${build.dir}/classes/java" includes="**/*.class"/>
+    </uptodate>
+  </target>
+  
+  <target xmlns:ivy="antlib:org.apache.ivy.ant" name="patch-mrjar-classes" depends="-mrjar-classes-uptodate,ivy-availability-check,ivy-configure,resolve-groovy,compile-core"
+    unless="mrjar-classes-uptodate" description="Patches compiled class files for usage with Java 9 in MR-JAR">
+    <loadproperties prefix="ivyversions" srcFile="${common.dir}/ivy-versions.properties"/>
+    <ivy:cachepath organisation="org.ow2.asm" module="asm-commons" revision="${ivyversions./org.ow2.asm/asm-commons}"
+      inline="true" conf="default" transitive="true" log="download-only" pathid="asm.classpath"/>
+    <groovy taskname="patch-cls" classpathref="asm.classpath" src="${common.dir}/tools/src/groovy/patch-mrjar-classes.groovy"/>
+    <touch file="${build.dir}/patch-mrjar.stamp"/>
+  </target>
+  
+  <target name="-mrjar-check" depends="patch-mrjar-classes">
+    <zipfileset id="mrjar-patched-files" prefix="META-INF/versions/9" dir="${build.dir}/classes/java9" erroronmissingdir="false"/>
+    <condition property="has-mrjar-patched-files">
+      <resourcecount refid="mrjar-patched-files" when="greater" count="0" />
+    </condition>
+  </target>
+  
+  <target name="-mrjar-core" depends="-mrjar-check" if="has-mrjar-patched-files">
+    <jarify>
+      <filesets>
+        <zipfileset refid="mrjar-patched-files"/>
+      </filesets>
+      <jarify-additional-manifest-attributes>
+        <attribute name="Multi-Release" value="true"/>
+      </jarify-additional-manifest-attributes>
+    </jarify>
+  </target>
+  
+  <target name="-jar-core" depends="-mrjar-check" unless="has-mrjar-patched-files">
     <jarify/>
   </target>
+  
+  <target name="jar-core" depends="-mrjar-core,-jar-core"/>
 
+  <!-- Packaging targets: -->
+  
   <property name="lucene.tgz.file" location="${common.dir}/dist/lucene-${version}.tgz"/>
   <available file="${lucene.tgz.file}" property="lucene.tgz.exists"/>
   <property name="lucene.tgz.unpack.dir" location="${common.build.dir}/lucene.tgz.unpacked"/>
@@ -559,10 +654,6 @@
       <artifact:install-provider artifactId="wagon-ssh" version="1.0-beta-7"/>
       <parent-poms/>
       <artifact:pom id="maven.project" file="@{pom.xml}"/>
-      <artifact:install file="@{jar.file}">
-        <artifact-attachments/>
-        <pom refid="maven.project"/>
-      </artifact:install>
       <artifact:deploy file="@{jar.file}">
         <artifact-attachments/>
         <remoteRepository id="${m2.repository.id}" url="${m2.repository.url}">
@@ -570,9 +661,26 @@
         </remoteRepository>
         <pom refid="maven.project"/>
       </artifact:deploy>
+      <artifact:install file="@{jar.file}">
+        <artifact-attachments/>
+        <pom refid="maven.project"/>
+      </artifact:install>
     </sequential>
   </macrodef>
-  
+
+  <macrodef name="m2-install" description="Installs a Maven artifact into the local repository">
+    <element name="parent-poms" optional="yes"/>
+    <attribute name="pom.xml"/>
+    <attribute name="jar.file" default="${dist.jar.dir.prefix}-${version}/${dist.jar.dir.suffix}/${final.name}.jar"/>
+    <sequential>
+      <parent-poms/>
+      <artifact:pom id="maven.project" file="@{pom.xml}"/>
+      <artifact:install file="@{jar.file}">
+        <pom refid="maven.project"/>
+      </artifact:install>
+    </sequential>
+  </macrodef>
+
   <!-- validate maven dependencies -->
   <macrodef name="m2-validate-dependencies">
       <attribute name="pom.xml"/>
@@ -912,6 +1020,12 @@
         <condition property="java.security.manager" value="org.apache.lucene.util.TestSecurityManager">
           <istrue value="${tests.useSecurityManager}"/>
         </condition>
+        
+        <!-- additional arguments for Java 9+ -->
+        <local name="tests.runtimespecific.args"/>
+        <condition property="tests.runtimespecific.args" value="" else="--illegal-access=deny">
+          <equals arg1="${build.java.runtime}" arg2="1.8"/>
+        </condition>
 
         <!-- create a fileset pattern that matches ${tests.class}. -->
         <loadresource property="tests.explicitclass" quiet="true">
@@ -976,6 +1090,7 @@
             shuffleOnSlave="true"
             leaveTemporary="${junit4.leaveTemporary}"
             seed="${tests.seed}"
+            onNonEmptyWorkDirectory="wipe"
 
             heartbeat="${tests.heartbeat}"
             uniqueSuiteNames="false"
@@ -992,6 +1107,7 @@
             <jvmarg line="${tests.clover.args}"/>
             <jvmarg line="@{additional.vm.args}"/>
             <jvmarg line="${tests.asserts.args}"/>
+            <jvmarg line="${tests.runtimespecific.args}"/>
 
             <!-- set the number of times tests should run -->
             <sysproperty key="tests.iters" value="${tests.iters}"/>
@@ -1039,7 +1155,6 @@
             <sysproperty key="java.io.tmpdir" value="./temp" />
 
             <!-- Restrict access to certain Java features and install security manager: -->
-            <sysproperty key="junit4.tempDir" file="@{workDir}/temp" />
             <sysproperty key="common.dir" file="${common.dir}" />
             <sysproperty key="clover.db.dir" file="${clover.db.dir}" />
             <syspropertyset>
@@ -1059,6 +1174,11 @@
             <!-- turn jenkins blood red for hashmap bugs, even on jdk7 -->
             <sysproperty key="jdk.map.althashing.threshold" value="0"/>
 
+            <sysproperty key="tests.src.home" value="${user.dir}" />
+
+            <!-- replaces default random source to the nonblocking variant -->
+            <sysproperty key="java.security.egd" value="file:/dev/./urandom"/>
+
             <!-- Only pass these to the test JVMs if defined in ANT. -->
             <syspropertyset>
                 <propertyref prefix="tests.maxfailures" />
@@ -1073,6 +1193,7 @@
                 <propertyref prefix="tests.leaveTemporary" />
                 <propertyref prefix="tests.leavetemporary" />
                 <propertyref prefix="solr.test.leavetmpdir" />
+                <propertyref prefix="solr.tests.use.numeric.points" />
             </syspropertyset>
 
             <!-- Pass randomized settings to the forked JVM. -->
@@ -1158,18 +1279,16 @@
                     showSuiteSummary="false"
                     timestamps="true"
                 />
-                
+
                 <!-- Emit the information about tests timings (could be used to determine
                      the slowest tests or for reuse in balancing). -->
                 <junit4:report-execution-times file="${tests.cachedir}/${name}/timehints.txt" historyLength="20" />
 
                 <!-- ANT-compatible XMLs for jenkins records etc. -->
-                <junit4:report-ant-xml dir="@{junit.output.dir}" outputStreams="no" />
+                <junit4:report-ant-xml dir="@{junit.output.dir}" outputStreams="no" ignoreDuplicateSuites="true"/>
 
-                <!--
-                Enable if you wish to have a nice HTML5 report.
-                <junit4:report-json file="@{junit.output.dir}/tests-report-${ant.project.name}/index.html" outputStreams="no" />
-                -->
+                <!-- <junit4:report-json file="@{junit.output.dir}/tests-report-${ant.project.name}/index.html" outputStreams="no" /> -->
+
             </listeners>
 
             <!-- Input test classes. -->
@@ -1235,7 +1354,7 @@ ant test "-Dtests.class=*.ClassName"
 ant test -Dtestcase=ClassName
 
 # Run all tests in a package and sub-packages
-ant test "-Dtests.class=org.apache.lucene.package.*"
+ant test "-Dtests.class=org.apache.lucene.package.Test*|org.apache.lucene.package.*Test"
 
 # Run any test methods that contain 'esi' (like: ...r*esi*ze...).
 ant test "-Dtests.method=*esi*"
@@ -1248,7 +1367,8 @@ ant test "-Dtests.method=*esi*"
 ant test -Dtests.seed=DEADBEEF
 
 # Repeats _all_ tests of ClassName N times. Every test repetition
-# will have a different seed.
+# will have a different seed. NOTE: does not reinitialize
+# between repetitions, use only for idempotent tests.
 ant test -Dtests.iters=N -Dtestcase=ClassName
 
 # Repeats _all_ tests of ClassName N times. Every test repetition
@@ -1292,6 +1412,7 @@ ant beast -Dtests.dups=N -Dtests.iters=M -Dbeast.iters=P \
 ant -Dtests.nightly=[false]   - nightly test group (@Nightly)
 ant -Dtests.weekly=[false]    - weekly tests (@Weekly)
 ant -Dtests.awaitsfix=[false] - known issue (@AwaitsFix)
+ant -Dtests.badapples=[true]  - flakey tests (@BadApple)
 ant -Dtests.slow=[true]       - slow tests (@Slow)
 
 # An alternative way to select just one (or more) groups of tests
@@ -1331,6 +1452,11 @@ ant -f lucene/build.xml test-updatecache
 #
 # Miscellaneous. --------------------------------------------------
 #
+
+# Only run test(s), non-recursively. Faster than "ant test".
+# WARNING: Skips jar download and compilation. Clover not supported.
+ant test-nocompile
+ant -Dtestcase=... test-nocompile
 
 # Run all tests without stopping on errors (inspect log files!).
 ant -Dtests.haltonfailure=false test
@@ -1386,8 +1512,11 @@ ${tests-output}/junit4-*.suites     - per-JVM executed suites
     </taskdef>
   </target>
 
-  <target name="test" depends="clover,compile-test,install-junit4-taskdef,validate,-init-totals,-test,-check-totals" description="Runs unit tests"/>
-  <target name="beast" depends="clover,compile-test,install-junit4-taskdef,validate,-init-totals,-beast,-check-totals" description="Runs unit tests in a loop (-Dbeast.iters=n)"/>
+  <target name="test" depends="clover,compile-test,patch-mrjar-classes,install-junit4-taskdef,validate,-init-totals,-test,-check-totals" description="Runs unit tests"/>
+  <target name="beast" depends="install-ant-contrib,clover,compile-test,patch-mrjar-classes,install-junit4-taskdef,validate,-init-totals,-beast,-check-totals" description="Runs unit tests in a loop (-Dbeast.iters=n)"/>
+
+  <target name="test-nocompile" depends="-clover.disable,install-junit4-taskdef,-init-totals,-test,-check-totals"
+          description="Only runs unit tests.  Jars are not downloaded; compilation is not updated; and Clover is not enabled."/>
 
   <target name="-jacoco-install">
     <!-- download jacoco from ivy if needed -->
@@ -1444,64 +1573,15 @@ ${tests-output}/junit4-*.suites     - per-JVM executed suites
   </target>
 
   <!-- Beast the actual tests (must be wrapped with -init-totals, -check-totals) -->
-  <target name="-beast" depends="resolve-groovy">
+  <target name="-beast" depends="resolve-groovy,install-ant-contrib">
     <fail message="The Beast only works inside of individual modules (where 'junit.classpath' is defined)">
       <condition>
         <not><isreference refid="junit.classpath"/></not>
       </condition>
     </fail>
-    <groovy taskname="beaster"><![CDATA[
-      import org.apache.tools.ant.BuildException;
-      import org.apache.tools.ant.BuildLogger;
-      import org.apache.tools.ant.Project;
-      
-      int iters = (properties['beast.iters'] ?: '1') as int;
-      if (iters <= 1) {
-        throw new BuildException("Please give -Dbeast.iters with an int value > 1.");
-      }
-      
-      def antcall = project.createTask('antcall');
-      antcall.with {
-        target = '-test';
-        inheritAll = true;
-        inheritRefs = true;
-        createParam().with {
-          name = "tests.isbeasting";
-          value = "true";
-        };
-      };
-      
-      (1..iters).each { i ->
-        task.log('Beast round: ' + i, Project.MSG_INFO);
-        try {
-          // disable verbose build logging:
-          project.buildListeners.each { listener ->
-            if (listener instanceof BuildLogger) {
-              listener.messageOutputLevel = Project.MSG_WARN;
-            }
-          };
-          
-          antcall.execute();
-          
-        } catch (BuildException be) {
-          def logFile = new File(properties["junit.output.dir"], "tests-failures.txt");
-          if (logFile.exists()) {
-            logFile.eachLine("UTF-8", { line ->
-              task.log(line, Project.MSG_ERR);
-            });
-          }
-          throw be;
-        } finally {
-          // restore build logging (unfortunately there is no way to get the original logging level (write-only property):
-          project.buildListeners.each { listener ->
-            if (listener instanceof BuildLogger) {
-              listener.messageOutputLevel = Project.MSG_INFO;
-            }
-          };
-        }
-      };
-      task.log('Beasting finished.', Project.MSG_INFO);
-    ]]></groovy>
+    <taskdef name="antcallback" classname="net.sf.antcontrib.logic.AntCallBack" classpathref="ant-contrib.classpath"/>
+    <groovy classpathref="ant-contrib.classpath" taskname="beaster" src="${common.dir}/tools/src/groovy/run-beaster.groovy"/>
+    <fail message="Fail baby fail" if="groovy.error"/>
   </target>
 
   <target name="-check-totals" if="tests.totals.toplevel" depends="resolve-groovy">
@@ -1545,27 +1625,8 @@ ${tests-output}/junit4-*.suites     - per-JVM executed suites
   <target name="clover" depends="-clover.disable,-clover.load,-clover.classpath,-clover.setup"/>
   
   <target name="-clover.load" depends="ivy-availability-check,ivy-configure" if="run.clover" unless="clover.loaded">
-    <available file="${clover.license.path}" property="clover.license.available" />
-    <fail unless="clover.license.available"><![CDATA[.
-
-  #########################################################################
-  Atlassian Clover License not found!
-  
-  Current License path: ${clover.license.path}
-
-  To use Atlassian Clover with Lucene build, you need a proper license
-  and let the system property 'clover.license.path' point to it.
-  You can pass it to ANT with:
-  
-  $ ant -Dclover.license.path=/path/to/clover.license -Drun.clover=true ...
-  
-  Apache Lucene/Solr source checkouts from Git already contain the
-  file, but source distributions cannot because of legal reasons.
-  #########################################################################
-  
-]]></fail>
-    <echo>Code coverage with Atlassian Clover enabled.</echo>
-    <ivy:cachepath organisation="com.atlassian.clover" module="clover" revision="4.0.4"
+    <echo>Code coverage with OpenClover enabled.</echo>
+    <ivy:cachepath organisation="org.openclover" module="clover" revision="4.2.1"
       inline="true" conf="master" pathid="clover.classpath"/>
     <taskdef resource="cloverlib.xml" classpathref="clover.classpath" />
     <mkdir dir="${clover.db.dir}"/>
@@ -1582,11 +1643,9 @@ ${tests-output}/junit4-*.suites     - per-JVM executed suites
 
   <target name="-clover.setup" if="run.clover">
     <clover-setup initString="${clover.db.dir}/coverage.db" encoding="${build.encoding}">
-      <fileset dir="${src.dir}" erroronmissingdir="no">
-        <include name="org/apache/**/*.java" />
-      </fileset>
+      <fileset dir="${src.dir}" erroronmissingdir="no"/>
       <testsources dir="${tests.src.dir}" erroronmissingdir="no">
-        <include name="org/apache/**/*.java" />
+        <exclude name="**/TestOpenNLP*Factory.java"/><!-- https://bitbucket.org/openclover/clover/issues/59 -->
       </testsources>
     </clover-setup>
   </target>
@@ -1672,6 +1731,44 @@ ${tests-output}/junit4-*.suites     - per-JVM executed suites
                   classifier="javadoc"/>
         </artifact-attachments>
       </m2-deploy>
+    </sequential>
+  </target>
+
+  <target name="-install-to-maven-local-repo" depends="install-maven-tasks">
+    <sequential>
+      <property name="top.level.dir" location="${common.dir}/.."/>
+      <pathconvert property="pom.xml">
+        <mapper>
+          <chainedmapper>
+            <globmapper from="${top.level.dir}*" to="${filtered.pom.templates.dir}*"/>
+            <globmapper from="*build.xml" to="*pom.xml"/>
+          </chainedmapper>
+        </mapper>
+        <path location="${ant.file}"/>
+      </pathconvert>
+      <artifact:pom id="maven.project" file="${pom.xml}"/>
+      <artifact:install file="${dist.jar.dir.prefix}-${version}/${dist.jar.dir.suffix}/${final.name}.jar">
+        <pom refid="maven.project"/>
+      </artifact:install>
+    </sequential>
+  </target>
+
+  <target name="-install-src-java-to-maven-local-repo" depends="install-maven-tasks">
+    <sequential>
+      <property name="top.level.dir" location="${common.dir}/.."/>
+      <pathconvert property="pom.xml">
+        <mapper>
+          <chainedmapper>
+            <globmapper from="${top.level.dir}*" to="${filtered.pom.templates.dir}*"/>
+            <globmapper from="*build.xml" to="*/src/java/pom.xml"/>
+          </chainedmapper>
+        </mapper>
+        <path location="${ant.file}"/>
+      </pathconvert>
+      <artifact:pom id="maven.project" file="${pom.xml}"/>
+      <artifact:install file="${dist.jar.dir.prefix}-${version}/${dist.jar.dir.suffix}/${final.name}.jar">
+        <pom refid="maven.project"/>
+      </artifact:install>
     </sequential>
   </target>
 
@@ -1800,7 +1897,14 @@ ${ant.project.name}.test.dependencies=${test.classpath.list}
   <target name="stage-maven-artifacts">
     <sequential>
       <property name="output.build.xml" location="${build.dir}/stage_maven_build.xml"/>
-      <property name="dev-tools.scripts.dir" value="../dev-tools/scripts"/>
+      <property name="dev-tools.scripts.dir" value="${common.dir}/../dev-tools/scripts"/>
+      <fail message="maven.dist.dir '${maven.dist.dir}' does not exist!">
+        <condition>
+          <not>
+            <available file="${maven.dist.dir}" type="dir"/>
+          </not>
+        </condition>
+      </fail>
       <exec dir="." executable="${perl.exe}" failonerror="false" outputproperty="stage.maven.script.output"
         resultproperty="stage.maven.script.success">
         <arg value="-CSD"/>
@@ -1810,7 +1914,6 @@ ${ant.project.name}.test.dependencies=${test.classpath.list}
         <arg value="${common.dir}/common-build.xml"/> <!-- Imported from the ant file to be written -->
         <arg value="${m2.credentials.prompt}"/>
         <arg value="${m2.repository.id}"/>
-        <arg value="${m2.repository.url}"/>
       </exec>
       <echo message="${stage.maven.script.output}"/>
       <fail message="maven stage script failed!">
@@ -1896,8 +1999,6 @@ ${ant.project.name}.test.dependencies=${test.classpath.list}
         <pattern substring="Produced by GNUPLOT"/>
       <!-- snowball stemmers generated by snowball compiler -->
         <pattern substring="This file was generated automatically by the Snowball to Java compiler"/>
-      <!-- uima tests generated by JCasGen -->
-        <pattern substring="First created by JCasGen"/>
       <!-- parsers generated by antlr -->
         <pattern substring="ANTLR GENERATED CODE"/>
       </rat:substringMatcher>
@@ -1942,7 +2043,7 @@ ${ant.project.name}.test.dependencies=${test.classpath.list}
 
     <sequential>
       <local name="javac.release.args"/>
-      <condition property="javac.release.args" value="-source @{javac.release} -target @{javac.release}" else="-release @{javac.release}">
+      <condition property="javac.release.args" value="-source @{javac.release} -target @{javac.release}" else="--release @{javac.release}">
         <equals arg1="${build.java.runtime}" arg2="1.8"/>
       </condition>
       <mkdir dir="@{destdir}"/>
@@ -2001,7 +2102,7 @@ ${ant.project.name}.test.dependencies=${test.classpath.list}
   </target>
   
   <target name="-ecj-resolve" unless="ecj.loaded" depends="ivy-availability-check,ivy-configure" if="ecj-javadoc-lint.supported">
-    <ivy:cachepath organisation="org.eclipse.jdt.core.compiler" module="ecj" revision="4.4.1"
+    <ivy:cachepath organisation="org.eclipse.jdt.core.compiler" module="ecj" revision="4.6.1"
      inline="true" conf="master" type="jar" pathid="ecj.classpath" />
     <componentdef classname="org.eclipse.jdt.core.JDTCompilerAdapter"
      classpathref="ecj.classpath" name="ecj-component"/>
@@ -2072,12 +2173,12 @@ ${ant.project.name}.test.dependencies=${test.classpath.list}
     <attribute name="linksource" default="no"/>
     <sequential>
       <local name="javadoc.release.args"/>
-      <condition property="javadoc.release.args" value="-source ${javac.release}" else="-release ${javac.release}">
+      <condition property="javadoc.release.args" value="-source ${javac.release}" else="--release ${javac.release}">
         <equals arg1="${build.java.runtime}" arg2="1.8"/>
       </condition>
       <antcall target="download-java8-javadoc-packagelist"/>
       <delete file="@{destdir}/stylesheet.css" failonerror="false"/>
-      <copy todir="@{destdir}" file="${prettify.dir}/prettify.js" overwrite="false" />
+      <delete file="@{destdir}/script.js" failonerror="false"/>
       <record name="@{destdir}/log_javadoc.txt" action="start" append="no"/>
       <javadoc
           overview="@{overview}"
@@ -2106,20 +2207,6 @@ ${ant.project.name}.test.dependencies=${test.classpath.list}
         <link offline="true" href="${javadoc.link}" packagelistLoc="${javadoc.packagelist.dir}/java8"/>
         <bottom><![CDATA[
           <i>Copyright &copy; ${year} Apache Software Foundation.  All Rights Reserved.</i>
-          <script src='{@docRoot}/prettify.js' type='text/javascript'></script>
-          <script type='text/javascript'>
-            (function(){
-              var oldonload = window.onload;
-              if (typeof oldonload != 'function') {
-                window.onload = prettyPrint;
-              } else {
-                window.onload = function() {
-                  oldonload();
-                  prettyPrint();
-                }
-              }
-            })();
-          </script>
         ]]></bottom>
         
         <sources />
@@ -2130,10 +2217,14 @@ ${ant.project.name}.test.dependencies=${test.classpath.list}
       </javadoc>
       <record name="@{destdir}/log_javadoc.txt" action="stop"/>
       
-      <!-- append prettify.css -->
-      <concat destfile="@{destdir}/stylesheet.css" append="true">
+      <!-- append prettify to scripts and css -->
+      <concat destfile="@{destdir}/stylesheet.css" append="true" fixlastline="true" encoding="UTF-8">
         <filelist dir="${prettify.dir}" files="prettify.css"/>
       </concat>
+      <concat destfile="@{destdir}/script.js" append="true" fixlastline="true" encoding="UTF-8">
+        <filelist dir="${prettify.dir}" files="prettify.js inject-javadocs.js"/>
+      </concat>
+      <fixcrlf srcdir="@{destdir}" includes="stylesheet.css script.js" eol="lf" fixlast="true" encoding="UTF-8" />
 
       <delete>
         <fileset file="@{destdir}/log_javadoc.txt">
@@ -2212,8 +2303,7 @@ ${ant.project.name}.test.dependencies=${test.classpath.list}
     <attribute name="file"/>
     <sequential>
       <echo>Building checksums for '@{file}'</echo>
-      <checksum file="@{file}" algorithm="md5" format="MD5SUM" forceoverwrite="yes" readbuffersize="65536"/>
-      <checksum file="@{file}" algorithm="sha1" format="MD5SUM" forceoverwrite="yes" readbuffersize="65536"/>
+      <checksum file="@{file}" algorithm="SHA-512" fileext=".sha512" format="MD5SUM" forceoverwrite="yes" readbuffersize="65536"/>
     </sequential>
   </macrodef>
 
@@ -2296,35 +2386,9 @@ ${ant.project.name}.test.dependencies=${test.classpath.list}
     </sequential>
   </macrodef>
 
-  <property name="rc" value="rc0"/>
-  <property name="remote.staging.dir" value="public_html/staging_area/${rc}/${version}"/>
-  <property name="keyfile" value="${user.home}/.ssh/id_rsa"/>
-  <property name="scp.user" value="${user.name}"/>
-  <!--keys.dir is the location of the https://svn.apache.org/repos/asf/lucene/java/dist/ directory-->
-  <property name="keys.dir" value="${common.dir}/../../dist"/>
-  <macrodef name="copy-to-stage-macro">
-    <attribute name="artifacts.dir"/>
-    <sequential>
-      <sshexec host="people.apache.org"
-               username="${scp.user}"
-               keyfile="${keyfile}"
-               command="mkdir -p ${remote.staging.dir}"/>
-      <echo>Uploading artifacts to ${scp.user}@people.apache.org:${remote.staging.dir}</echo>
-      <scp todir="${scp.user}@people.apache.org:${remote.staging.dir}"
-           username="${scp.user}"
-           keyfile="${keyfile}"
-           verbose="true">
-        <fileset dir="${artifacts.dir}"/>
-        <fileset dir="${keys.dir}">
-          <include name="KEYS"/>
-        </fileset>
-      </scp>
-    </sequential>
-  </macrodef>
-
   <!-- JFlex task -->
   <target name="-install-jflex" unless="jflex.loaded" depends="ivy-availability-check,ivy-configure">
-    <ivy:cachepath organisation="de.jflex" module="jflex" revision="1.6.0"
+    <ivy:cachepath organisation="de.jflex" module="jflex" revision="1.7.0"
                    inline="true" conf="default" transitive="true" pathid="jflex.classpath"/>
     <taskdef name="jflex" classname="jflex.anttask.JFlexTask" classpathref="jflex.classpath"/>
     <property name="jflex.loaded" value="true"/>
@@ -2332,7 +2396,7 @@ ${ant.project.name}.test.dependencies=${test.classpath.list}
 
   <!-- GROOVY scripting engine for ANT tasks -->
   <target name="resolve-groovy" unless="groovy.loaded" depends="ivy-availability-check,ivy-configure">
-    <ivy:cachepath organisation="org.codehaus.groovy" module="groovy-all" revision="2.4.6"
+    <ivy:cachepath organisation="org.codehaus.groovy" module="groovy-all" revision="2.4.15"
       inline="true" conf="default" type="jar" transitive="true" pathid="groovy.classpath"/>
     <taskdef name="groovy"
       classname="org.codehaus.groovy.ant.Groovy"
@@ -2346,7 +2410,7 @@ ${ant.project.name}.test.dependencies=${test.classpath.list}
   <property name="forbidden-sysout-excludes" value=""/>
   
   <target name="-install-forbidden-apis" unless="forbidden-apis.loaded" depends="ivy-availability-check,ivy-configure">
-    <ivy:cachepath organisation="de.thetaphi" module="forbiddenapis" revision="2.2"
+    <ivy:cachepath organisation="de.thetaphi" module="forbiddenapis" revision="2.6"
       inline="true" conf="default" transitive="true" pathid="forbidden-apis.classpath"/>
     <taskdef name="forbidden-apis" classname="de.thetaphi.forbiddenapis.ant.AntTask" classpathref="forbidden-apis.classpath"/>
     <property name="forbidden-apis.loaded" value="true"/>
@@ -2408,61 +2472,33 @@ ${ant.project.name}.test.dependencies=${test.classpath.list}
     </forbidden-apis>
   </target>
 
-  <target name="resolve-pegdown" unless="pegdown.loaded" depends="resolve-groovy">
-    <ivy:cachepath organisation="org.pegdown" module="pegdown" revision="1.6.0"
-      inline="true" conf="default" transitive="true" pathid="pegdown.classpath"/>
-    <groovy classpathref="pegdown.classpath"><![CDATA[
-      import org.apache.tools.ant.AntTypeDefinition;
-      import org.apache.tools.ant.ComponentHelper;
-      import org.apache.tools.ant.filters.TokenFilter.ChainableReaderFilter;
-      import org.pegdown.PegDownProcessor;
-      import org.pegdown.Extensions;
-      import org.pegdown.FastEncoder;
-
-      public final class PegDownFilter extends ChainableReaderFilter {
-        @Override
-        public String filter(String markdownSource) {
-          PegDownProcessor processor = new PegDownProcessor(
-            Extensions.ABBREVIATIONS | Extensions.AUTOLINKS |
-            Extensions.FENCED_CODE_BLOCKS | Extensions.SMARTS
-          );
-          StringBuilder html = new StringBuilder('<html>\n<head>\n');
-          // match the first heading in markdown and use as title:
-          markdownSource.find(~/(?m)^#+\s*(.+)$/) {
-            match, title -> html.append('<title>').append(FastEncoder.encode(title)).append('</title>\n');
-          }
-          html.append('<meta http-equiv="Content-Type" content="text/html; charset=UTF-8">\n')
-            .append('</head>\n<body>\n')
-            .append(processor.markdownToHtml(markdownSource))
-            .append('\n</body>\n</html>\n');
-          return html;
-        }
-      }
-      
-      AntTypeDefinition t = new AntTypeDefinition();
-      t.setName('pegdownfilter');
-      t.setClass(PegDownFilter.class);
-      ComponentHelper.getComponentHelper(project).addDataTypeDefinition(t);
-    ]]></groovy>
-    <property name="pegdown.loaded" value="true"/>
+  <target name="resolve-markdown" unless="markdown.loaded" depends="resolve-groovy">
+    <property name="flexmark.version" value="0.16.1"/>
+    <ivy:cachepath transitive="true" pathid="markdown.classpath">
+      <ivy:dependency org="com.vladsch.flexmark" name="flexmark" rev="${flexmark.version}" conf="default" />
+      <ivy:dependency org="com.vladsch.flexmark" name="flexmark-ext-autolink" rev="${flexmark.version}" conf="default" />
+      <ivy:dependency org="com.vladsch.flexmark" name="flexmark-ext-abbreviation" rev="${flexmark.version}" conf="default" />
+    </ivy:cachepath>
+    <groovy classpathref="markdown.classpath" src="${common.dir}/tools/src/groovy/install-markdown-filter.groovy"/>
+    <property name="markdown.loaded" value="true"/>
   </target>
   
-  <!-- PEGDOWN macro: Before using depend on the target "resolve-pegdown" -->
+  <!-- markdown macro: Before using depend on the target "resolve-markdown" -->
   
-  <macrodef name="pegdown">
+  <macrodef name="markdown">
     <attribute name="todir"/>
     <attribute name="flatten" default="false"/>
     <attribute name="overwrite" default="false"/>
     <element name="nested" optional="false" implicit="true"/>
     <sequential>
       <copy todir="@{todir}" flatten="@{flatten}" overwrite="@{overwrite}" verbose="true"
-        preservelastmodified="false" encoding="UTF-8" taskname="pegdown"
+        preservelastmodified="false" encoding="UTF-8" taskname="markdown"
       >
         <filterchain>
           <tokenfilter>
             <filetokenizer/>
             <replaceregex pattern="\b(LUCENE|SOLR)\-\d+\b" replace="[\0](https://issues.apache.org/jira/browse/\0)" flags="gs"/>
-            <pegdownfilter/>
+            <markdownfilter/>
           </tokenfilter>
         </filterchain>
         <nested/>
@@ -2503,22 +2539,26 @@ ${ant.project.name}.test.dependencies=${test.classpath.list}
    -->
   <macrodef name="build-changes">
     <attribute name="changes.product"/>
+    <attribute name="doap.property.prefix" default="doap.@{changes.product}"/>
     <attribute name="changes.src.file" default="CHANGES.txt"/>
+    <attribute name="changes.src.doap" default="${dev-tools.dir}/doap/@{changes.product}.rdf"/>
+    <attribute name="changes.version.dates" default="build/@{doap.property.prefix}.version.dates.csv"/>
     <attribute name="changes.target.dir" default="${changes.target.dir}"/>
     <attribute name="lucene.javadoc.url" default="${lucene.javadoc.url}"/>
     <sequential>
       <mkdir dir="@{changes.target.dir}"/>
-      <get src="https://issues.apache.org/jira/rest/api/2/project/@{changes.product}"
-        dest="@{changes.target.dir}/jiraVersionList.json" httpusecaches="false"/>
+      <xmlproperty keeproot="false" file="@{changes.src.doap}" collapseAttributes="false" prefix="@{doap.property.prefix}"/>
+      <echo file="@{changes.version.dates}" append="false">${@{doap.property.prefix}.Project.release.Version.revision}&#xA;</echo>
+      <echo file="@{changes.version.dates}" append="true">${@{doap.property.prefix}.Project.release.Version.created}&#xA;</echo>
       <exec executable="${perl.exe}" input="@{changes.src.file}" output="@{changes.target.dir}/Changes.html"
             failonerror="true" logError="true">
         <arg value="-CSD"/>
         <arg value="${changes.src.dir}/changes2html.pl"/>
         <arg value="@{changes.product}"/>
-        <arg value="@{changes.target.dir}/jiraVersionList.json"/>
+        <arg value="@{changes.version.dates}"/>
         <arg value="@{lucene.javadoc.url}"/>
       </exec>
-      <delete file="@{changes.target.dir}/jiraVersionList.json"/>
+      <delete file="@{changes.version.dates}"/>
       <copy todir="@{changes.target.dir}">
         <fileset dir="${changes.src.dir}" includes="*.css"/>
       </copy>
@@ -2582,7 +2622,7 @@ The following arguments can be provided to ant to alter its behaviour and target
 
         <junit4:pickseed property="pitest.seed" />
 
-        <property name="pitest.sysprops" value="-Dversion=${version},-Dtest.seed=${pitest.seed},-Djava.security.manager=org.apache.lucene.util.TestSecurityManager,-Djava.security.policy=${tests.policy},-Djava.io.tmpdir=${tests.workDir},-Djunit4.childvm.cwd=${tests.workDir},-Djunit4.tempDir=${tests.workDir}" />
+        <property name="pitest.sysprops" value="-Dversion=${version},-Dtest.seed=${pitest.seed},-Djava.security.manager=org.apache.lucene.util.TestSecurityManager,-Djava.security.policy=${tests.policy},-Djava.io.tmpdir=${tests.workDir},-Djunit4.childvm.cwd=${tests.workDir}" />
 
         <pitest
             classPath="pitest.classpath"
@@ -2605,7 +2645,11 @@ The following arguments can be provided to ant to alter its behaviour and target
     <attribute name="dir"/>
     <attribute name="name"/>
     <sequential>
-      <jflex file="@{dir}/@{name}.jflex" outdir="@{dir}" nobak="on" inputstreamctor="false"/>
+      <!-- The default skeleton is specified here to work around a JFlex ant task bug:    -->
+      <!-- invocations with a non-default skeleton will cause following invocations to    -->
+      <!-- use the same skeleton, though not specified, unless the default is configured. -->
+      <jflex file="@{dir}/@{name}.jflex" outdir="@{dir}" nobak="on"
+             skeleton="${common.dir}/core/src/data/jflex/skeleton.default"/>
     </sequential>
   </macrodef>
 
@@ -2613,20 +2657,13 @@ The following arguments can be provided to ant to alter its behaviour and target
     <attribute name="dir"/>
     <attribute name="name"/>
     <sequential>
-      <jflex file="@{dir}/@{name}.jflex" outdir="@{dir}" nobak="on" inputstreamctor="false"/>
       <!-- LUCENE-5897: Disallow scanner buffer expansion -->
-      <replaceregexp file="@{dir}/@{name}.java"
-                     match="[ \t]*/\* is the buffer big enough\? \*/\s+if \(zzCurrentPos >= zzBuffer\.length.*?\}[ \t]*\r?\n"
-                     replace="" flags="s" />
+      <jflex file="@{dir}/@{name}.jflex" outdir="@{dir}" nobak="on"
+             skeleton="${common.dir}/core/src/data/jflex/skeleton.disable.buffer.expansion.txt"/>
+      <!-- Since the ZZ_BUFFERSIZE declaration is generated rather than in the skeleton, we have to transform it here. -->
       <replaceregexp file="@{dir}/@{name}.java"
                      match="private static final int ZZ_BUFFERSIZE ="
                      replace="private int ZZ_BUFFERSIZE ="/>
-      <replaceregexp file="@{dir}/@{name}.java"
-                     match="int requested = zzBuffer.length - zzEndRead;"
-                     replace="int requested = zzBuffer.length - zzEndRead - zzFinalHighSurrogate;"/>
-      <replaceregexp file="@{dir}/@{name}.java"
-                     match="(zzFinalHighSurrogate = 1;)(\r?\n)"
-                     replace="\1\2          if (totalRead == 1) { return true; }\2"/>
     </sequential>
   </macrodef>
 

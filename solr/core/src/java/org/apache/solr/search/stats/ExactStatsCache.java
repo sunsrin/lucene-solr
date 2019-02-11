@@ -16,12 +16,23 @@
  */
 package org.apache.solr.search.stats;
 
+import java.io.IOException;
+import java.lang.invoke.MethodHandles;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Map.Entry;
+import java.util.Set;
+
 import com.google.common.collect.Lists;
 import org.apache.lucene.index.IndexReaderContext;
 import org.apache.lucene.index.Term;
-import org.apache.lucene.index.TermContext;
+import org.apache.lucene.index.TermStates;
 import org.apache.lucene.search.CollectionStatistics;
 import org.apache.lucene.search.Query;
+import org.apache.lucene.search.ScoreMode;
 import org.apache.lucene.search.TermStatistics;
 import org.apache.solr.client.solrj.SolrResponse;
 import org.apache.solr.common.SolrException;
@@ -38,23 +49,13 @@ import org.apache.solr.search.SolrIndexSearcher;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.io.IOException;
-import java.lang.invoke.MethodHandles;
-import java.util.Collections;
-import java.util.HashMap;
-import java.util.HashSet;
-import java.util.List;
-import java.util.Map;
-import java.util.Map.Entry;
-import java.util.Set;
-
 /**
  * This class implements exact caching of statistics. It requires an additional
  * round-trip to parse query at shard servers, and return term statistics for
  * query terms (and collection statistics for term fields).
  */
 public class ExactStatsCache extends StatsCache {
-  private static final Logger LOG = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
+  private static final Logger log = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
 
   // experimenting with strategy that takes more RAM, but also doesn't share memory
   // across threads
@@ -73,7 +74,7 @@ public class ExactStatsCache extends StatsCache {
     if (currentGlobalTermStats == null) {
       currentGlobalTermStats = Collections.emptyMap();
     }
-    LOG.debug("Returning StatsSource. Collection stats={}, Term stats size= {}", currentGlobalColStats, currentGlobalTermStats.size());
+    log.debug("Returning StatsSource. Collection stats={}, Term stats size= {}", currentGlobalColStats, currentGlobalTermStats.size());
     return new ExactStatsSource(currentGlobalTermStats, currentGlobalColStats);
   }
 
@@ -94,7 +95,7 @@ public class ExactStatsCache extends StatsCache {
   public void mergeToGlobalStats(SolrQueryRequest req, List<ShardResponse> responses) {
     Set<Object> allTerms = new HashSet<>();
     for (ShardResponse r : responses) {
-      LOG.debug("Merging to global stats, shard={}, response={}", r.getShard(), r.getSolrResponse().getResponse());
+      log.debug("Merging to global stats, shard={}, response={}", r.getShard(), r.getSolrResponse().getResponse());
       String shard = r.getShard();
       SolrResponse res = r.getSolrResponse();
       NamedList<Object> nl = res.getResponse();
@@ -115,7 +116,7 @@ public class ExactStatsCache extends StatsCache {
     if (allTerms.size() > 0) {
       req.getContext().put(TERMS_KEY, Lists.newArrayList(allTerms));
     }
-    if (LOG.isDebugEnabled()) printStats(req);
+    if (log.isDebugEnabled()) printStats(req);
   }
 
   protected void addToPerShardColStats(SolrQueryRequest req, String shard, Map<String,CollectionStats> colStats) {
@@ -136,7 +137,7 @@ public class ExactStatsCache extends StatsCache {
     if (perShardColStats == null) {
       perShardColStats = Collections.emptyMap();
     }
-    LOG.debug("perShardColStats={}, perShardTermStats={}", perShardColStats, perShardTermStats);
+    log.debug("perShardColStats={}, perShardTermStats={}", perShardColStats, perShardTermStats);
   }
 
   protected void addToPerShardTermStats(SolrQueryRequest req, String shard, String termStatsString) {
@@ -156,39 +157,44 @@ public class ExactStatsCache extends StatsCache {
     Query q = rb.getQuery();
     try {
       HashSet<Term> terms = new HashSet<>();
-      searcher.createNormalizedWeight(q, true).extractTerms(terms);
+      searcher.createWeight(searcher.rewrite(q), ScoreMode.COMPLETE, 1).extractTerms(terms);
       IndexReaderContext context = searcher.getTopReaderContext();
       HashMap<String,TermStats> statsMap = new HashMap<>();
       HashMap<String,CollectionStats> colMap = new HashMap<>();
       for (Term t : terms) {
-        TermContext termContext = TermContext.build(context, t);
+        TermStates termStates = TermStates.build(context, t, true);
 
-        TermStatistics tst = searcher.localTermStatistics(t, termContext);
-        if (tst.docFreq() == 0) { // skip terms that are not present here
+        if (!colMap.containsKey(t.field())) { // collection stats for this field
+          CollectionStatistics collectionStatistics = searcher.localCollectionStatistics(t.field());
+          if (collectionStatistics != null) {
+            colMap.put(t.field(), new CollectionStats(collectionStatistics));
+          }
+        }
+
+        TermStatistics tst = searcher.localTermStatistics(t, termStates);
+        if (tst == null) { // skip terms that are not present here
           continue;
         }
 
         statsMap.put(t.toString(), new TermStats(t.field(), tst));
         rb.rsp.add(TERMS_KEY, t.toString());
-        if (!colMap.containsKey(t.field())) { // collection stats for this field
-          colMap.put(t.field(), new CollectionStats(searcher.localCollectionStatistics(t.field())));
-        }
       }
-      if (statsMap.size() != 0 && colMap.size() != 0) { //Don't add empty keys
+      if (statsMap.size() != 0) { //Don't add empty keys
         String termStatsString = StatsUtil.termStatsMapToString(statsMap);
         rb.rsp.add(TERM_STATS_KEY, termStatsString);
-
-        String colStatsString = StatsUtil.colStatsMapToString(colMap);
-        rb.rsp.add(COL_STATS_KEY, colStatsString);
-
-        if (LOG.isDebugEnabled()) {
-          LOG.debug("termStats=" + termStatsString + ", collectionStats="
-              + colStatsString + ", terms=" + terms + ", numDocs=" + searcher.maxDoc());
+        if (log.isDebugEnabled()) {
+          log.debug("termStats={}, terms={}, numDocs={}", termStatsString, terms, searcher.maxDoc());
         }
       }
-
+      if (colMap.size() != 0){
+        String colStatsString = StatsUtil.colStatsMapToString(colMap);
+        rb.rsp.add(COL_STATS_KEY, colStatsString);
+        if (log.isDebugEnabled()) {
+          log.debug("collectionStats={}, terms={}, numDocs={}", colStatsString, terms, searcher.maxDoc());
+        }
+      }
     } catch (IOException e) {
-      LOG.error("Error collecting local stats, query='" + q.toString() + "'", e);
+      log.error("Error collecting local stats, query='" + q.toString() + "'", e);
       throw new SolrException(ErrorCode.SERVER_ERROR, "Error collecting local stats.", e);
     }
   }
@@ -242,7 +248,7 @@ public class ExactStatsCache extends StatsCache {
           g.add(termStats);
         }
       }
-      LOG.debug("terms={}, termStats={}", terms, globalTermStats);
+      log.debug("terms={}, termStats={}", terms, globalTermStats);
       // need global TermStats here...
       params.add(TERM_STATS_KEY, StatsUtil.termStatsMapToString(globalTermStats));
     }
@@ -277,7 +283,7 @@ public class ExactStatsCache extends StatsCache {
         }
       }
     }
-    LOG.debug("Global collection stats={}", globalColStats);
+    log.debug("Global collection stats={}", globalColStats);
     if (globalTermStats == null) return;
     Map<String,TermStats> termStats = StatsUtil.termStatsMapFromString(globalTermStats);
     if (termStats != null) {
@@ -316,14 +322,14 @@ public class ExactStatsCache extends StatsCache {
       this.colStatsCache = colStatsCache;
     }
 
-    public TermStatistics termStatistics(SolrIndexSearcher localSearcher, Term term, TermContext context)
+    public TermStatistics termStatistics(SolrIndexSearcher localSearcher, Term term, TermStates context)
         throws IOException {
       TermStats termStats = termStatsCache.get(term.toString());
       // TermStats == null is also true if term has no docFreq anyway,
       // see returnLocalStats, if docFreq == 0, they are not added anyway
       // Not sure we need a warning here
       if (termStats == null) {
-        LOG.debug("Missing global termStats info for term={}, using local stats", term);
+        log.debug("Missing global termStats info for term={}, using local stats", term);
         return localSearcher.localTermStatistics(term, context);
       } else {
         return termStats.toTermStatistics();
@@ -335,7 +341,7 @@ public class ExactStatsCache extends StatsCache {
         throws IOException {
       CollectionStats colStats = colStatsCache.get(field);
       if (colStats == null) {
-        LOG.debug("Missing global colStats info for field={}, using local", field);
+        log.debug("Missing global colStats info for field={}, using local", field);
         return localSearcher.localCollectionStatistics(field);
       } else {
         return colStats.toCollectionStatistics();

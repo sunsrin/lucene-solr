@@ -20,15 +20,12 @@ package org.apache.lucene.analysis;
 import java.util.Arrays;
 import java.util.List;
 
-import org.apache.lucene.analysis.FilteringTokenFilter;
-import org.apache.lucene.analysis.TokenStream;
 import org.apache.lucene.analysis.tokenattributes.CharTermAttribute;
-import org.apache.lucene.analysis.CharArraySet;
 
 /**
  * Removes stop words from a token stream.
  */
-public final class StopFilter extends FilteringTokenFilter {
+public class StopFilter extends FilteringTokenFilter {
 
   private final CharArraySet stopWords;
   private final CharTermAttribute termAtt = addAttribute(CharTermAttribute.class);

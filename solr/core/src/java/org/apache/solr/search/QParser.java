@@ -16,6 +16,12 @@
  */
 package org.apache.solr.search;
 
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+
 import org.apache.lucene.search.Query;
 import org.apache.solr.common.params.CommonParams;
 import org.apache.solr.common.params.ModifiableSolrParams;
@@ -24,19 +30,23 @@ import org.apache.solr.common.util.NamedList;
 import org.apache.solr.common.util.StrUtils;
 import org.apache.solr.request.SolrQueryRequest;
 
-import java.util.*;
-
 /**
  * <b>Note: This API is experimental and may change in non backward-compatible ways in the future</b>
  * 
  *
  */
 public abstract class QParser {
+  /** @lucene.experimental  */
+  public static final int FLAG_FILTER = 0x01;
+
   protected String qstr;
   protected SolrParams params;
   protected SolrParams localParams;
   protected SolrQueryRequest req;
   protected int recurseCount;
+
+  /** @lucene.experimental  */
+  protected int flags;
 
   protected Query query;
 
@@ -83,6 +93,28 @@ public abstract class QParser {
     this.req = req;
   }
 
+  /** @lucene.experimental  */
+  public void setFlags(int flags) {
+    this.flags = flags;
+  }
+
+  /** @lucene.experimental  */
+  public int getFlags() {
+    return flags;
+  }
+
+  /** @lucene.experimental Query is in the context of a filter, where scores don't matter */
+  public boolean isFilter() {
+    return (flags & FLAG_FILTER) != 0;
+  }
+
+  /** @lucene.experimental  */
+  public void setIsFilter(boolean isFilter) {
+    if (isFilter)
+      flags |= FLAG_FILTER;
+    else
+      flags &= ~FLAG_FILTER;
+  }
 
   private static void addTag(Map<Object,Collection<Object>> tagMap, Object key, Object val) {
     Collection<Object> lst = tagMap.get(key);
@@ -133,8 +165,9 @@ public abstract class QParser {
 
   /**
    * Returns the resulting query from this QParser, calling parse() only the
-   * first time and caching the Query result.
+   * first time and caching the Query result. <em>A null return is possible!</em>
    */
+  //TODO never return null; standardize the semantics
   public Query getQuery() throws SyntaxError {
     if (query==null) {
       query=parse();
@@ -201,6 +234,7 @@ public abstract class QParser {
       defaultType = localParams.get(QueryParsing.DEFTYPE);
     }
     QParser nestedParser = getParser(q, defaultType, getReq());
+    nestedParser.flags = this.flags;  // TODO: this would be better passed in to the constructor... change to a ParserContext object?
     nestedParser.recurseCount = recurseCount;
     recurseCount--;
     return nestedParser;
@@ -210,20 +244,20 @@ public abstract class QParser {
    * @param useGlobalParams look up sort, start, rows in global params if not in local params
    * @return the sort specification
    */
-  public SortSpec getSort(boolean useGlobalParams) throws SyntaxError {
+  public SortSpec getSortSpec(boolean useGlobalParams) throws SyntaxError {
     getQuery(); // ensure query is parsed first
 
     String sortStr = null;
-    String startS = null;
-    String rowsS = null;
+    Integer start = null;
+    Integer rows = null;
 
     if (localParams != null) {
       sortStr = localParams.get(CommonParams.SORT);
-      startS = localParams.get(CommonParams.START);
-      rowsS = localParams.get(CommonParams.ROWS);
+      start = localParams.getInt(CommonParams.START);
+      rows = localParams.getInt(CommonParams.ROWS);
 
       // if any of these parameters are present, don't go back to the global params
-      if (sortStr != null || startS != null || rowsS != null) {
+      if (sortStr != null || start != null || rows != null) {
         useGlobalParams = false;
       }
     }
@@ -232,16 +266,16 @@ public abstract class QParser {
       if (sortStr ==null) {
           sortStr = params.get(CommonParams.SORT);
       }
-      if (startS==null) {
-        startS = params.get(CommonParams.START);
+      if (start == null) {
+        start = params.getInt(CommonParams.START);
       }
-      if (rowsS==null) {
-        rowsS = params.get(CommonParams.ROWS);
+      if (rows == null) {
+        rows = params.getInt(CommonParams.ROWS);
       }
     }
 
-    int start = startS != null ? Integer.parseInt(startS) : CommonParams.START_DEFAULT;
-    int rows = rowsS != null ? Integer.parseInt(rowsS) : CommonParams.ROWS_DEFAULT;
+    start = start != null ? start : CommonParams.START_DEFAULT;
+    rows = rows != null ? rows : CommonParams.ROWS_DEFAULT;
 
     SortSpec sort = SortSpecParsing.parseSortSpec(sortStr, req);
 
@@ -263,9 +297,10 @@ public abstract class QParser {
     debugInfo.add("QParser", this.getClass().getSimpleName());
   }
 
-  /** Create a <code>QParser</code> to parse <code>qstr</code>,
+  /**
+   * Create a {@link QParser} to parse <code>qstr</code>,
    * using the "lucene" (QParserPlugin.DEFAULT_QTYPE) query parser.
-   * The query parser may be overridden by local parameters in the query
+   * The query parser may be overridden by local-params in the query
    * string itself.  For example if
    * qstr=<code>{!prefix f=myfield}foo</code>
    * then the prefix query parser will be used.
@@ -274,25 +309,41 @@ public abstract class QParser {
     return getParser(qstr, QParserPlugin.DEFAULT_QTYPE, req);
   }
 
-  /** Create a <code>QParser</code> to parse <code>qstr</code>,
-   * assuming that the default query parser is <code>defaultParser</code>.
-   * The query parser may be overridden by local parameters in the query
-   * string itself.  For example if defaultParser=<code>"dismax"</code>
-   * and qstr=<code>foo</code>, then the dismax query parser will be used
-   * to parse and construct the query object.  However
-   * if qstr=<code>{!prefix f=myfield}foo</code>
-   * then the prefix query parser will be used.
+  /**
+   * Create a {@link QParser} to parse <code>qstr</code> using the <code>defaultParser</code>.
+   * Note that local-params is only parsed when the defaultParser is "lucene" or "func".
    */
   public static QParser getParser(String qstr, String defaultParser, SolrQueryRequest req) throws SyntaxError {
-    // SolrParams localParams = QueryParsing.getLocalParams(qstr, req.getParams());
+    boolean allowLocalParams = defaultParser == null || defaultParser.equals(QParserPlugin.DEFAULT_QTYPE)
+        || defaultParser.equals(FunctionQParserPlugin.NAME);
+    return getParser(qstr, defaultParser, allowLocalParams, req);
+  }
 
+  /**
+   * Expert: Create a {@link QParser} to parse {@code qstr} using the {@code parserName} parser, while allowing a
+   * toggle for whether local-params may be parsed.
+   * The query parser may be overridden by local parameters in the query string itself
+   * (assuming {@code allowLocalParams}.
+   * For example if parserName=<code>dismax</code> and qstr=<code>foo</code>,
+   * then the dismax query parser will be used to parse and construct the query object.
+   * However if qstr=<code>{!prefix f=myfield}foo</code> then the prefix query parser will be used.
+   *
+   * @param allowLocalParams Whether this query parser should parse local-params syntax.
+   *                         Note that the "lucene" query parser natively parses local-params regardless.
+   * @lucene.internal
+   */
+  public static QParser getParser(String qstr, String parserName, boolean allowLocalParams, SolrQueryRequest req) throws SyntaxError {
+    // SolrParams localParams = QueryParsing.getLocalParams(qstr, req.getParams());
+    if (parserName == null) {
+      parserName = QParserPlugin.DEFAULT_QTYPE;//"lucene"
+    }
     String stringIncludingLocalParams = qstr;
     ModifiableSolrParams localParams = null;
     SolrParams globalParams = req.getParams();
     boolean valFollowedParams = true;
     int localParamsEnd = -1;
 
-    if (qstr != null && qstr.startsWith(QueryParsing.LOCALPARAM_START)) {
+    if (allowLocalParams && qstr != null && qstr.startsWith(QueryParsing.LOCALPARAM_START)) {
       localParams = new ModifiableSolrParams();
       localParamsEnd = QueryParsing.parseLocalParams(qstr, 0, localParams, globalParams);
 
@@ -300,25 +351,17 @@ public abstract class QParser {
       if (val != null) {
         // val was directly specified in localParams via v=<something> or v=$arg
         valFollowedParams = false;
+        //TODO if remainder of query string after '}' is non-empty, then what? Throw error? Fall back to lucene QParser?
       } else {
         // use the remainder of the string as the value
         valFollowedParams = true;
         val = qstr.substring(localParamsEnd);
         localParams.set(QueryParsing.V, val);
       }
-    }
 
-
-    String parserName;
-    
-    if (localParams == null) {
-      parserName = defaultParser;
-    } else {
-      parserName = localParams.get(QueryParsing.TYPE,defaultParser);
+      parserName = localParams.get(QueryParsing.TYPE,parserName);
       qstr = localParams.get("v");
     }
-
-    parserName = parserName==null ? QParserPlugin.DEFAULT_QTYPE : parserName;
 
     QParserPlugin qplug = req.getCore().getQueryPlugin(parserName);
     QParser parser =  qplug.createParser(qstr, localParams, req.getParams(), req);

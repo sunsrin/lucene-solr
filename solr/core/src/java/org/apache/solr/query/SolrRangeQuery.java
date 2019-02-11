@@ -20,11 +20,12 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 
+import org.apache.lucene.index.ImpactsEnum;
 import org.apache.lucene.index.IndexReader;
 import org.apache.lucene.index.LeafReaderContext;
 import org.apache.lucene.index.PostingsEnum;
 import org.apache.lucene.index.Term;
-import org.apache.lucene.index.TermContext;
+import org.apache.lucene.index.TermStates;
 import org.apache.lucene.index.TermState;
 import org.apache.lucene.index.Terms;
 import org.apache.lucene.index.TermsEnum;
@@ -38,6 +39,7 @@ import org.apache.lucene.search.DocIdSet;
 import org.apache.lucene.search.DocIdSetIterator;
 import org.apache.lucene.search.IndexSearcher;
 import org.apache.lucene.search.Query;
+import org.apache.lucene.search.ScoreMode;
 import org.apache.lucene.search.Scorer;
 import org.apache.lucene.search.TermQuery;
 import org.apache.lucene.search.Weight;
@@ -49,6 +51,7 @@ import org.apache.solr.search.BitDocSet;
 import org.apache.solr.search.DocSet;
 import org.apache.solr.search.DocSetBuilder;
 import org.apache.solr.search.DocSetProducer;
+import org.apache.solr.search.DocSetUtil;
 import org.apache.solr.search.ExtendedQueryBase;
 import org.apache.solr.search.Filter;
 import org.apache.solr.search.SolrIndexSearcher;
@@ -138,8 +141,8 @@ public final class SolrRangeQuery extends ExtendedQueryBase implements DocSetPro
   }
 
   @Override
-  public Weight createWeight(IndexSearcher searcher, boolean needScores, float boost) throws IOException {
-    return new ConstWeight(searcher, needScores, boost);
+  public Weight createWeight(IndexSearcher searcher, ScoreMode scoreMode, float boost) throws IOException {
+    return new ConstWeight(searcher, scoreMode, boost);
     /*
     DocSet docs = createDocSet(searcher.getIndexReader().leaves(), searcher.getIndexReader().maxDoc());
     SolrConstantScoreQuery csq = new SolrConstantScoreQuery( docs.getTopFilter() );
@@ -154,7 +157,7 @@ public final class SolrRangeQuery extends ExtendedQueryBase implements DocSetPro
 
   private DocSet createDocSet(SolrIndexSearcher searcher, long cost) throws IOException {
     int maxDoc = searcher.maxDoc();
-    BitDocSet liveDocs = searcher.getLiveDocs();
+    BitDocSet liveDocs = searcher.getLiveDocSet();
     FixedBitSet liveBits = liveDocs.size() == maxDoc ? null : liveDocs.getBits();
 
     DocSetBuilder builder = new DocSetBuilder(maxDoc, cost);
@@ -168,7 +171,8 @@ public final class SolrRangeQuery extends ExtendedQueryBase implements DocSetPro
       maxTermsPerSegment = Math.max(maxTermsPerSegment, termsVisited);
     }
 
-    return maxTermsPerSegment <= 1 ? builder.buildUniqueInOrder(liveBits) : builder.build(liveBits);
+    DocSet set =  maxTermsPerSegment <= 1 ? builder.buildUniqueInOrder(liveBits) : builder.build(liveBits);
+    return DocSetUtil.getDocSet(set, searcher);
   }
 
 
@@ -233,6 +237,11 @@ public final class SolrRangeQuery extends ExtendedQueryBase implements DocSetPro
     @Override
     public PostingsEnum postings(PostingsEnum reuse, int flags) throws IOException {
       return te.postings(reuse, flags);
+    }
+
+    @Override
+    public ImpactsEnum impacts(int flags) throws IOException {
+      return te.impacts(flags);
     }
 
     @Override
@@ -318,17 +327,17 @@ public final class SolrRangeQuery extends ExtendedQueryBase implements DocSetPro
     private static final int BOOLEAN_REWRITE_TERM_COUNT_THRESHOLD = 16;
 
     final IndexSearcher searcher;
-    final boolean needScores;
+    final ScoreMode scoreMode;
     boolean checkedFilterCache;
     Filter filter;
     final SegState[] segStates;
 
 
-    protected ConstWeight(IndexSearcher searcher, boolean needScores, float boost) {
+    protected ConstWeight(IndexSearcher searcher, ScoreMode scoreMode, float boost) {
       super( SolrRangeQuery.this, boost );
       this.searcher = searcher;
       this.segStates = new SegState[ searcher.getIndexReader().leaves().size() ];
-      this.needScores = needScores;
+      this.scoreMode = scoreMode;
     }
 
 
@@ -393,12 +402,12 @@ public final class SolrRangeQuery extends ExtendedQueryBase implements DocSetPro
       if (count < 0) {
         BooleanQuery.Builder bq = new BooleanQuery.Builder();
         for (TermAndState t : collectedTerms) {
-          final TermContext termContext = new TermContext(searcher.getTopReaderContext());
-          termContext.register(t.state, context.ord, t.docFreq, t.totalTermFreq);
-          bq.add(new TermQuery(new Term( SolrRangeQuery.this.getField(), t.term), termContext), BooleanClause.Occur.SHOULD);
+          final TermStates termStates = new TermStates(searcher.getTopReaderContext());
+          termStates.register(t.state, context.ord, t.docFreq, t.totalTermFreq);
+          bq.add(new TermQuery(new Term( SolrRangeQuery.this.getField(), t.term), termStates), BooleanClause.Occur.SHOULD);
         }
         Query q = new ConstantScoreQuery(bq.build());
-        final Weight weight = searcher.rewrite(q).createWeight(searcher, needScores, score());
+        final Weight weight = searcher.rewrite(q).createWeight(searcher, scoreMode, score());
         return segStates[context.ord] = new SegState(weight);
       }
 
@@ -458,7 +467,7 @@ public final class SolrRangeQuery extends ExtendedQueryBase implements DocSetPro
       if (disi == null) {
         return null;
       }
-      return new ConstantScoreScorer(this, score(), disi);
+      return new ConstantScoreScorer(this, score(), scoreMode, disi);
     }
 
     @Override
@@ -484,6 +493,12 @@ public final class SolrRangeQuery extends ExtendedQueryBase implements DocSetPro
         return scorer(weightOrBitSet.set);
       }
     }
+
+    @Override
+    public boolean isCacheable(LeafReaderContext ctx) {
+      return true;
+    }
+
   }
 }
 

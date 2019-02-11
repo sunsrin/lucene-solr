@@ -45,14 +45,23 @@ public class StreamingBinaryResponseParser extends BinaryResponseParser {
   
   @Override
   public NamedList<Object> processResponse(InputStream body, String encoding) {
-    try {
-      JavaBinCodec codec = new JavaBinCodec() {
+    try (JavaBinCodec codec = new JavaBinCodec() {
+
+        private int nestedLevel;
 
         @Override
         public SolrDocument readSolrDocument(DataInputInputStream dis) throws IOException {
+          nestedLevel++;
           SolrDocument doc = super.readSolrDocument(dis);
-          callback.streamSolrDocument( doc );
-          return null;
+          nestedLevel--;
+          if (nestedLevel == 0) {
+            // parent document
+            callback.streamSolrDocument(doc);
+            return null;
+          } else {
+            // child document
+            return doc;
+          }
         }
 
         @Override
@@ -80,7 +89,7 @@ public class StreamingBinaryResponseParser extends BinaryResponseParser {
           }
           return solrDocs;
         }
-      };
+      };) {
       
       return (NamedList<Object>) codec.unmarshal(body);
     } 

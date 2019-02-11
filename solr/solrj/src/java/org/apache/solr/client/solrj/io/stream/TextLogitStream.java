@@ -60,6 +60,12 @@ import org.apache.solr.common.util.ExecutorUtil;
 import org.apache.solr.common.util.NamedList;
 import org.apache.solr.common.util.SolrjNamedThreadFactory;
 
+import static org.apache.solr.common.params.CommonParams.DISTRIB;
+import static org.apache.solr.common.params.CommonParams.ID;
+
+/**
+ * @since 6.2.0
+ */
 public class TextLogitStream extends TupleStream implements Expressible {
 
   private static final long serialVersionUID = 1;
@@ -332,19 +338,18 @@ public class TextLogitStream extends TupleStream implements Expressible {
   }
 
   protected List<String> getShardUrls() throws IOException {
-
     try {
-
       ZkStateReader zkStateReader = cloudSolrClient.getZkStateReader();
+
+      Slice[] slices = CloudSolrStream.getSlices(this.collection, zkStateReader, false);
+
       ClusterState clusterState = zkStateReader.getClusterState();
       Set<String> liveNodes = clusterState.getLiveNodes();
 
-      Collection<Slice> slices = clusterState.getActiveSlices(this.collection);
-      List baseUrls = new ArrayList();
-
+      List<String> baseUrls = new ArrayList<>();
       for(Slice slice : slices) {
         Collection<Replica> replicas = slice.getReplicas();
-        List<Replica> shuffler = new ArrayList();
+        List<Replica> shuffler = new ArrayList<>();
         for(Replica replica : replicas) {
           if(replica.getState() == Replica.State.ACTIVE && liveNodes.contains(replica.getNodeName())) {
             shuffler.add(replica);
@@ -359,7 +364,6 @@ public class TextLogitStream extends TupleStream implements Expressible {
       }
 
       return baseUrls;
-
     } catch (Exception e) {
       throw new IOException(e);
     }
@@ -387,11 +391,13 @@ public class TextLogitStream extends TupleStream implements Expressible {
   }
 
   public void close() throws IOException {
-    if (isCloseCache) {
+    if (isCloseCache && cache != null) {
       cache.close();
     }
 
-    executorService.shutdown();
+    if (executorService != null) {
+      executorService.shutdown();
+    }
     termsStream.close();
   }
 
@@ -465,7 +471,7 @@ public class TextLogitStream extends TupleStream implements Expressible {
 
         this.weights = averageWeights(allWeights);
         Map map = new HashMap();
-        map.put("id", name+"_"+iteration);
+        map.put(ID, name+"_"+iteration);
         map.put("name_s", name);
         map.put("field_s", field);
         map.put("terms_ss", terms);
@@ -531,7 +537,7 @@ public class TextLogitStream extends TupleStream implements Expressible {
     return buf.toString();
   }
 
-  protected class TermsStream extends TupleStream {
+  protected static class TermsStream extends TupleStream {
 
     private List<String> terms;
     private Iterator<String> it;
@@ -615,7 +621,7 @@ public class TextLogitStream extends TupleStream implements Expressible {
       ModifiableSolrParams params = new ModifiableSolrParams();
       HttpSolrClient solrClient = cache.getHttpSolrClient(baseUrl);
 
-      params.add("distrib", "false");
+      params.add(DISTRIB, "false");
       params.add("fq","{!tlogit}");
       params.add("feature", feature);
       params.add("terms", TextLogitStream.toString(terms));

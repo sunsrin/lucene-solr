@@ -35,6 +35,7 @@ import org.apache.commons.lang.StringUtils;
 import org.apache.solr.client.solrj.SolrResponse;
 import org.apache.solr.client.solrj.response.QueryResponse;
 import org.apache.solr.client.solrj.response.SolrResponseBase;
+import org.apache.solr.common.SolrException;
 import org.apache.solr.common.params.CommonParams;
 import org.apache.solr.common.util.NamedList;
 import org.apache.solr.core.SolrCore;
@@ -57,6 +58,8 @@ import org.apache.velocity.tools.generic.ResourceTool;
 import org.apache.velocity.tools.generic.SortTool;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import static org.apache.solr.common.params.CommonParams.SORT;
 
 public class VelocityResponseWriter implements QueryResponseWriter, SolrCoreAware {
   // init param names, these are _only_ loaded at init time (no per-request control of these)
@@ -182,6 +185,11 @@ public class VelocityResponseWriter implements QueryResponseWriter, SolrCoreAwar
       }
 
       if (jsonWrapper != null) {
+        for (int i=0; i<jsonWrapper.length(); i++) {
+          if (!Character.isJavaIdentifierPart(jsonWrapper.charAt(i))) {
+            throw new SolrException(SolrException.ErrorCode.BAD_REQUEST, "Invalid function name for " + JSON + ": '" + jsonWrapper + "'");
+          }
+        }
         writer.write(jsonWrapper + "(");
         writer.write(getJSONWrap(stringWriter.toString()));
         writer.write(')');
@@ -204,7 +212,7 @@ public class VelocityResponseWriter implements QueryResponseWriter, SolrCoreAwar
     context.put("esc", new EscapeTool());
     context.put("date", new ComparisonDateTool());
     context.put("list", new ListTool());
-    context.put("sort", new SortTool());
+    context.put(SORT, new SortTool());
 
     MathTool mathTool = new MathTool();
     mathTool.configure(toolConfig);
@@ -374,7 +382,7 @@ public class VelocityResponseWriter implements QueryResponseWriter, SolrCoreAwar
   }
 
   // see: http://svn.apache.org/repos/asf/velocity/tools/branches/2.0.x/src/main/java/org/apache/velocity/tools/generic/ResourceTool.java
-  private class SolrVelocityResourceTool extends ResourceTool {
+  private static class SolrVelocityResourceTool extends ResourceTool {
 
     private ClassLoader solrClassLoader;
 

@@ -21,6 +21,7 @@ import java.lang.invoke.MethodHandles;
 import java.util.Enumeration;
 import java.util.LinkedList;
 import java.util.List;
+import java.util.Locale;
 
 import javax.servlet.FilterChain;
 import javax.servlet.FilterConfig;
@@ -46,22 +47,34 @@ import org.apache.solr.common.cloud.SecurityAwareZkACLProvider;
 import org.apache.solr.common.cloud.SolrZkClient;
 import org.apache.solr.common.cloud.ZkACLProvider;
 import org.apache.solr.common.cloud.ZkCredentialsProvider;
+import org.apache.zookeeper.CreateMode;
+import org.apache.zookeeper.KeeperException;
 import org.apache.zookeeper.data.ACL;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+/**
+ * This is an authentication filter based on Hadoop's {@link DelegationTokenAuthenticationFilter}.
+ * The Kerberos plugin can be configured to use delegation tokens, which allow an
+ * application to reuse the authentication of an end-user or another application.
+ */
 public class DelegationTokenKerberosFilter extends DelegationTokenAuthenticationFilter {
   private static final Logger log = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
 
   private CuratorFramework curatorFramework;
+  private final Locale defaultLocale = Locale.getDefault();
 
   @Override
   public void init(FilterConfig conf) throws ServletException {
     if (conf != null && "zookeeper".equals(conf.getInitParameter("signer.secret.provider"))) {
       SolrZkClient zkClient =
           (SolrZkClient)conf.getServletContext().getAttribute(KerberosPlugin.DELEGATION_TOKEN_ZK_CLIENT);
-      conf.getServletContext().setAttribute("signer.secret.provider.zookeeper.curator.client",
-          getCuratorClient(zkClient));
+      try {
+        conf.getServletContext().setAttribute("signer.secret.provider.zookeeper.curator.client",
+            getCuratorClient(zkClient));
+      } catch (InterruptedException | KeeperException e) {
+        throw new ServletException(e);
+      }
     }
     super.init(conf);
   }
@@ -107,6 +120,7 @@ public class DelegationTokenKerberosFilter extends DelegationTokenAuthentication
       @Override
       public void doFilter(ServletRequest servletRequest, ServletResponse servletResponse)
           throws IOException, ServletException {
+        Locale.setDefault(defaultLocale);
         HttpServletRequest httpRequest = (HttpServletRequest) servletRequest;
 
         UserGroupInformation ugi = HttpUserGroupInformation.get();
@@ -120,6 +134,8 @@ public class DelegationTokenKerberosFilter extends DelegationTokenAuthentication
       }
     };
 
+    // A hack until HADOOP-15681 get committed
+    Locale.setDefault(Locale.US);
     super.doFilter(requestNonNullQueryString, response, filterChainWrapper);
   }
 
@@ -136,25 +152,36 @@ public class DelegationTokenKerberosFilter extends DelegationTokenAuthentication
     // set the internal authentication handler in order to record whether the request should continue
     super.initializeAuthHandler(authHandlerClassName, filterConfig);
     AuthenticationHandler authHandler = getAuthenticationHandler();
-    super.initializeAuthHandler(KerberosPlugin.RequestContinuesRecorderAuthenticationHandler.class.getName(), filterConfig);
-    KerberosPlugin.RequestContinuesRecorderAuthenticationHandler newAuthHandler =
-        (KerberosPlugin.RequestContinuesRecorderAuthenticationHandler)getAuthenticationHandler();
+    super.initializeAuthHandler(RequestContinuesRecorderAuthenticationHandler.class.getName(), filterConfig);
+    RequestContinuesRecorderAuthenticationHandler newAuthHandler =
+        (RequestContinuesRecorderAuthenticationHandler)getAuthenticationHandler();
     newAuthHandler.setAuthHandler(authHandler);
   }
 
-  protected CuratorFramework getCuratorClient(SolrZkClient zkClient) {
+  protected CuratorFramework getCuratorClient(SolrZkClient zkClient) throws InterruptedException, KeeperException {
     // should we try to build a RetryPolicy off of the ZkController?
     RetryPolicy retryPolicy = new ExponentialBackoffRetry(1000, 3);
     if (zkClient == null) {
       throw new IllegalArgumentException("zkClient required");
     }
     String zkHost = zkClient.getZkServerAddress();
-    String zkChroot = zkHost.substring(zkHost.indexOf("/"));
-    zkChroot = zkChroot.startsWith("/") ? zkChroot.substring(1) : zkChroot;
+    String zkChroot = zkHost.contains("/")? zkHost.substring(zkHost.indexOf("/")): "";
     String zkNamespace = zkChroot + SecurityAwareZkACLProvider.SECURITY_ZNODE_PATH;
-    String zkConnectionString = zkHost.substring(0, zkHost.indexOf("/"));
+    zkNamespace = zkNamespace.startsWith("/") ? zkNamespace.substring(1) : zkNamespace;
+    String zkConnectionString = zkHost.contains("/")? zkHost.substring(0, zkHost.indexOf("/")): zkHost;
     SolrZkToCuratorCredentialsACLs curatorToSolrZk = new SolrZkToCuratorCredentialsACLs(zkClient);
     final int connectionTimeoutMs = 30000; // this value is currently hard coded, see SOLR-7561.
+
+    // Create /security znode upfront. Without this, the curator framework creates this directory path
+    // without the appropriate ACL configuration. This issue is possibly related to HADOOP-11973
+    try {
+      zkClient.makePath(SecurityAwareZkACLProvider.SECURITY_ZNODE_PATH, CreateMode.PERSISTENT, true);
+
+    } catch (KeeperException ex) {
+      if (ex.code() != KeeperException.Code.NODEEXISTS) {
+        throw ex;
+      }
+    }
 
     curatorFramework = CuratorFrameworkFactory.builder()
         .namespace(zkNamespace)
@@ -173,12 +200,15 @@ public class DelegationTokenKerberosFilter extends DelegationTokenAuthentication
    * Convert Solr Zk Credentials/ACLs to Curator versions
    */
   protected static class SolrZkToCuratorCredentialsACLs {
+    private final String zkChroot;
     private final ACLProvider aclProvider;
     private final List<AuthInfo> authInfos;
 
     public SolrZkToCuratorCredentialsACLs(SolrZkClient zkClient) {
       this.aclProvider = createACLProvider(zkClient);
       this.authInfos = createAuthInfo(zkClient);
+      String zkHost = zkClient.getZkServerAddress();
+      this.zkChroot = zkHost.contains("/")? zkHost.substring(zkHost.indexOf("/")): null;
     }
 
     public ACLProvider getACLProvider() { return aclProvider; }
@@ -194,8 +224,20 @@ public class DelegationTokenKerberosFilter extends DelegationTokenAuthentication
 
         @Override
         public List<ACL> getAclForPath(String path) {
-           List<ACL> acls = zkACLProvider.getACLsToAdd(path);
-           return acls;
+          List<ACL> acls = null;
+
+          // The logic in SecurityAwareZkACLProvider does not work when
+          // the Solr zkPath is chrooted (e.g. /solr instead of /). This
+          // due to the fact that the getACLsToAdd(..) callback provides
+          // an absolute path (instead of relative path to the chroot) and
+          // the string comparison in SecurityAwareZkACLProvider fails.
+          if (zkACLProvider instanceof SecurityAwareZkACLProvider && zkChroot != null) {
+            acls = zkACLProvider.getACLsToAdd(path.replace(zkChroot, ""));
+          } else {
+            acls = zkACLProvider.getACLsToAdd(path);
+          }
+
+          return acls;
         }
       };
     }

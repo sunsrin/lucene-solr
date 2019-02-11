@@ -43,14 +43,14 @@ import org.apache.lucene.util.Bits;
  * A <code>Weight</code> is used in the following way:
  * <ol>
  * <li>A <code>Weight</code> is constructed by a top-level query, given a
- * <code>IndexSearcher</code> ({@link Query#createWeight(IndexSearcher, boolean, float)}).
+ * <code>IndexSearcher</code> ({@link Query#createWeight(IndexSearcher, ScoreMode, float)}).
  * <li>A <code>Scorer</code> is constructed by
  * {@link #scorer(org.apache.lucene.index.LeafReaderContext)}.
  * </ol>
  * 
  * @since 2.9
  */
-public abstract class Weight {
+public abstract class Weight implements SegmentCacheable {
 
   protected final Query parentQuery;
 
@@ -68,6 +68,36 @@ public abstract class Weight {
    * will extract all terms which are used for matching.
    */
   public abstract void extractTerms(Set<Term> terms);
+
+  /**
+   * Returns {@link Matches} for a specific document, or {@code null} if the document
+   * does not match the parent query
+   *
+   * A query match that contains no position information (for example, a Point or
+   * DocValues query) will return {@link MatchesUtils#MATCH_WITH_NO_TERMS}
+   *
+   * @param context the reader's context to create the {@link Matches} for
+   * @param doc     the document's id relative to the given context's reader
+   * @lucene.experimental
+   */
+  public Matches matches(LeafReaderContext context, int doc) throws IOException {
+    Scorer scorer = scorer(context);
+    if (scorer == null) {
+      return null;
+    }
+    final TwoPhaseIterator twoPhase = scorer.twoPhaseIterator();
+    if (twoPhase == null) {
+      if (scorer.iterator().advance(doc) != doc) {
+        return null;
+      }
+    }
+    else {
+      if (twoPhase.approximation().advance(doc) != doc || twoPhase.matches() == false) {
+        return null;
+      }
+    }
+    return MatchesUtils.MATCH_WITH_NO_TERMS;
+  }
 
   /**
    * An explanation of the score computation for the named document.
@@ -101,6 +131,31 @@ public abstract class Weight {
    * @throws IOException if there is a low-level I/O error
    */
   public abstract Scorer scorer(LeafReaderContext context) throws IOException;
+
+  /**
+   * Optional method.
+   * Get a {@link ScorerSupplier}, which allows to know the cost of the {@link Scorer}
+   * before building it. The default implementation calls {@link #scorer} and
+   * builds a {@link ScorerSupplier} wrapper around it.
+   * @see #scorer
+   */
+  public ScorerSupplier scorerSupplier(LeafReaderContext context) throws IOException {
+    final Scorer scorer = scorer(context);
+    if (scorer == null) {
+      return null;
+    }
+    return new ScorerSupplier() {
+      @Override
+      public Scorer get(long leadCost) {
+        return scorer;
+      }
+
+      @Override
+      public long cost() {
+        return scorer.iterator().cost();
+      }
+    };
+  }
 
   /**
    * Optional method, to return a {@link BulkScorer} to

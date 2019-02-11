@@ -20,7 +20,8 @@ import java.io.IOException;
 import java.util.ArrayList;
 
 import org.apache.lucene.index.LeafReaderContext;
-import org.apache.lucene.search.Scorer;
+import org.apache.lucene.search.Scorable;
+import org.apache.lucene.search.ScoreMode;
 import org.apache.lucene.search.SimpleCollector;
 import org.apache.lucene.util.FixedBitSet;
 
@@ -72,10 +73,17 @@ public class DocSetCollector extends SimpleCollector {
     pos++;
   }
 
+  /** The number of documents that have been collected */
+  public int size() {
+    return pos;
+  }
+
   public DocSet getDocSet() {
     if (pos<=scratch.size()) {
       // assumes docs were collected in sorted order!
       return new SortedIntDocSet(scratch.toArray(), pos);
+//    } else if (pos == maxDoc) {
+//      return new MatchAllDocSet(maxDoc);  // a bunch of code currently relies on BitDocSet (either explicitly, or implicitly for performance)
     } else {
       // set the bits for ids that were collected in the array
       scratch.copyTo(bits);
@@ -84,12 +92,12 @@ public class DocSetCollector extends SimpleCollector {
   }
 
   @Override
-  public void setScorer(Scorer scorer) throws IOException {
+  public void setScorer(Scorable scorer) throws IOException {
   }
 
   @Override
-  public boolean needsScores() {
-    return false;
+  public ScoreMode scoreMode() {
+    return ScoreMode.COMPLETE_NO_SCORES;
   }
 
   @Override

@@ -20,8 +20,6 @@ import java.io.File;
 import java.io.IOException;
 import java.io.StringReader;
 import java.lang.invoke.MethodHandles;
-import java.util.Arrays;
-import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -34,14 +32,17 @@ import com.google.common.collect.ImmutableList;
 import org.apache.commons.io.FileUtils;
 import org.apache.solr.SolrTestCaseJ4;
 import org.apache.solr.client.solrj.impl.CloudSolrClient;
+import org.apache.solr.common.LinkedHashMapWriter;
+import org.apache.solr.common.MapWriter;
 import org.apache.solr.common.util.StrUtils;
 import org.apache.solr.common.util.Utils;
+import org.apache.solr.common.util.ValidatingJsonMap;
 import org.apache.solr.handler.DumpRequestHandler;
-import org.apache.solr.handler.TestBlobHandler;
 import org.apache.solr.handler.TestSolrConfigHandlerConcurrent;
 import org.apache.solr.request.SolrQueryRequest;
 import org.apache.solr.response.SolrQueryResponse;
 import org.apache.solr.search.SolrCache;
+import org.apache.solr.util.RESTfulServerProvider;
 import org.apache.solr.util.RestTestBase;
 import org.apache.solr.util.RestTestHarness;
 import org.eclipse.jetty.servlet.ServletHolder;
@@ -53,10 +54,12 @@ import org.restlet.ext.servlet.ServerServlet;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import static java.util.Arrays.asList;
 import static org.apache.solr.common.util.Utils.getObjectByPath;
-import static org.apache.solr.handler.TestBlobHandler.getAsString;
 
 public class TestSolrConfigHandler extends RestTestBase {
+  private static final int TIMEOUT_S = 10;
+
   private static final Logger log = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
 
   private static File tmpSolrHome;
@@ -82,6 +85,10 @@ public class TestSolrConfigHandler extends RestTestBase {
 
     createJettyAndHarness(tmpSolrHome.getAbsolutePath(), "solrconfig-managed-schema.xml", "schema-rest.xml",
         "/solr", true, extraServlets);
+    if (random().nextBoolean()) {
+      log.info("These tests are run with V2 API");
+      restTestHarness.setServerProvider(() -> jetty.getBaseUrl().toString() + "/____v2/cores/" + DEFAULT_TEST_CORENAME);
+    }
   }
 
   @After
@@ -100,49 +107,46 @@ public class TestSolrConfigHandler extends RestTestBase {
 
   public void testProperty() throws Exception {
     RestTestHarness harness = restTestHarness;
-    Map confMap = getRespMap("/config?wt=json", harness);
-    assertNotNull(getObjectByPath(confMap, false, Arrays.asList("config", "requestHandler", "/admin/luke")));
-    assertNotNull(getObjectByPath(confMap, false, Arrays.asList("config", "requestHandler", "/admin/system")));
-    assertNotNull(getObjectByPath(confMap, false, Arrays.asList("config", "requestHandler", "/admin/mbeans")));
-    assertNotNull(getObjectByPath(confMap, false, Arrays.asList("config", "requestHandler", "/admin/plugins")));
-    assertNotNull(getObjectByPath(confMap, false, Arrays.asList("config", "requestHandler", "/admin/threads")));
-    assertNotNull(getObjectByPath(confMap, false, Arrays.asList("config", "requestHandler", "/admin/properties")));
-    assertNotNull(getObjectByPath(confMap, false, Arrays.asList("config", "requestHandler", "/admin/logging")));
-    assertNotNull(getObjectByPath(confMap, false, Arrays.asList("config", "requestHandler", "/admin/file")));
-    assertNotNull(getObjectByPath(confMap, false, Arrays.asList("config", "requestHandler", "/admin/ping")));
+    MapWriter confMap = getRespMap("/config", harness);
+    assertNotNull(confMap._get(asList("config", "requestHandler", "/admin/luke"), null));
+    assertNotNull(confMap._get(asList("config", "requestHandler", "/admin/system"), null));
+    assertNotNull(confMap._get(asList("config", "requestHandler", "/admin/mbeans"), null));
+    assertNotNull(confMap._get(asList("config", "requestHandler", "/admin/plugins"), null));
+    assertNotNull(confMap._get(asList("config", "requestHandler", "/admin/threads"), null));
+    assertNotNull(confMap._get(asList("config", "requestHandler", "/admin/properties"), null));
+    assertNotNull(confMap._get(asList("config", "requestHandler", "/admin/logging"), null));
+    assertNotNull(confMap._get(asList("config", "requestHandler", "/admin/file"), null));
+    assertNotNull(confMap._get(asList("config", "requestHandler", "/admin/ping"), null));
 
     String payload = "{\n" +
         " 'set-property' : { 'updateHandler.autoCommit.maxDocs':100, 'updateHandler.autoCommit.maxTime':10 , 'requestDispatcher.requestParsers.addHttpRequestToContext':true} \n" +
         " }";
-    runConfigCommand(harness, "/config?wt=json", payload);
+    runConfigCommand(harness, "/config", payload);
 
-    Map m = (Map) getRespMap("/config/overlay?wt=json", harness).get("overlay");
-    Map props = (Map) m.get("props");
-    assertNotNull(props);
-    assertEquals("100", String.valueOf(getObjectByPath(props, true, ImmutableList.of("updateHandler", "autoCommit", "maxDocs"))));
-    assertEquals("10", String.valueOf(getObjectByPath(props, true, ImmutableList.of("updateHandler", "autoCommit", "maxTime"))));
+    MapWriter m = getRespMap("/config/overlay", harness);
+    MapWriter props =null;
+    assertEquals("100", m._getStr("overlay/props/updateHandler/autoCommit/maxDocs", null));
+    assertEquals("10", m._getStr("overlay/props/updateHandler/autoCommit/maxTime",null));
 
-    m =  getRespMap("/config/updateHandler?wt=json", harness);
-    assertNotNull(getObjectByPath(m, true, ImmutableList.of("config","updateHandler", "commitWithin", "softCommit")));
-    assertNotNull(getObjectByPath(m, true, ImmutableList.of("config","updateHandler", "autoCommit", "maxDocs")));
-    assertNotNull(getObjectByPath(m, true, ImmutableList.of("config","updateHandler", "autoCommit", "maxTime")));
+    m =  getRespMap("/config/updateHandler", harness);
+    assertNotNull(m._get("config/updateHandler/commitWithin/softCommit",null));
+    assertNotNull(m._get("config/updateHandler/autoCommit/maxDocs",null));
+    assertNotNull(m._get("config/updateHandler/autoCommit/maxTime",null));
 
-    m = (Map) getRespMap("/config?wt=json", harness).get("config");
+    m =  getRespMap("/config", harness);
     assertNotNull(m);
 
-    assertEquals("100", String.valueOf(getObjectByPath(m, true, ImmutableList.of("updateHandler", "autoCommit", "maxDocs"))));
-    assertEquals("10", String.valueOf(getObjectByPath(m, true, ImmutableList.of("updateHandler", "autoCommit", "maxTime"))));
-    assertEquals("true", String.valueOf(getObjectByPath(m, true, ImmutableList.of("requestDispatcher", "requestParsers", "addHttpRequestToContext"))));
+    assertEquals("100", m._getStr("config/updateHandler/autoCommit/maxDocs",null));
+    assertEquals("10", m._getStr("config/updateHandler/autoCommit/maxTime",null));
+    assertEquals("true", m._getStr("config/requestDispatcher/requestParsers/addHttpRequestToContext",null));
     payload = "{\n" +
         " 'unset-property' :  'updateHandler.autoCommit.maxDocs'} \n" +
         " }";
-    runConfigCommand(harness, "/config?wt=json", payload);
+    runConfigCommand(harness, "/config", payload);
 
-    m = (Map) getRespMap("/config/overlay?wt=json", harness).get("overlay");
-    props = (Map) m.get("props");
-    assertNotNull(props);
-    assertNull(getObjectByPath(props, true, ImmutableList.of("updateHandler", "autoCommit", "maxDocs")));
-    assertEquals("10", String.valueOf(getObjectByPath(props, true, ImmutableList.of("updateHandler", "autoCommit", "maxTime"))));
+    m =  getRespMap("/config/overlay", harness);
+    assertNull(m._get("overlay/props/updateHandler/autoCommit/maxDocs",null));
+    assertEquals("10", m._getStr("overlay/props/updateHandler/autoCommit/maxTime",null));
   }
 
   public void testUserProp() throws Exception {
@@ -151,19 +155,16 @@ public class TestSolrConfigHandler extends RestTestBase {
         " 'set-user-property' : { 'my.custom.variable.a':'MODIFIEDA'," +
         " 'my.custom.variable.b':'MODIFIEDB' } \n" +
         " }";
-    runConfigCommand(harness, "/config?wt=json", payload);
+    runConfigCommand(harness, "/config", payload);
 
-    Map m = (Map) getRespMap("/config/overlay?wt=json", harness).get("overlay");
-    Map props = (Map) m.get("userProps");
-    assertNotNull(props);
-    assertEquals(props.get("my.custom.variable.a"), "MODIFIEDA");
-    assertEquals(props.get("my.custom.variable.b"), "MODIFIEDB");
+    MapWriter m =  getRespMap("/config/overlay", harness);//.get("overlay");
+    assertEquals(m._get("overlay/userProps/my.custom.variable.a",null), "MODIFIEDA");
+    assertEquals(m._get("overlay/userProps/my.custom.variable.b",null), "MODIFIEDB");
 
-    m = (Map) getRespMap("/dump?wt=json&json.nl=map&initArgs=true", harness).get("initArgs");
+    m = getRespMap("/dump?json.nl=map&initArgs=true", harness);//.get("initArgs");
 
-    m = (Map) m.get(PluginInfo.DEFAULTS);
-    assertEquals("MODIFIEDA", m.get("a"));
-    assertEquals("MODIFIEDB", m.get("b"));
+    assertEquals("MODIFIEDA", m._get("initArgs/defaults/a",null));
+    assertEquals("MODIFIEDB", m._get("initArgs/defaults/b",null));
 
   }
 
@@ -176,36 +177,51 @@ public class TestSolrConfigHandler extends RestTestBase {
     log.info("going to send config command. path {} , payload: {}", uri, payload);
     String response = harness.post(uri, json);
     Map map = (Map) ObjectBuilder.getVal(new JSONParser(new StringReader(response)));
-    assertNull(response, map.get("errors"));
+    assertNull(response, map.get("errorMessages"));
+    assertNull(response, map.get("errors")); // Will this ever be returned?
   }
 
+  public static void runConfigCommandExpectFailure(RestTestHarness harness, String uri, String payload, String expectedErrorMessage) throws Exception {
+    String json = SolrTestCaseJ4.json(payload);
+    log.info("going to send config command. path {} , payload: {}", uri, payload);
+    String response = harness.post(uri, json);
+    Map map = (Map)ObjectBuilder.getVal(new JSONParser(new StringReader(response)));
+    assertNotNull(response, map.get("errorMessages"));
+    assertNotNull(response, map.get("error"));
+    assertTrue("Expected status != 0: " + response, 0L != (Long)((Map)map.get("responseHeader")).get("status"));
+    List errorDetails = (List)((Map)map.get("error")).get("details");
+    List errorMessages = (List)((Map)errorDetails.get(0)).get("errorMessages");
+    assertTrue("Expected '" + expectedErrorMessage + "': " + response, 
+        errorMessages.get(0).toString().contains(expectedErrorMessage));
+  }
 
   public static void reqhandlertests(RestTestHarness writeHarness, String testServerBaseUrl, CloudSolrClient cloudSolrClient) throws Exception {
     String payload = "{\n" +
         "'create-requesthandler' : { 'name' : '/x', 'class': 'org.apache.solr.handler.DumpRequestHandler' , 'startup' : 'lazy'}\n" +
         "}";
-    runConfigCommand(writeHarness, "/config?wt=json", payload);
+    runConfigCommand(writeHarness, "/config", payload);
 
     testForResponseElement(writeHarness,
         testServerBaseUrl,
-        "/config/overlay?wt=json",
+        "/config/overlay",
         cloudSolrClient,
-        Arrays.asList("overlay", "requestHandler", "/x", "startup"),
+        asList("overlay", "requestHandler", "/x", "startup"),
         "lazy",
-        10);
+        TIMEOUT_S);
 
     payload = "{\n" +
-        "'update-requesthandler' : { 'name' : '/x', 'class': 'org.apache.solr.handler.DumpRequestHandler' , 'startup' : 'lazy' , 'a':'b' , 'defaults': {'def_a':'def A val', 'multival':['a','b','c']}}\n" +
+        "'update-requesthandler' : { 'name' : '/x', 'class': 'org.apache.solr.handler.DumpRequestHandler' ,registerPath :'/solr,/v2', " +
+        " 'startup' : 'lazy' , 'a':'b' , 'defaults': {'def_a':'def A val', 'multival':['a','b','c']}}\n" +
         "}";
-    runConfigCommand(writeHarness, "/config?wt=json", payload);
+    runConfigCommand(writeHarness, "/config", payload);
 
     testForResponseElement(writeHarness,
         testServerBaseUrl,
-        "/config/overlay?wt=json",
+        "/config/overlay",
         cloudSolrClient,
-        Arrays.asList("overlay", "requestHandler", "/x", "a"),
+        asList("overlay", "requestHandler", "/x", "a"),
         "b",
-        10);
+        TIMEOUT_S);
 
     payload = "{\n" +
         "'update-requesthandler' : { 'name' : '/dump', " +
@@ -214,42 +230,42 @@ public class TestSolrConfigHandler extends RestTestBase {
         " 'defaults': {'a':'A','b':'B','c':'C'}}\n" +
         "}";
 
-    runConfigCommand(writeHarness, "/config?wt=json", payload);
+    runConfigCommand(writeHarness, "/config", payload);
     testForResponseElement(writeHarness,
         testServerBaseUrl,
-        "/config/overlay?wt=json",
+        "/config/overlay",
         cloudSolrClient,
-        Arrays.asList("overlay", "requestHandler", "/dump", "defaults", "c" ),
+        asList("overlay", "requestHandler", "/dump", "defaults", "c"),
         "C",
-        10);
+        TIMEOUT_S);
 
     testForResponseElement(writeHarness,
         testServerBaseUrl,
-        "/x?wt=json&getdefaults=true&json.nl=map",
+        "/x?getdefaults=true&json.nl=map",
         cloudSolrClient,
-        Arrays.asList("getdefaults", "def_a"),
+        asList("getdefaults", "def_a"),
         "def A val",
-        10);
+        TIMEOUT_S);
 
     testForResponseElement(writeHarness,
         testServerBaseUrl,
-        "/x?wt=json&param=multival&json.nl=map",
+        "/x?param=multival&json.nl=map",
         cloudSolrClient,
-        Arrays.asList("params", "multival"),
-        Arrays.asList("a", "b", "c"),
-        10);
+        asList("params", "multival"),
+        asList("a", "b", "c"),
+        TIMEOUT_S);
 
     payload = "{\n" +
         "'delete-requesthandler' : '/x'" +
         "}";
-    runConfigCommand(writeHarness, "/config?wt=json", payload);
+    runConfigCommand(writeHarness, "/config", payload);
     boolean success = false;
     long startTime = System.nanoTime();
     int maxTimeoutSeconds = 10;
     while (TimeUnit.SECONDS.convert(System.nanoTime() - startTime, TimeUnit.NANOSECONDS) < maxTimeoutSeconds) {
-      String uri = "/config/overlay?wt=json";
+      String uri = "/config/overlay";
       Map m = testServerBaseUrl == null ? getRespMap(uri, writeHarness) : TestSolrConfigHandlerConcurrent.getAsMap(testServerBaseUrl + uri, cloudSolrClient);
-      if (null == Utils.getObjectByPath(m, true, Arrays.asList("overlay", "requestHandler", "/x", "a"))) {
+      if (null == Utils.getObjectByPath(m, true, asList("overlay", "requestHandler", "/x", "a"))) {
         success = true;
         break;
       }
@@ -261,154 +277,154 @@ public class TestSolrConfigHandler extends RestTestBase {
     payload = "{\n" +
         "'create-queryconverter' : { 'name' : 'qc', 'class': 'org.apache.solr.spelling.SpellingQueryConverter'}\n" +
         "}";
-    runConfigCommand(writeHarness, "/config?wt=json", payload);
+    runConfigCommand(writeHarness, "/config", payload);
     testForResponseElement(writeHarness,
         testServerBaseUrl,
-        "/config?wt=json",
+        "/config",
         cloudSolrClient,
-        Arrays.asList("config", "queryConverter", "qc", "class"),
+        asList("config", "queryConverter", "qc", "class"),
         "org.apache.solr.spelling.SpellingQueryConverter",
-        10);
+        TIMEOUT_S);
     payload = "{\n" +
         "'update-queryconverter' : { 'name' : 'qc', 'class': 'org.apache.solr.spelling.SuggestQueryConverter'}\n" +
         "}";
-    runConfigCommand(writeHarness, "/config?wt=json", payload);
+    runConfigCommand(writeHarness, "/config", payload);
     testForResponseElement(writeHarness,
         testServerBaseUrl,
-        "/config?wt=json",
+        "/config",
         cloudSolrClient,
-        Arrays.asList("config", "queryConverter", "qc", "class"),
+        asList("config", "queryConverter", "qc", "class"),
         "org.apache.solr.spelling.SuggestQueryConverter",
-        10);
+        TIMEOUT_S);
 
     payload = "{\n" +
         "'delete-queryconverter' : 'qc'" +
         "}";
-    runConfigCommand(writeHarness, "/config?wt=json", payload);
+    runConfigCommand(writeHarness, "/config", payload);
     testForResponseElement(writeHarness,
         testServerBaseUrl,
-        "/config?wt=json",
+        "/config",
         cloudSolrClient,
-        Arrays.asList("config", "queryConverter", "qc"),
+        asList("config", "queryConverter", "qc"),
         null,
-        10);
+        TIMEOUT_S);
 
     payload = "{\n" +
         "'create-searchcomponent' : { 'name' : 'tc', 'class': 'org.apache.solr.handler.component.TermsComponent'}\n" +
         "}";
-    runConfigCommand(writeHarness, "/config?wt=json", payload);
+    runConfigCommand(writeHarness, "/config", payload);
     testForResponseElement(writeHarness,
         testServerBaseUrl,
-        "/config?wt=json",
+        "/config",
         cloudSolrClient,
-        Arrays.asList("config", "searchComponent", "tc", "class"),
+        asList("config", "searchComponent", "tc", "class"),
         "org.apache.solr.handler.component.TermsComponent",
-        10);
+        TIMEOUT_S);
     payload = "{\n" +
         "'update-searchcomponent' : { 'name' : 'tc', 'class': 'org.apache.solr.handler.component.TermVectorComponent' }\n" +
         "}";
-    runConfigCommand(writeHarness, "/config?wt=json", payload);
+    runConfigCommand(writeHarness, "/config", payload);
     testForResponseElement(writeHarness,
         testServerBaseUrl,
-        "/config?wt=json",
+        "/config",
         cloudSolrClient,
-        Arrays.asList("config", "searchComponent", "tc", "class"),
+        asList("config", "searchComponent", "tc", "class"),
         "org.apache.solr.handler.component.TermVectorComponent",
-        10);
+        TIMEOUT_S);
 
     payload = "{\n" +
         "'delete-searchcomponent' : 'tc'" +
         "}";
-    runConfigCommand(writeHarness, "/config?wt=json", payload);
+    runConfigCommand(writeHarness, "/config", payload);
     testForResponseElement(writeHarness,
         testServerBaseUrl,
-        "/config?wt=json",
+        "/config",
         cloudSolrClient,
-        Arrays.asList("config", "searchComponent", "tc"),
+        asList("config", "searchComponent", "tc"),
         null,
-        10);
+        TIMEOUT_S);
     //<valueSourceParser name="countUsage" class="org.apache.solr.core.CountUsageValueSourceParser"/>
     payload = "{\n" +
         "'create-valuesourceparser' : { 'name' : 'cu', 'class': 'org.apache.solr.core.CountUsageValueSourceParser'}\n" +
         "}";
-    runConfigCommand(writeHarness, "/config?wt=json", payload);
+    runConfigCommand(writeHarness, "/config", payload);
     testForResponseElement(writeHarness,
         testServerBaseUrl,
-        "/config?wt=json",
+        "/config",
         cloudSolrClient,
-        Arrays.asList("config", "valueSourceParser", "cu", "class"),
+        asList("config", "valueSourceParser", "cu", "class"),
         "org.apache.solr.core.CountUsageValueSourceParser",
-        10);
+        TIMEOUT_S);
     //  <valueSourceParser name="nvl" class="org.apache.solr.search.function.NvlValueSourceParser">
 //    <float name="nvlFloatValue">0.0</float>
 //    </valueSourceParser>
     payload = "{\n" +
         "'update-valuesourceparser' : { 'name' : 'cu', 'class': 'org.apache.solr.search.function.NvlValueSourceParser'}\n" +
         "}";
-    runConfigCommand(writeHarness, "/config?wt=json", payload);
+    runConfigCommand(writeHarness, "/config", payload);
     testForResponseElement(writeHarness,
         testServerBaseUrl,
-        "/config?wt=json",
+        "/config",
         cloudSolrClient,
-        Arrays.asList("config", "valueSourceParser", "cu", "class"),
+        asList("config", "valueSourceParser", "cu", "class"),
         "org.apache.solr.search.function.NvlValueSourceParser",
-        10);
+        TIMEOUT_S);
 
     payload = "{\n" +
         "'delete-valuesourceparser' : 'cu'" +
         "}";
-    runConfigCommand(writeHarness, "/config?wt=json", payload);
+    runConfigCommand(writeHarness, "/config", payload);
     testForResponseElement(writeHarness,
         testServerBaseUrl,
-        "/config?wt=json",
+        "/config",
         cloudSolrClient,
-        Arrays.asList("config", "valueSourceParser", "cu"),
+        asList("config", "valueSourceParser", "cu"),
         null,
-        10);
+        TIMEOUT_S);
 //    <transformer name="mytrans2" class="org.apache.solr.response.transform.ValueAugmenterFactory" >
 //    <int name="value">5</int>
 //    </transformer>
     payload = "{\n" +
         "'create-transformer' : { 'name' : 'mytrans', 'class': 'org.apache.solr.response.transform.ValueAugmenterFactory', 'value':'5'}\n" +
         "}";
-    runConfigCommand(writeHarness, "/config?wt=json", payload);
+    runConfigCommand(writeHarness, "/config", payload);
     testForResponseElement(writeHarness,
         testServerBaseUrl,
-        "/config?wt=json",
+        "/config",
         cloudSolrClient,
-        Arrays.asList("config", "transformer", "mytrans", "class"),
+        asList("config", "transformer", "mytrans", "class"),
         "org.apache.solr.response.transform.ValueAugmenterFactory",
-        10);
+        TIMEOUT_S);
 
     payload = "{\n" +
         "'update-transformer' : { 'name' : 'mytrans', 'class': 'org.apache.solr.response.transform.ValueAugmenterFactory', 'value':'6'}\n" +
         "}";
-    runConfigCommand(writeHarness, "/config?wt=json", payload);
+    runConfigCommand(writeHarness, "/config", payload);
     testForResponseElement(writeHarness,
         testServerBaseUrl,
-        "/config?wt=json",
+        "/config",
         cloudSolrClient,
-        Arrays.asList("config", "transformer", "mytrans", "value"),
+        asList("config", "transformer", "mytrans", "value"),
         "6",
-        10);
+        TIMEOUT_S);
 
     payload = "{\n" +
         "'delete-transformer' : 'mytrans'," +
         "'create-initparams' : { 'name' : 'hello', 'key':'val'}\n" +
         "}";
-    runConfigCommand(writeHarness, "/config?wt=json", payload);
+    runConfigCommand(writeHarness, "/config", payload);
     Map map = testForResponseElement(writeHarness,
         testServerBaseUrl,
-        "/config?wt=json",
+        "/config",
         cloudSolrClient,
-        Arrays.asList("config", "transformer", "mytrans"),
+        asList("config", "transformer", "mytrans"),
         null,
-        10);
+        TIMEOUT_S);
 
-    List l = (List) Utils.getObjectByPath(map, false, Arrays.asList("config", "initParams"));
-    assertNotNull("no object /config/initParams : "+ TestBlobHandler.getAsString(map) , l);
-    assertEquals( 1, l.size());
-    assertEquals( "val", ((Map)l.get(0)).get("key") );
+    List l = (List) Utils.getObjectByPath(map, false, asList("config", "initParams"));
+    assertNotNull("no object /config/initParams : "+ map , l);
+    assertEquals( 2, l.size());
+    assertEquals( "val", ((Map)l.get(1)).get("key") );
 
 
     payload = "{\n" +
@@ -423,71 +439,99 @@ public class TestSolrConfigHandler extends RestTestBase {
         "        }\n" +
         "    }\n" +
         "}";
-    runConfigCommand(writeHarness, "/config?wt=json", payload);
+    runConfigCommand(writeHarness, "/config", payload);
     map = testForResponseElement(writeHarness,
         testServerBaseUrl,
-        "/config?wt=json",
+        "/config",
         cloudSolrClient,
-        Arrays.asList("config", "searchComponent","myspellcheck", "spellchecker", "class"),
+        asList("config", "searchComponent", "myspellcheck", "spellchecker", "class"),
         "solr.DirectSolrSpellChecker",
-        10);
+        TIMEOUT_S);
 
     payload = "{\n" +
         "    'add-requesthandler': {\n" +
         "        name : '/dump100',\n" +
-        "        class : 'org.apache.solr.handler.DumpRequestHandler'," +
+        "       registerPath :'/solr,/v2',"+
+    "        class : 'org.apache.solr.handler.DumpRequestHandler'," +
         "        suggester: [{name: s1,lookupImpl: FuzzyLookupFactory, dictionaryImpl : DocumentDictionaryFactory}," +
         "                    {name: s2,lookupImpl: FuzzyLookupFactory , dictionaryImpl : DocumentExpressionDictionaryFactory}]" +
         "    }\n" +
         "}";
-    runConfigCommand(writeHarness, "/config?wt=json", payload);
+    runConfigCommand(writeHarness, "/config", payload);
     map = testForResponseElement(writeHarness,
         testServerBaseUrl,
-        "/config?wt=json",
+        "/config",
         cloudSolrClient,
-        Arrays.asList("config", "requestHandler","/dump100", "class"),
+        asList("config", "requestHandler", "/dump100", "class"),
         "org.apache.solr.handler.DumpRequestHandler",
-        10);
+        TIMEOUT_S);
 
-    map = getRespMap("/dump100?wt=json&json.nl=arrmap&initArgs=true", writeHarness);
+    map = getRespMap("/dump100?json.nl=arrmap&initArgs=true", writeHarness);
     List initArgs = (List) map.get("initArgs");
-    assertEquals(2, initArgs.size());
-    assertTrue(((Map)initArgs.get(0)).containsKey("suggester"));
+    assertNotNull(initArgs);
+    assertTrue(initArgs.size() >= 2);
+    assertTrue(((Map)initArgs.get(2)).containsKey("suggester"));
     assertTrue(((Map)initArgs.get(1)).containsKey("suggester"));
 
     payload = "{\n" +
         "'add-requesthandler' : { 'name' : '/dump101', 'class': " +
-        "'" + CacheTest.class.getName() + "' " +
+        "'" + CacheTest.class.getName() + "', " +
+        "    registerPath :'/solr,/v2'"+
         ", 'startup' : 'lazy'}\n" +
         "}";
-    runConfigCommand(writeHarness, "/config?wt=json", payload);
+    runConfigCommand(writeHarness, "/config", payload);
 
     testForResponseElement(writeHarness,
         testServerBaseUrl,
-        "/config/overlay?wt=json",
+        "/config/overlay",
         cloudSolrClient,
-        Arrays.asList("overlay", "requestHandler", "/dump101", "startup"),
+        asList("overlay", "requestHandler", "/dump101", "startup"),
         "lazy",
-        10);
+        TIMEOUT_S);
 
     payload = "{\n" +
         "'add-cache' : {name:'lfuCacheDecayFalse', class:'solr.search.LFUCache', size:10 ,initialSize:9 , timeDecay:false }," +
         "'add-cache' : {name: 'perSegFilter', class: 'solr.search.LRUCache', size:10, initialSize:0 , autowarmCount:10}}";
-    runConfigCommand(writeHarness, "/config?wt=json", payload);
+    runConfigCommand(writeHarness, "/config", payload);
 
     map = testForResponseElement(writeHarness,
         testServerBaseUrl,
-        "/config/overlay?wt=json",
+        "/config/overlay",
         cloudSolrClient,
-        Arrays.asList("overlay", "cache", "lfuCacheDecayFalse", "class"),
+        asList("overlay", "cache", "lfuCacheDecayFalse", "class"),
         "solr.search.LFUCache",
-        10);
+        TIMEOUT_S);
     assertEquals("solr.search.LRUCache",getObjectByPath(map, true, ImmutableList.of("overlay", "cache", "perSegFilter", "class")));
 
-    map = getRespMap("/dump101?cacheNames=lfuCacheDecayFalse&cacheNames=perSegFilter&wt=json", writeHarness);
+    map = getRespMap("/dump101?cacheNames=lfuCacheDecayFalse&cacheNames=perSegFilter", writeHarness);
     assertEquals("Actual output "+ Utils.toJSONString(map), "org.apache.solr.search.LRUCache",getObjectByPath(map, true, ImmutableList.of( "caches", "perSegFilter")));
     assertEquals("Actual output "+ Utils.toJSONString(map), "org.apache.solr.search.LFUCache",getObjectByPath(map, true, ImmutableList.of( "caches", "lfuCacheDecayFalse")));
 
+  }
+  
+  public void testFailures() throws Exception {
+    String payload = "{ not-a-real-command: { param1: value1, param2: value2 } }";
+    runConfigCommandExpectFailure(restTestHarness, "/config", payload, "Unknown operation 'not-a-real-command'");
+
+    payload = "{ set-property: { update.autoCreateFields: false } }";
+    runConfigCommandExpectFailure(restTestHarness, "/config", payload, "'update.autoCreateFields' is not an editable property");
+    
+    payload = "{ set-property: { updateHandler.autoCommit.maxDocs: false } }";
+    runConfigCommandExpectFailure(restTestHarness, "/config", payload, "Property updateHandler.autoCommit.maxDocs must be of Integer type");
+
+    payload = "{ unset-property: not-an-editable-property }";
+    runConfigCommandExpectFailure(restTestHarness, "/config", payload, "'[not-an-editable-property]' is not an editable property");
+
+    for (String component : new String[] {
+        "requesthandler", "searchcomponent", "initparams", "queryresponsewriter", "queryparser",
+        "valuesourceparser", "transformer", "updateprocessor", "queryconverter", "listener", "runtimelib"}) {
+      for (String operation : new String[] { "add", "update" }) {
+        payload = "{ " + operation + "-" + component + ": { param1: value1 } }";
+        runConfigCommandExpectFailure(restTestHarness, "/config", payload, "'name' is a required field");
+      }
+      payload = "{ delete-" + component + ": not-a-real-component-name }";
+      runConfigCommandExpectFailure(restTestHarness, "/config", payload, "NO such ");
+    }
   }
 
   public static class CacheTest extends DumpRequestHandler {
@@ -506,7 +550,7 @@ public class TestSolrConfigHandler extends RestTestBase {
     }
   }
 
-  public static Map testForResponseElement(RestTestHarness harness,
+  public static LinkedHashMapWriter testForResponseElement(RestTestHarness harness,
                                            String testServerBaseUrl,
                                            String uri,
                                            CloudSolrClient cloudSolrClient, List<String> jsonPath,
@@ -515,7 +559,7 @@ public class TestSolrConfigHandler extends RestTestBase {
 
     boolean success = false;
     long startTime = System.nanoTime();
-    Map m = null;
+    LinkedHashMapWriter m = null;
 
     while (TimeUnit.SECONDS.convert(System.nanoTime() - startTime, TimeUnit.NANOSECONDS) < maxTimeoutSeconds) {
       try {
@@ -525,14 +569,25 @@ public class TestSolrConfigHandler extends RestTestBase {
         continue;
 
       }
-      if (Objects.equals(expected, Utils.getObjectByPath(m, false, jsonPath))) {
-        success = true;
-        break;
+      Object actual = Utils.getObjectByPath(m, false, jsonPath);
+
+      if (expected instanceof ValidatingJsonMap.PredicateWithErrMsg) {
+        ValidatingJsonMap.PredicateWithErrMsg predicate = (ValidatingJsonMap.PredicateWithErrMsg) expected;
+        if (predicate.test(actual) == null) {
+          success = true;
+          break;
+        }
+
+      } else {
+        if (Objects.equals(expected, actual)) {
+          success = true;
+          break;
+        }
       }
       Thread.sleep(100);
 
     }
-    assertTrue(StrUtils.formatString("Could not get expected value  ''{0}'' for path ''{1}'' full output: {2},  from server:  {3}", expected, StrUtils.join(jsonPath, '/'), getAsString(m), testServerBaseUrl), success);
+    assertTrue(StrUtils.formatString("Could not get expected value  ''{0}'' for path ''{1}'' full output: {2},  from server:  {3}", expected, StrUtils.join(jsonPath, '/'), m.toString(), testServerBaseUrl), success);
 
     return m;
   }
@@ -547,78 +602,78 @@ public class TestSolrConfigHandler extends RestTestBase {
         "  }";
 
 
-    TestSolrConfigHandler.runConfigCommand(harness, "/config/params?wt=json", payload);
+    TestSolrConfigHandler.runConfigCommand(harness, "/config/params", payload);
 
     TestSolrConfigHandler.testForResponseElement(
         harness,
         null,
-        "/config/params?wt=json",
+        "/config/params",
         null,
-        Arrays.asList("response", "params", "x", "a"),
+        asList("response", "params", "x", "a"),
         "A val",
-        10);
+        TIMEOUT_S);
 
     TestSolrConfigHandler.testForResponseElement(
         harness,
         null,
-        "/config/params?wt=json",
+        "/config/params",
         null,
-        Arrays.asList("response", "params", "x", "b"),
+        asList("response", "params", "x", "b"),
         "B val",
-        10);
+        TIMEOUT_S);
 
     payload = "{\n" +
-        "'create-requesthandler' : { 'name' : '/d', 'class': 'org.apache.solr.handler.DumpRequestHandler' }\n" +
+        "'create-requesthandler' : { 'name' : '/d', registerPath :'/solr,/v2' , 'class': 'org.apache.solr.handler.DumpRequestHandler' }\n" +
         "}";
 
-    TestSolrConfigHandler.runConfigCommand(harness, "/config?wt=json", payload);
+    TestSolrConfigHandler.runConfigCommand(harness, "/config", payload);
 
     TestSolrConfigHandler.testForResponseElement(
         harness,
         null,
-        "/config/overlay?wt=json",
+        "/config/overlay",
         null,
-        Arrays.asList("overlay", "requestHandler", "/d", "name"),
+        asList("overlay", "requestHandler", "/d", "name"),
         "/d",
-        10);
+        TIMEOUT_S);
 
     TestSolrConfigHandler.testForResponseElement(harness,
         null,
-        "/d?wt=json&useParams=x",
+        "/d?useParams=x",
         null,
-        Arrays.asList("params", "a"),
+        asList("params", "a"),
         "A val",
-        5);
+        TIMEOUT_S);
     TestSolrConfigHandler.testForResponseElement(harness,
         null,
-        "/d?wt=json&useParams=x&a=fomrequest",
+        "/d?useParams=x&a=fomrequest",
         null,
-        Arrays.asList("params", "a"),
+        asList("params", "a"),
         "fomrequest",
-        5);
+        TIMEOUT_S);
 
     payload = "{\n" +
-        "'create-requesthandler' : { 'name' : '/dump1', 'class': 'org.apache.solr.handler.DumpRequestHandler', 'useParams':'x' }\n" +
+        "'create-requesthandler' : { 'name' : '/dump1', registerPath :'/solr,/v2' , 'class': 'org.apache.solr.handler.DumpRequestHandler', 'useParams':'x' }\n" +
         "}";
 
-    TestSolrConfigHandler.runConfigCommand(harness, "/config?wt=json", payload);
+    TestSolrConfigHandler.runConfigCommand(harness, "/config", payload);
 
     TestSolrConfigHandler.testForResponseElement(harness,
         null,
-        "/config/overlay?wt=json",
+        "/config/overlay",
         null,
-        Arrays.asList("overlay", "requestHandler", "/dump1", "name"),
+        asList("overlay", "requestHandler", "/dump1", "name"),
         "/dump1",
-        10);
+        TIMEOUT_S);
 
     TestSolrConfigHandler.testForResponseElement(
         harness,
         null,
-        "/dump1?wt=json",
+        "/dump1",
         null,
-        Arrays.asList("params", "a"),
+        asList("params", "a"),
         "A val",
-        5);
+        TIMEOUT_S);
 
 
     payload = " {\n" +
@@ -630,52 +685,52 @@ public class TestSolrConfigHandler extends RestTestBase {
         "  }";
 
 
-    TestSolrConfigHandler.runConfigCommand(harness, "/config/params?wt=json", payload);
+    TestSolrConfigHandler.runConfigCommand(harness, "/config/params", payload);
 
     TestSolrConfigHandler.testForResponseElement(
         harness,
         null,
-        "/config/params?wt=json",
+        "/config/params",
         null,
-        Arrays.asList("response", "params", "y", "c"),
+        asList("response", "params", "y", "c"),
         "CY val",
-        10);
+        TIMEOUT_S);
 
     TestSolrConfigHandler.testForResponseElement(harness,
         null,
-        "/dump?wt=json&useParams=y",
+        "/dump1?useParams=y",
         null,
-        Arrays.asList("params", "c"),
+        asList("params", "c"),
         "CY val",
-        5);
+        TIMEOUT_S);
 
 
     TestSolrConfigHandler.testForResponseElement(
         harness,
         null,
-        "/dump1?wt=json&useParams=y",
+        "/dump1?useParams=y",
         null,
-        Arrays.asList("params", "b"),
+        asList("params", "b"),
         "BY val",
-        5);
+        TIMEOUT_S);
 
     TestSolrConfigHandler.testForResponseElement(
         harness,
         null,
-        "/dump1?wt=json&useParams=y",
+        "/dump1?useParams=y",
         null,
-        Arrays.asList("params", "a"),
+        asList("params", "a"),
         "A val",
-        5);
+        TIMEOUT_S);
 
     TestSolrConfigHandler.testForResponseElement(
         harness,
         null,
-        "/dump1?wt=json&useParams=y",
+        "/dump1?useParams=y",
         null,
-        Arrays.asList("params", "d"),
-        Arrays.asList("val 1", "val 2"),
-        5);
+        asList("params", "d"),
+        asList("val 1", "val 2"),
+        TIMEOUT_S);
 
     payload = " {\n" +
         "  'update' : {'y': {\n" +
@@ -687,25 +742,25 @@ public class TestSolrConfigHandler extends RestTestBase {
         "  }";
 
 
-    TestSolrConfigHandler.runConfigCommand(harness, "/config/params?wt=json", payload);
+    TestSolrConfigHandler.runConfigCommand(harness, "/config/params", payload);
 
     TestSolrConfigHandler.testForResponseElement(
         harness,
         null,
-        "/config/params?wt=json",
+        "/config/params",
         null,
-        Arrays.asList("response", "params", "y", "c"),
+        asList("response", "params", "y", "c"),
         "CY val modified",
-        10);
+        TIMEOUT_S);
 
     TestSolrConfigHandler.testForResponseElement(
         harness,
         null,
-        "/config/params?wt=json",
+        "/config/params",
         null,
-        Arrays.asList("response", "params", "y", "e"),
+        asList("response", "params", "y", "e"),
         "EY val",
-        10);
+        TIMEOUT_S);
 
     payload = " {\n" +
         "  'set' : {'y': {\n" +
@@ -716,46 +771,100 @@ public class TestSolrConfigHandler extends RestTestBase {
         "  }";
 
 
-    TestSolrConfigHandler.runConfigCommand(harness, "/config/params?wt=json", payload);
+    TestSolrConfigHandler.runConfigCommand(harness, "/config/params", payload);
     TestSolrConfigHandler.testForResponseElement(
         harness,
         null,
-        "/config/params?wt=json",
+        "/config/params",
         null,
-        Arrays.asList("response", "params", "y", "p"),
+        asList("response", "params", "y", "p"),
         "P val",
-        10);
+        TIMEOUT_S);
 
     TestSolrConfigHandler.testForResponseElement(
         harness,
         null,
-        "/config/params?wt=json",
+        "/config/params",
         null,
-        Arrays.asList("response", "params", "y", "c"),
+        asList("response", "params", "y", "c"),
         null,
-        10);
+        TIMEOUT_S);
     payload = " {'delete' : 'y'}";
-    TestSolrConfigHandler.runConfigCommand(harness, "/config/params?wt=json", payload);
+    TestSolrConfigHandler.runConfigCommand(harness, "/config/params", payload);
     TestSolrConfigHandler.testForResponseElement(
         harness,
         null,
-        "/config/params?wt=json",
+        "/config/params",
         null,
-        Arrays.asList("response", "params", "y", "p"),
+        asList("response", "params", "y", "p"),
         null,
-        10);
+        TIMEOUT_S);
 
+    payload = "{\n" +
+        "  'create-requesthandler': {\n" +
+        "    'name': 'aRequestHandler',\n" +
+        "    'registerPath': '/v2',\n" +
+        "    'class': 'org.apache.solr.handler.DumpRequestHandler',\n" +
+        "    'spec': {\n" +
+        "      'methods': [\n" +
+        "        'GET',\n" +
+        "        'POST'\n" +
+        "      ],\n" +
+        "      'url': {\n" +
+        "        'paths': [\n" +
+        "          '/something/{part1}/fixed/{part2}'\n" +
+        "        ]\n" +
+        "      }\n" +
+        "    }\n" +
+        "  }\n" +
+        "}";
+
+    TestSolrConfigHandler.runConfigCommand(harness, "/config", payload);
+    TestSolrConfigHandler.testForResponseElement(harness,
+        null,
+        "/config/overlay",
+        null,
+        asList("overlay", "requestHandler", "aRequestHandler", "class"),
+        "org.apache.solr.handler.DumpRequestHandler",
+        TIMEOUT_S);
+    RESTfulServerProvider oldProvider = restTestHarness.getServerProvider();
+    restTestHarness.setServerProvider(() -> jetty.getBaseUrl().toString() + "/____v2/cores/" + DEFAULT_TEST_CORENAME);
+
+    Map rsp = TestSolrConfigHandler.testForResponseElement(
+        harness,
+        null,
+        "/something/part1_Value/fixed/part2_Value?urlTemplateValues=part1&urlTemplateValues=part2",
+        null,
+        asList("urlTemplateValues"),
+        new ValidatingJsonMap.PredicateWithErrMsg() {
+          @Override
+          public String test(Object o) {
+            if (o instanceof Map) {
+              Map m = (Map) o;
+              if ("part1_Value".equals(m.get("part1"))  && "part2_Value".equals(m.get("part2"))) return null;
+
+            }
+            return "no match";
+          }
+
+          @Override
+          public String toString() {
+            return "{part1:part1_Value, part2 : part2_Value]";
+          }
+        },
+        TIMEOUT_S);
+    restTestHarness.setServerProvider(oldProvider);
 
   }
 
 
-  public static Map getRespMap(String path, RestTestHarness restHarness) throws Exception {
+  public static LinkedHashMapWriter getRespMap(String path, RestTestHarness restHarness) throws Exception {
     String response = restHarness.query(path);
     try {
-      return (Map) ObjectBuilder.getVal(new JSONParser(new StringReader(response)));
+      return (LinkedHashMapWriter) Utils.MAPWRITEROBJBUILDER.apply(Utils.getJSONParser(new StringReader(response))).getVal();
     } catch (JSONParser.ParseException e) {
       log.error(response);
-      return Collections.emptyMap();
+      return new LinkedHashMapWriter();
     }
   }
 }

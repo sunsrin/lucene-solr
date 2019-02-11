@@ -23,18 +23,18 @@ import java.nio.file.Paths;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.Map;
-import org.apache.solr.cloud.SolrCloudTestCase;
+
 import org.apache.solr.client.solrj.SolrClient;
 import org.apache.solr.client.solrj.embedded.JettySolrRunner;
-import org.apache.solr.client.solrj.impl.HttpSolrClient;
 import org.apache.solr.client.solrj.impl.CloudSolrClient;
+import org.apache.solr.client.solrj.impl.HttpSolrClient;
+import org.apache.solr.client.solrj.request.CollectionAdminRequest;
 import org.apache.solr.client.solrj.request.UpdateRequest;
-import org.apache.solr.client.solrj.response.UpdateResponse;
 import org.apache.solr.common.SolrDocument;
 import org.apache.solr.common.SolrDocumentList;
+import org.apache.solr.common.SolrException;
 import org.apache.solr.common.SolrInputDocument;
 import org.apache.solr.common.SolrInputField;
-import org.apache.solr.common.SolrException;
 import org.apache.solr.common.cloud.ClusterState;
 import org.apache.solr.common.cloud.Replica;
 import org.apache.solr.common.cloud.Slice;
@@ -44,7 +44,6 @@ import org.apache.solr.common.params.SolrParams;
 import org.junit.AfterClass;
 import org.junit.Before;
 import org.junit.BeforeClass;
-
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -106,15 +105,15 @@ public class TestCloudDeleteByQuery extends SolrCloudTestCase {
     collectionProperties.put("config", "solrconfig-tlog.xml");
     collectionProperties.put("schema", "schema15.xml"); // string id for doc routing prefix
 
-    assertNotNull(cluster.createCollection(COLLECTION_NAME, NUM_SHARDS, REPLICATION_FACTOR,
-                                           configName, null, null, collectionProperties));
-    
+    CollectionAdminRequest.createCollection(COLLECTION_NAME, configName, NUM_SHARDS, REPLICATION_FACTOR)
+        .setProperties(collectionProperties)
+        .process(cluster.getSolrClient());
+    cluster.waitForActiveCollection(COLLECTION_NAME, NUM_SHARDS, REPLICATION_FACTOR * NUM_SHARDS);
+
     CLOUD_CLIENT = cluster.getSolrClient();
     CLOUD_CLIENT.setDefaultCollection(COLLECTION_NAME);
     
     ZkStateReader zkStateReader = CLOUD_CLIENT.getZkStateReader();
-    AbstractDistribZkTestBase.waitForRecoveriesToFinish(COLLECTION_NAME, zkStateReader, true, true, 330);
-
 
     // really hackish way to get a URL for specific nodes based on shard/replica hosting
     // inspired by TestMiniSolrCloudCluster
@@ -125,7 +124,7 @@ public class TestCloudDeleteByQuery extends SolrCloudTestCase {
       urlMap.put(nodeKey, jettyURL.toString());
     }
     ClusterState clusterState = zkStateReader.getClusterState();
-    for (Slice slice : clusterState.getSlices(COLLECTION_NAME)) {
+    for (Slice slice : clusterState.getCollection(COLLECTION_NAME).getSlices()) {
       String shardName = slice.getName();
       Replica leader = slice.getLeader();
       assertNotNull("slice has null leader: " + slice.toString(), leader);
@@ -198,12 +197,10 @@ public class TestCloudDeleteByQuery extends SolrCloudTestCase {
 
   public void testMalformedDBQ(SolrClient client) throws Exception {
     assertNotNull("client not initialized", client);
-    try {
-      UpdateResponse rsp = update(params()).deleteByQuery("foo_i:not_a_num").process(client);
-      fail("Expected DBQ failure: " + rsp.toString());
-    } catch (SolrException e) {
-      assertEquals("not the expected DBQ failure: " + e.getMessage(), 400, e.code());
-    }
+    SolrException e = expectThrows(SolrException.class,
+        "Expected DBQ failure",
+        () -> update(params()).deleteByQuery("foo_i:not_a_num").process(client));
+    assertEquals("not the expected DBQ failure: " + e.getMessage(), 400, e.code());
   }
 
   //
@@ -243,7 +240,7 @@ public class TestCloudDeleteByQuery extends SolrCloudTestCase {
   
   public static SolrInputField f(String fieldName, Object... values) {
     SolrInputField f = new SolrInputField(fieldName);
-    f.setValue(values, 1.0F);
+    f.setValue(values);
     return f;
   }
 }

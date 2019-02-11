@@ -27,6 +27,10 @@ java.util.Properties#load(java.io.InputStream)
 java.util.Properties#save(java.io.OutputStream,java.lang.String)
 java.util.Properties#store(java.io.OutputStream,java.lang.String)
 
+@defaultMessage The context classloader should never be used for resource lookups, unless there is a 3rd party library that needs it. Always pass a classloader down as method parameters.
+java.lang.Thread#getContextClassLoader()
+java.lang.Thread#setContextClassLoader(java.lang.ClassLoader)
+
 java.lang.Character#codePointBefore(char[],int) @ Implicit start offset is error-prone when the char[] is a buffer and the first chars are random chars
 java.lang.Character#codePointAt(char[],int) @ Implicit end offset is error-prone when the char[] is a buffer and the last chars are random chars
 
@@ -36,3 +40,21 @@ java.util.Collections#shuffle(java.util.List) @ Use shuffle(List, Random) instea
 
 java.util.Locale#forLanguageTag(java.lang.String) @ use new Locale.Builder().setLanguageTag(...).build() which has error handling
 java.util.Locale#toString() @ use Locale#toLanguageTag() for a standardized BCP47 locale name
+
+@defaultMessage Constructors for wrapper classes of Java primitives should be avoided in favor of the public static methods available or autoboxing
+java.lang.Integer#<init>(int)
+java.lang.Integer#<init>(java.lang.String)
+java.lang.Byte#<init>(byte)
+java.lang.Byte#<init>(java.lang.String)
+java.lang.Short#<init>(short)
+java.lang.Short#<init>(java.lang.String)
+java.lang.Long#<init>(long)
+java.lang.Long#<init>(java.lang.String)
+java.lang.Boolean#<init>(boolean)
+java.lang.Boolean#<init>(java.lang.String)
+java.lang.Character#<init>(char)
+java.lang.Float#<init>(float)
+java.lang.Float#<init>(double)
+java.lang.Float#<init>(java.lang.String)
+java.lang.Double#<init>(double)
+java.lang.Double#<init>(java.lang.String)

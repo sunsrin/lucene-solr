@@ -50,7 +50,7 @@ import org.apache.lucene.util.LuceneTestCase;
 import org.apache.lucene.util.NamedThreadFactory;
 import org.apache.lucene.util.TestUtil;
 
-@SuppressCodecs({ "SimpleText", "Memory", "Direct" })
+@SuppressCodecs({ "SimpleText", "Direct" })
 public class TestSearcherManager extends ThreadedIndexingAndSearchingTestCase {
 
   boolean warmCalled;
@@ -443,6 +443,16 @@ public class TestSearcherManager extends ThreadedIndexingAndSearchingTestCase {
     public MyFilterLeafReader(LeafReader in) {
       super(in);
     }
+
+    @Override
+    public CacheHelper getCoreCacheHelper() {
+      return in.getCoreCacheHelper();
+    }
+
+    @Override
+    public CacheHelper getReaderCacheHelper() {
+      return in.getReaderCacheHelper();
+    }
   }
 
   private static class MyFilterDirectoryReader extends FilterDirectoryReader {
@@ -462,6 +472,11 @@ public class TestSearcherManager extends ThreadedIndexingAndSearchingTestCase {
     protected DirectoryReader doWrapDirectoryReader(DirectoryReader in) throws IOException {
       return new MyFilterDirectoryReader(in);
     }
+
+    @Override
+    public CacheHelper getReaderCacheHelper() {
+      return in.getReaderCacheHelper();
+    }
   }
 
   // LUCENE-6087
@@ -472,7 +487,7 @@ public class TestSearcherManager extends ThreadedIndexingAndSearchingTestCase {
 
     FilterDirectoryReader reader = new MyFilterDirectoryReader(nrtReader);
     assertEquals(nrtReader, reader.getDelegate());
-    assertEquals(nrtReader, FilterDirectoryReader.unwrap(reader));
+    assertEquals(FilterDirectoryReader.unwrap(nrtReader), FilterDirectoryReader.unwrap(reader));
 
     SearcherManager mgr = new SearcherManager(reader, null);
     for(int i=0;i<10;i++) {
@@ -539,7 +554,9 @@ public class TestSearcherManager extends ThreadedIndexingAndSearchingTestCase {
   public void testConcurrentIndexCloseSearchAndRefresh() throws Exception {
     final Directory dir = newFSDirectory(createTempDir());
     AtomicReference<IndexWriter> writerRef = new AtomicReference<>();
-    writerRef.set(new IndexWriter(dir, newIndexWriterConfig()));
+    final MockAnalyzer analyzer = new MockAnalyzer(random());
+    analyzer.setMaxTokenLength(IndexWriter.MAX_TERM_LENGTH);
+    writerRef.set(new IndexWriter(dir, newIndexWriterConfig(analyzer)));
 
     AtomicReference<SearcherManager> mgrRef = new AtomicReference<>();
     mgrRef.set(new SearcherManager(writerRef.get(), null));
@@ -561,16 +578,17 @@ public class TestSearcherManager extends ThreadedIndexingAndSearchingTestCase {
                 } else {
                   w.rollback();
                 }
-                writerRef.set(new IndexWriter(dir, newIndexWriterConfig()));
+                writerRef.set(new IndexWriter(dir, newIndexWriterConfig(analyzer)));
               }
             }
             docs.close();
-            stop.set(true);
             if (VERBOSE) {
-              System.out.println("TEST: index count=" + writerRef.get().maxDoc());
+              System.out.println("TEST: index count=" + writerRef.get().getDocStats().maxDoc);
             }
           } catch (IOException ioe) {
             throw new RuntimeException(ioe);
+          } finally {
+            stop.set(true);
           }
         }
       };

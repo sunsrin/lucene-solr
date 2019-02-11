@@ -16,25 +16,26 @@
  */
 package org.apache.solr.search;
 
-import org.apache.solr.SolrTestCaseJ4;
-import org.apache.solr.common.util.ExecutorUtil;
-import org.apache.solr.common.util.NamedList;
-import org.apache.solr.util.ConcurrentLFUCache;
-import org.apache.solr.util.DefaultSolrThreadFactory;
-import org.apache.solr.util.RefCounted;
-import org.junit.BeforeClass;
-import org.junit.Test;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-
 import java.io.IOException;
 import java.lang.invoke.MethodHandles;
 import java.util.HashMap;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Random;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
+
+import org.apache.lucene.util.TestUtil;
+import org.apache.solr.SolrTestCaseJ4;
+import org.apache.solr.common.util.ExecutorUtil;
+import org.apache.solr.metrics.SolrMetricManager;
+import org.apache.solr.util.ConcurrentLFUCache;
+import org.apache.solr.util.DefaultSolrThreadFactory;
+import org.junit.BeforeClass;
+import org.junit.Test;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 
 /**
@@ -54,12 +55,10 @@ public class TestLFUCache extends SolrTestCaseJ4 {
 
   @Test
   public void testTimeDecayParams() throws IOException {
-    RefCounted<SolrIndexSearcher> holder = h.getCore().getSearcher();
-    try {
-      SolrIndexSearcher searcher = holder.get();
+    h.getCore().withSearcher(searcher -> {
       LFUCache cacheDecayTrue = (LFUCache) searcher.getCache("lfuCacheDecayTrue");
       assertNotNull(cacheDecayTrue);
-      NamedList stats = cacheDecayTrue.getStatistics();
+      Map<String,Object> stats = cacheDecayTrue.getMetricsMap().getValue();
       assertTrue((Boolean) stats.get("timeDecay"));
       addCache(cacheDecayTrue, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10);
       for (int idx = 0; idx < 64; ++idx) {
@@ -70,7 +69,7 @@ public class TestLFUCache extends SolrTestCaseJ4 {
 
       LFUCache cacheDecayDefault = (LFUCache) searcher.getCache("lfuCacheDecayDefault");
       assertNotNull(cacheDecayDefault);
-      stats = cacheDecayDefault.getStatistics();
+      stats = cacheDecayDefault.getMetricsMap().getValue();
       assertTrue((Boolean) stats.get("timeDecay"));
       addCache(cacheDecayDefault, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10);
       assertCache(cacheDecayDefault, 1, 2, 3, 4, 5);
@@ -84,7 +83,7 @@ public class TestLFUCache extends SolrTestCaseJ4 {
 
       LFUCache cacheDecayFalse = (LFUCache) searcher.getCache("lfuCacheDecayFalse");
       assertNotNull(cacheDecayFalse);
-      stats = cacheDecayFalse.getStatistics();
+      stats = cacheDecayFalse.getMetricsMap().getValue();
       assertFalse((Boolean) stats.get("timeDecay"));
       addCache(cacheDecayFalse, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10);
       assertCache(cacheDecayFalse, 1, 2, 3, 4, 5);
@@ -99,10 +98,8 @@ public class TestLFUCache extends SolrTestCaseJ4 {
         addCache(cacheDecayFalse, idx);
       }
       assertCache(cacheDecayFalse, 1, 2, 3, 4, 5);
-
-    } finally {
-      holder.decref();
-    }
+      return null;
+    });
   }
 
   private void addCache(LFUCache cache, int... inserts) {
@@ -131,9 +128,16 @@ public class TestLFUCache extends SolrTestCaseJ4 {
 
   @Test
   public void testSimple() throws IOException {
+    SolrMetricManager metricManager = new SolrMetricManager();
+    Random r = random();
+    String registry = TestUtil.randomSimpleString(r, 2, 10);
+    String scope = TestUtil.randomSimpleString(r, 2, 10);
     LFUCache lfuCache = new LFUCache();
     LFUCache newLFUCache = new LFUCache();
     LFUCache noWarmLFUCache = new LFUCache();
+    lfuCache.initializeMetrics(metricManager, registry, "foo", scope + ".lfuCache");
+    newLFUCache.initializeMetrics(metricManager, registry, "foo", scope + ".newLFUCache");
+    noWarmLFUCache.initializeMetrics(metricManager, registry, "foo", scope + ".noWarmLFUCache");
     try {
       Map params = new HashMap();
       params.put("size", "100");
@@ -148,7 +152,7 @@ public class TestLFUCache extends SolrTestCaseJ4 {
       assertEquals("15", lfuCache.get(15));
       assertEquals("75", lfuCache.get(75));
       assertEquals(null, lfuCache.get(110));
-      NamedList nl = lfuCache.getStatistics();
+      Map<String,Object> nl = lfuCache.getMetricsMap().getValue();
       assertEquals(3L, nl.get("lookups"));
       assertEquals(2L, nl.get("hits"));
       assertEquals(101L, nl.get("inserts"));
@@ -164,7 +168,7 @@ public class TestLFUCache extends SolrTestCaseJ4 {
       assertEquals("15", newLFUCache.get(15));
       assertEquals("75", newLFUCache.get(75));
       assertEquals(null, newLFUCache.get(50));
-      nl = newLFUCache.getStatistics();
+      nl = newLFUCache.getMetricsMap().getValue();
       assertEquals(3L, nl.get("lookups"));
       assertEquals(2L, nl.get("hits"));
       assertEquals(1L, nl.get("inserts"));

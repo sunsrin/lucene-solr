@@ -19,13 +19,12 @@ package org.apache.lucene.analysis.charfilter;
 
 import java.io.IOException;
 import java.io.Reader;
-import java.util.Arrays;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Set;
 
-import org.apache.lucene.analysis.util.CharArrayMap;
-import org.apache.lucene.analysis.util.CharArraySet;
+import org.apache.lucene.analysis.CharArrayMap;
+import org.apache.lucene.analysis.CharArraySet;
 import org.apache.lucene.analysis.util.OpenStringBuilder;
 
 /**
@@ -34,7 +33,7 @@ import org.apache.lucene.analysis.util.OpenStringBuilder;
 @SuppressWarnings("fallthrough")
 %%
 
-%unicode 6.3
+%unicode 9.0
 %apiprivate
 %type int
 %final
@@ -50,6 +49,10 @@ import org.apache.lucene.analysis.util.OpenStringBuilder;
 %xstate END_TAG_TAIL_INCLUDE, END_TAG_TAIL_EXCLUDE, END_TAG_TAIL_SUBSTITUTE
 %xstate START_TAG_TAIL_INCLUDE, START_TAG_TAIL_EXCLUDE, START_TAG_TAIL_SUBSTITUTE
 %xstate STYLE, STYLE_COMMENT
+
+%init{
+  super(in);
+%init}
 
 // From XML 1.0 <http://www.w3.org/TR/xml/>:
 //
@@ -167,24 +170,14 @@ InlineElment = ( [aAbBiIqQsSuU]                   |
   private TextSegment entitySegment = new TextSegment(2);
 
   /**
-   * Creates a new HTMLStripCharFilter over the provided Reader.
-   * @param source Reader to strip html tags from.
-   */
-  public HTMLStripCharFilter(Reader source) {
-    super(source);
-    this.zzReader = source;
-  }
-
-  /**
    * Creates a new HTMLStripCharFilter over the provided Reader
    * with the specified start and end tags.
-   * @param source Reader to strip html tags from.
+   * @param in Reader to strip html tags from.
    * @param escapedTags Tags in this set (both start and end tags)
    *  will not be filtered out.
    */
-  public HTMLStripCharFilter(Reader source, Set<String> escapedTags) {
-    super(source);
-    this.zzReader = source;
+  public HTMLStripCharFilter(Reader in, Set<String> escapedTags) {
+    this(in);
     if (null != escapedTags) {
       for (String tag : escapedTags) {
         if (tag.equalsIgnoreCase("BR")) {
@@ -238,7 +231,7 @@ InlineElment = ( [aAbBiIqQsSuU]                   |
     return ZZ_BUFFERSIZE;
   }
 
-  private class TextSegment extends OpenStringBuilder {
+  private static class TextSegment extends OpenStringBuilder {
     /** The position from which the next char will be read. */
     int pos = 0;
 

@@ -108,9 +108,8 @@ public class SyncSliceTest extends AbstractFullDistribZkTestBase {
         .getBaseURL();
     baseUrl = baseUrl.substring(0, baseUrl.length() - "collection1".length());
     
-    try (HttpSolrClient baseClient = getHttpSolrClient(baseUrl)) {
-      // we only set the connect timeout, not so timeout
-      baseClient.setConnectionTimeout(30000);
+    // we only set the connect timeout, not so timeout
+    try (HttpSolrClient baseClient = getHttpSolrClient(baseUrl, 30000)) {
       baseClient.request(request);
     }
 
@@ -137,7 +136,7 @@ public class SyncSliceTest extends AbstractFullDistribZkTestBase {
     jetties.remove(leaderJetty);
     assertEquals(getShardCount() - 1, jetties.size());
     
-    chaosMonkey.killJetty(leaderJetty);
+    leaderJetty.jetty.stop();
     
     Thread.sleep(3000);
     
@@ -159,7 +158,7 @@ public class SyncSliceTest extends AbstractFullDistribZkTestBase {
     }
     
     // bring back dead node
-    ChaosMonkey.start(deadJetty.jetty); // he is not the leader anymore
+    deadJetty.jetty.start(); // he is not the leader anymore
     
     waitTillAllNodesActive();
     
@@ -203,7 +202,7 @@ public class SyncSliceTest extends AbstractFullDistribZkTestBase {
 
     
     // kill the current leader
-    chaosMonkey.killJetty(leaderJetty);
+    leaderJetty.jetty.stop();
     
     waitForNoShardInconsistency();
 

@@ -44,7 +44,7 @@ public class TestExpressionRescorer extends LuceneTestCase {
   public void setUp() throws Exception {
     super.setUp();
     dir = newDirectory();
-    RandomIndexWriter iw = new RandomIndexWriter(random(), dir);
+    RandomIndexWriter iw = new RandomIndexWriter(random(), dir, newIndexWriterConfig().setSimilarity(new ClassicSimilarity()));
     
     Document doc = new Document();
     doc.add(newStringField("id", "1", Field.Store.YES));
@@ -86,7 +86,7 @@ public class TestExpressionRescorer extends LuceneTestCase {
 
     // Just first pass query
     TopDocs hits = searcher.search(query, 10);
-    assertEquals(3, hits.totalHits);
+    assertEquals(3, hits.totalHits.value);
     assertEquals("3", r.document(hits.scoreDocs[0].doc).get("id"));
     assertEquals("1", r.document(hits.scoreDocs[1].doc).get("id"));
     assertEquals("2", r.document(hits.scoreDocs[2].doc).get("id"));
@@ -100,7 +100,7 @@ public class TestExpressionRescorer extends LuceneTestCase {
     Rescorer rescorer = e.getRescorer(bindings);
 
     hits = rescorer.rescore(searcher, hits, 10);
-    assertEquals(3, hits.totalHits);
+    assertEquals(3, hits.totalHits.value);
     assertEquals("2", r.document(hits.scoreDocs[0].doc).get("id"));
     assertEquals("1", r.document(hits.scoreDocs[1].doc).get("id"));
     assertEquals("3", r.document(hits.scoreDocs[2].doc).get("id"));
@@ -111,7 +111,7 @@ public class TestExpressionRescorer extends LuceneTestCase {
 
     // Confirm the explanation breaks out the individual
     // variables:
-    assertTrue(expl.contains("= variable \"popularity\""));
+    assertTrue(expl.contains("= double(popularity)"));
 
     // Confirm the explanation includes first pass details:
     assertTrue(expl.contains("= first pass score"));

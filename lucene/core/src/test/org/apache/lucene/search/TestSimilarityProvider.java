@@ -29,16 +29,14 @@ import org.apache.lucene.index.RandomIndexWriter;
 import org.apache.lucene.index.Term;
 import org.apache.lucene.search.similarities.PerFieldSimilarityWrapper;
 import org.apache.lucene.search.similarities.Similarity;
-import org.apache.lucene.search.similarities.TFIDFSimilarity;
 import org.apache.lucene.store.Directory;
-import org.apache.lucene.util.BytesRef;
 import org.apache.lucene.util.LuceneTestCase;
 
 public class TestSimilarityProvider extends LuceneTestCase {
   private Directory directory;
   private DirectoryReader reader;
   private IndexSearcher searcher;
-  
+
   @Override
   public void setUp() throws Exception {
     super.setUp();
@@ -51,7 +49,7 @@ public class TestSimilarityProvider extends LuceneTestCase {
     doc.add(field);
     Field field2 = newTextField("bar", "", Field.Store.NO);
     doc.add(field2);
-    
+
     field.setStringValue("quick brown fox");
     field2.setStringValue("quick brown fox");
     iw.addDocument(doc);
@@ -63,35 +61,37 @@ public class TestSimilarityProvider extends LuceneTestCase {
     searcher = newSearcher(reader);
     searcher.setSimilarity(sim);
   }
-  
+
   @Override
   public void tearDown() throws Exception {
     reader.close();
     directory.close();
     super.tearDown();
   }
-  
+
   public void testBasics() throws Exception {
     // sanity check of norms writer
     // TODO: generalize
     NumericDocValues fooNorms = MultiDocValues.getNormValues(reader, "foo");
     NumericDocValues barNorms = MultiDocValues.getNormValues(reader, "bar");
     for (int i = 0; i < reader.maxDoc(); i++) {
-      assertFalse(fooNorms.get(i) == barNorms.get(i));
+      assertEquals(i, fooNorms.nextDoc());
+      assertEquals(i, barNorms.nextDoc());
+      assertFalse(fooNorms.longValue() == barNorms.longValue());
     }
-    
+
     // sanity check of searching
     TopDocs foodocs = searcher.search(new TermQuery(new Term("foo", "brown")), 10);
-    assertTrue(foodocs.totalHits > 0);
+    assertTrue(foodocs.totalHits.value > 0);
     TopDocs bardocs = searcher.search(new TermQuery(new Term("bar", "brown")), 10);
-    assertTrue(bardocs.totalHits > 0);
+    assertTrue(bardocs.totalHits.value > 0);
     assertTrue(foodocs.scoreDocs[0].score < bardocs.scoreDocs[0].score);
   }
-  
-  private class ExampleSimilarityProvider extends PerFieldSimilarityWrapper {
+
+  private static class ExampleSimilarityProvider extends PerFieldSimilarityWrapper {
     private Similarity sim1 = new Sim1();
     private Similarity sim2 = new Sim2();
-    
+
     @Override
     public Similarity get(String field) {
       if (field.equals("foo")) {
@@ -101,80 +101,42 @@ public class TestSimilarityProvider extends LuceneTestCase {
       }
     }
   }
-  
-  private class Sim1 extends TFIDFSimilarity {
-    
+
+  private static class Sim1 extends Similarity {
+
     @Override
-    public long encodeNormValue(float f) {
-      return (long) f;
-    }
-    
-    @Override
-    public float decodeNormValue(long norm) {
-      return norm;
+    public long computeNorm(FieldInvertState state) {
+      return 1;
     }
 
     @Override
-    public float lengthNorm(FieldInvertState state) {
-      return 1f;
+    public SimScorer scorer(float boost, CollectionStatistics collectionStats, TermStatistics... termStats) {
+      return new SimScorer() {
+
+        @Override
+        public float score(float freq, long norm) {
+          return 1;
+        }
+      };
     }
 
-    @Override
-    public float sloppyFreq(int distance) {
-      return 1f;
-    }
-
-    @Override
-    public float tf(float freq) {
-      return 1f;
-    }
-
-    @Override
-    public float idf(long docFreq, long docCount) {
-      return 1f;
-    }
-
-    @Override
-    public float scorePayload(int doc, int start, int end, BytesRef payload) {
-      return 1f;
-    }
   }
-  
-  private class Sim2 extends TFIDFSimilarity {
-    
+
+  private static class Sim2 extends Similarity {
+
     @Override
-    public long encodeNormValue(float f) {
-      return (long) f;
-    }
-    
-    @Override
-    public float decodeNormValue(long norm) {
-      return norm;
-    }
-    
-    @Override
-    public float lengthNorm(FieldInvertState state) {
-      return 10f;
+    public long computeNorm(FieldInvertState state) {
+      return 10;
     }
 
     @Override
-    public float sloppyFreq(int distance) {
-      return 10f;
-    }
-
-    @Override
-    public float tf(float freq) {
-      return 10f;
-    }
-
-    @Override
-    public float idf(long docFreq, long docCount) {
-      return 10f;
-    }
-
-    @Override
-    public float scorePayload(int doc, int start, int end, BytesRef payload) {
-      return 1f;
+    public SimScorer scorer(float boost, CollectionStatistics collectionStats, TermStatistics... termStats) {
+      return new SimScorer() {
+        @Override
+        public float score(float freq, long norm) {
+          return 10;
+        }
+      };
     }
   }
 }

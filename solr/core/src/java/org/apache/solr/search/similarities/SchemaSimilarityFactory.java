@@ -16,12 +16,11 @@
  */
 package org.apache.solr.search.similarities;
 
-import org.apache.lucene.search.similarities.ClassicSimilarity;
 import org.apache.lucene.search.similarities.BM25Similarity;
 import org.apache.lucene.search.similarities.PerFieldSimilarityWrapper;
 import org.apache.lucene.search.similarities.Similarity;
+import org.apache.lucene.search.similarity.LegacyBM25Similarity;
 import org.apache.lucene.util.Version;
-
 import org.apache.solr.common.SolrException;
 import org.apache.solr.common.SolrException.ErrorCode;
 import org.apache.solr.common.params.SolrParams;
@@ -33,19 +32,19 @@ import org.apache.solr.util.plugin.SolrCoreAware;
 /**
  * <p>
  * <code>SimilarityFactory</code> that returns a global {@link PerFieldSimilarityWrapper}
- * that delegates to the field type, if it's configured.  For field type's that
+ * that delegates to the field type, if it's configured.  For field types that
  * do not have a <code>Similarity</code> explicitly configured, the global <code>Similarity</code> 
  * will use per fieldtype defaults -- either based on an explicitly configured 
  * <code>defaultSimFromFieldType</code> a sensible default depending on the {@link Version} 
  * matching configured:
  * </p>
  * <ul>
- *  <li><code>luceneMatchVersion &lt; 6.0</code> = {@link ClassicSimilarity}</li>
- *  <li><code>luceneMatchVersion &gt;= 6.0</code> = {@link BM25Similarity}</li>
+ *  <li><code>luceneMatchVersion &lt; 8.0</code> = {@link LegacyBM25Similarity}</li>
+ *  <li><code>luceneMatchVersion &gt;= 8.0</code> = {@link BM25Similarity}</li>
  * </ul>
  * <p>
  * The <code>defaultSimFromFieldType</code> option accepts the name of any fieldtype, and uses 
- * whatever <code>Similarity</code> is explicitly configured for that fieldType as thedefault for 
+ * whatever <code>Similarity</code> is explicitly configured for that fieldType as the default for
  * all other field types.  For example:
  * </p>
  * <pre class="prettyprint">
@@ -86,10 +85,12 @@ public class SchemaSimilarityFactory extends SimilarityFactory implements SolrCo
   
   private volatile SolrCore core; // set by inform(SolrCore)
   private volatile Similarity similarity; // lazy instantiated
+  private Version coreVersion = Version.LATEST;
 
   @Override
   public void inform(SolrCore core) {
     this.core = core;
+    this.coreVersion = this.core.getSolrConfig().luceneMatchVersion;
   }
   
   @Override
@@ -110,9 +111,9 @@ public class SchemaSimilarityFactory extends SimilarityFactory implements SolrCo
       Similarity defaultSim = null;
       if (null == defaultSimFromFieldType) {
         // nothing configured, choose a sensible implicit default...
-        defaultSim = this.core.getSolrConfig().luceneMatchVersion.onOrAfter(Version.LUCENE_6_0_0)
-          ? new BM25Similarity()
-          : new ClassicSimilarity();
+        defaultSim = coreVersion.onOrAfter(Version.LUCENE_8_0_0) ? 
+            new BM25Similarity() :
+            new LegacyBM25Similarity();
       } else {
         FieldType defSimFT = core.getLatestSchema().getFieldTypeByName(defaultSimFromFieldType);
         if (null == defSimFT) {
@@ -129,21 +130,32 @@ public class SchemaSimilarityFactory extends SimilarityFactory implements SolrCo
                                   "' but that <fieldType> does not define a <similarity>");
         }
       }
-      assert null != defaultSim;
-      final Similarity defaultSimilarity = defaultSim;
-      similarity = new PerFieldSimilarityWrapper() {
-        @Override
-        public Similarity get(String name) {
-          FieldType fieldType = core.getLatestSchema().getFieldTypeNoEx(name);
-          if (fieldType == null) {
-            return defaultSimilarity;
-          } else {
-            Similarity similarity = fieldType.getSimilarity();
-            return similarity == null ? defaultSimilarity : similarity;
-          }
-        }
-      };
+      similarity = new SchemaSimilarity(defaultSim);
     }
     return similarity;
+  }
+  
+  private class SchemaSimilarity extends PerFieldSimilarityWrapper {
+    private Similarity defaultSimilarity;
+
+    public SchemaSimilarity(Similarity defaultSimilarity) {
+      this.defaultSimilarity = defaultSimilarity;
+    }
+
+    @Override
+    public Similarity get(String name) {
+      FieldType fieldType = core.getLatestSchema().getFieldTypeNoEx(name);
+      if (fieldType == null) {
+        return defaultSimilarity;
+      } else {
+        Similarity similarity = fieldType.getSimilarity();
+        return similarity == null ? defaultSimilarity : similarity;
+      }
+    }
+
+    @Override
+    public String toString() {
+      return "SchemaSimilarity. Default: " + ((get("") == null) ? "null" : get("").toString());
+    }
   }
 }

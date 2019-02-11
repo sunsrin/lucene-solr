@@ -21,8 +21,9 @@ import java.util.Arrays;
 
 import org.apache.lucene.index.BinaryDocValues;
 import org.apache.lucene.index.SortedSetDocValues;
-import org.apache.lucene.search.Scorer;
+import org.apache.lucene.search.Scorable;
 import org.apache.lucene.util.ArrayUtil;
+import org.apache.lucene.util.BytesRef;
 import org.apache.lucene.util.BytesRefHash;
 
 abstract class TermsWithScoreCollector<DV> extends DocValuesTermsCollector<DV> 
@@ -33,7 +34,7 @@ abstract class TermsWithScoreCollector<DV> extends DocValuesTermsCollector<DV>
   final BytesRefHash collectedTerms = new BytesRefHash();
   final ScoreMode scoreMode;
 
-  Scorer scorer;
+  Scorable scorer;
   float[] scoreSums = new float[INITIAL_ARRAY_SIZE];
 
   TermsWithScoreCollector(Function<DV> docValuesCall, ScoreMode scoreMode) {
@@ -57,7 +58,7 @@ abstract class TermsWithScoreCollector<DV> extends DocValuesTermsCollector<DV>
   }
 
   @Override
-  public void setScorer(Scorer scorer) throws IOException {
+  public void setScorer(Scorable scorer) throws IOException {
     this.scorer = scorer;
   }
 
@@ -95,7 +96,13 @@ abstract class TermsWithScoreCollector<DV> extends DocValuesTermsCollector<DV>
 
     @Override
     public void collect(int doc) throws IOException {
-      int ord = collectedTerms.add(docValues.get(doc));
+      BytesRef value;
+      if (docValues.advanceExact(doc)) {
+        value = docValues.binaryValue();
+      } else {
+        value = new BytesRef(BytesRef.EMPTY_BYTES);
+      }
+      int ord = collectedTerms.add(value);
       if (ord < 0) {
         ord = -ord - 1;
       } else {
@@ -145,7 +152,13 @@ abstract class TermsWithScoreCollector<DV> extends DocValuesTermsCollector<DV>
 
       @Override
       public void collect(int doc) throws IOException {
-        int ord = collectedTerms.add(docValues.get(doc));
+        BytesRef value;
+        if (docValues.advanceExact(doc)) {
+          value = docValues.binaryValue();
+        } else {
+          value = new BytesRef(BytesRef.EMPTY_BYTES);
+        }
+        int ord = collectedTerms.add(value);
         if (ord < 0) {
           ord = -ord - 1;
         } else {
@@ -188,25 +201,25 @@ abstract class TermsWithScoreCollector<DV> extends DocValuesTermsCollector<DV>
 
     @Override
     public void collect(int doc) throws IOException {
-      docValues.setDocument(doc);
-      long ord;
-      while ((ord = docValues.nextOrd()) != SortedSetDocValues.NO_MORE_ORDS) {
-        int termID = collectedTerms.add(docValues.lookupOrd(ord));
-        if (termID < 0) {
-          termID = -termID - 1;
-        } else {
-          if (termID >= scoreSums.length) {
-            int begin = scoreSums.length;
-            scoreSums = ArrayUtil.grow(scoreSums);
-            if (scoreMode == ScoreMode.Min) {
-              Arrays.fill(scoreSums, begin, scoreSums.length, Float.POSITIVE_INFINITY);
-            } else if (scoreMode == ScoreMode.Max) {
-              Arrays.fill(scoreSums, begin, scoreSums.length, Float.NEGATIVE_INFINITY);
+      if (docValues.advanceExact(doc)) {
+        long ord;
+        while ((ord = docValues.nextOrd()) != SortedSetDocValues.NO_MORE_ORDS) {
+          int termID = collectedTerms.add(docValues.lookupOrd(ord));
+          if (termID < 0) {
+            termID = -termID - 1;
+          } else {
+            if (termID >= scoreSums.length) {
+              int begin = scoreSums.length;
+              scoreSums = ArrayUtil.grow(scoreSums);
+              if (scoreMode == ScoreMode.Min) {
+                Arrays.fill(scoreSums, begin, scoreSums.length, Float.POSITIVE_INFINITY);
+              } else if (scoreMode == ScoreMode.Max) {
+                Arrays.fill(scoreSums, begin, scoreSums.length, Float.NEGATIVE_INFINITY);
+              }
             }
           }
-        }
         
-        switch (scoreMode) {
+          switch (scoreMode) {
           case Total:
             scoreSums[termID] += scorer.score();
             break;
@@ -218,6 +231,7 @@ abstract class TermsWithScoreCollector<DV> extends DocValuesTermsCollector<DV>
             break;
           default:
             throw new AssertionError("unexpected: " + scoreMode);
+          }
         }
       }
     }
@@ -232,21 +246,22 @@ abstract class TermsWithScoreCollector<DV> extends DocValuesTermsCollector<DV>
 
       @Override
       public void collect(int doc) throws IOException {
-        docValues.setDocument(doc);
-        long ord;
-        while ((ord = docValues.nextOrd()) != SortedSetDocValues.NO_MORE_ORDS) {
-          int termID = collectedTerms.add(docValues.lookupOrd(ord));
-          if (termID < 0) {
-            termID = -termID - 1;
-          } else {
-            if (termID >= scoreSums.length) {
-              scoreSums = ArrayUtil.grow(scoreSums);
-              scoreCounts = ArrayUtil.grow(scoreCounts);
+        if (docValues.advanceExact(doc)) {
+          long ord;
+          while ((ord = docValues.nextOrd()) != SortedSetDocValues.NO_MORE_ORDS) {
+            int termID = collectedTerms.add(docValues.lookupOrd(ord));
+            if (termID < 0) {
+              termID = -termID - 1;
+            } else {
+              if (termID >= scoreSums.length) {
+                scoreSums = ArrayUtil.grow(scoreSums);
+                scoreCounts = ArrayUtil.grow(scoreCounts);
+              }
             }
-          }
           
-          scoreSums[termID] += scorer.score();
-          scoreCounts[termID]++;
+            scoreSums[termID] += scorer.score();
+            scoreCounts[termID]++;
+          }
         }
       }
 
@@ -264,7 +279,7 @@ abstract class TermsWithScoreCollector<DV> extends DocValuesTermsCollector<DV>
   }
 
   @Override
-  public boolean needsScores() {
-    return true;
+  public org.apache.lucene.search.ScoreMode scoreMode() {
+    return org.apache.lucene.search.ScoreMode.COMPLETE;
   }
 }

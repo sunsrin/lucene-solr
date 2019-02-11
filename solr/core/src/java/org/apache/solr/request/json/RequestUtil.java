@@ -36,6 +36,7 @@ import org.noggit.JSONParser;
 import org.noggit.ObjectBuilder;
 
 import static org.apache.solr.common.params.CommonParams.JSON;
+import static org.apache.solr.common.params.CommonParams.SORT;
 
 public class RequestUtil {
   /**
@@ -147,14 +148,16 @@ public class RequestUtil {
       newMap.putAll( MultiMapSolrParams.asMultiMap(invariants) );
     }
 
-    String[] doMacrosStr = newMap.get("expandMacros");
-    boolean doMacros = true;
-    if (doMacrosStr != null) {
-      doMacros = "true".equals(doMacrosStr[0]);
-    }
+    if (!isShard) { // Don't expand macros in shard requests
+      String[] doMacrosStr = newMap.get("expandMacros");
+      boolean doMacros = true;
+      if (doMacrosStr != null) {
+        doMacros = "true".equals(doMacrosStr[0]);
+      }
 
-    if (doMacros) {
-      newMap = MacroExpander.expand(newMap);
+      if (doMacros) {
+        newMap = MacroExpander.expand(newMap);
+      }
     }
     // Set these params as soon as possible so if there is an error processing later, things like
     // "wt=json" will take effect from the defaults.
@@ -187,16 +190,20 @@ public class RequestUtil {
     }
 
     // implement compat for existing components...
+    JsonQueryConverter jsonQueryConverter = new JsonQueryConverter();
     if (json != null && !isShard) {
       for (Map.Entry<String,Object> entry : json.entrySet()) {
         String key = entry.getKey();
         String out = null;
+        boolean isQuery = false;
         boolean arr = false;
         if ("query".equals(key)) {
           out = "q";
+          isQuery = true;
         } else if ("filter".equals(key)) {
           out = "fq";
           arr = true;
+          isQuery = true;
         } else if ("fields".equals(key)) {
           out = "fl";
           arr = true;
@@ -204,8 +211,8 @@ public class RequestUtil {
           out = "start";
         } else if ("limit".equals(key)) {
           out = "rows";
-        } else if ("sort".equals(key)) {
-          out = "sort";
+        } else if (SORT.equals(key)) {
+          out = SORT;
         } else if ("params".equals(key) || "facet".equals(key) ) {
           // handled elsewhere
           continue;
@@ -227,14 +234,14 @@ public class RequestUtil {
           if (lst != null) {
             for (int i = 0; i < jsonSize; i++) {
               Object v = lst.get(i);
-              newval[existingSize + i] = v.toString();
+              newval[existingSize + i] = isQuery ? jsonQueryConverter.toLocalParams(v, newMap) : v.toString();
             }
           } else {
-            newval[newval.length-1] = val.toString();
+            newval[newval.length-1] = isQuery ? jsonQueryConverter.toLocalParams(val, newMap) : val.toString();
           }
           newMap.put(out, newval);
         } else {
-          newMap.put(out, new String[]{val.toString()});
+          newMap.put(out, new String[]{isQuery ? jsonQueryConverter.toLocalParams(val, newMap) : val.toString()});
         }
 
       }

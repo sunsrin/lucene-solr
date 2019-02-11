@@ -86,13 +86,13 @@ public class DocumentObjectBinder {
         Map<String, Object> mapValue = (Map<String, Object>) field.get(obj);
 
         for (Map.Entry<String, Object> e : mapValue.entrySet()) {
-          doc.setField(e.getKey(), e.getValue(), 1.0f);
+          doc.setField(e.getKey(), e.getValue());
         }
       } else {
         if (field.child != null) {
           addChild(obj, field, doc);
         } else {
-          doc.setField(field.name, field.get(obj), 1.0f);
+          doc.setField(field.name, field.get(obj));
         }
       }
     }
@@ -232,7 +232,8 @@ public class DocumentObjectBinder {
       } else {
         Class[] params = setter.getParameterTypes();
         if (params.length != 1) {
-          throw new BindingException("Invalid setter method. Must have one and only one parameter");
+          throw new BindingException("Invalid setter method (" + setter +
+              "). A setter must have one and only one parameter but we found " + params.length + " parameters.");
         }
         type = params[0];
       }

@@ -18,7 +18,6 @@ package org.apache.lucene.util;
 
 import java.io.IOException;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.List;
 
 import org.apache.lucene.index.PointValues;
@@ -116,7 +115,7 @@ public final class DocIdSetBuilder {
   /** Create a {@link DocIdSetBuilder} instance that is optimized for
    *  accumulating docs that match the given {@link PointValues}. */
   public DocIdSetBuilder(int maxDoc, PointValues values, String field) throws IOException {
-    this(maxDoc, values.getDocCount(field), values.size(field));
+    this(maxDoc, values.getDocCount(), values.size());
   }
 
   DocIdSetBuilder(int maxDoc, int docCount, long valueCount) {
@@ -226,7 +225,7 @@ public final class DocIdSetBuilder {
   }
 
   private void growBuffer(Buffer buffer, int additionalCapacity) {
-    buffer.array = Arrays.copyOf(buffer.array, buffer.array.length + additionalCapacity);
+    buffer.array = ArrayUtil.growExact(buffer.array, buffer.array.length + additionalCapacity);
     totalAllocated += additionalCapacity;
   }
 
@@ -297,7 +296,7 @@ public final class DocIdSetBuilder {
     }
     int[] docs = largestBuffer.array;
     if (docs.length < totalLength + 1) {
-      docs = Arrays.copyOf(docs, totalLength + 1);
+      docs = ArrayUtil.growExact(docs, totalLength + 1);
     }
     totalLength = largestBuffer.length;
     for (Buffer buffer : buffers) {

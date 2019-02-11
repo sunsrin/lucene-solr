@@ -16,6 +16,10 @@
  */
 package org.apache.lucene.spatial3d.geom;
 
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.io.IOException;
+
 /**
  * Bounding box limited on three sides (top lat, left lon, right lon).  The
  * other corner is the south pole.
@@ -44,6 +48,8 @@ class GeoSouthRectangle extends GeoBaseBBox {
   protected final SidedPlane leftPlane;
   /** The right plane */
   protected final SidedPlane rightPlane;
+  /** Backing plane (for narrow angles) */
+  protected final SidedPlane backingPlane;
 
   /** Notable points for the top plane */
   protected final GeoPoint[] topPlanePoints;
@@ -113,12 +119,37 @@ class GeoSouthRectangle extends GeoBaseBBox {
     this.leftPlane = new SidedPlane(centerPoint, cosLeftLon, sinLeftLon);
     this.rightPlane = new SidedPlane(centerPoint, cosRightLon, sinRightLon);
 
+    assert(topPlane.isWithin(centerPoint));
+    assert(leftPlane.isWithin(centerPoint));
+    assert(rightPlane.isWithin(centerPoint));
+
+    // Compute the backing plane
+    // The normal for this plane is a unit vector through the origin that goes through the middle lon.  The plane's D is 0,
+    // because it goes through the origin.
+    this.backingPlane = new SidedPlane(this.centerPoint, cosMiddleLon, sinMiddleLon, 0.0, 0.0);
+
     this.topPlanePoints = new GeoPoint[]{ULHC, URHC};
     this.leftPlanePoints = new GeoPoint[]{ULHC, planetModel.SOUTH_POLE};
     this.rightPlanePoints = new GeoPoint[]{URHC, planetModel.SOUTH_POLE};
     
     this.edgePoints = new GeoPoint[]{planetModel.SOUTH_POLE};
 
+  }
+
+  /**
+   * Constructor for deserialization.
+   * @param planetModel is the planet model.
+   * @param inputStream is the input stream.
+   */
+  public GeoSouthRectangle(final PlanetModel planetModel, final InputStream inputStream) throws IOException {
+    this(planetModel, SerializableObject.readDouble(inputStream), SerializableObject.readDouble(inputStream), SerializableObject.readDouble(inputStream));
+  }
+
+  @Override
+  public void write(final OutputStream outputStream) throws IOException {
+    SerializableObject.writeDouble(outputStream, topLat);
+    SerializableObject.writeDouble(outputStream, leftLon);
+    SerializableObject.writeDouble(outputStream, rightLon);
   }
 
   @Override
@@ -140,7 +171,8 @@ class GeoSouthRectangle extends GeoBaseBBox {
 
   @Override
   public boolean isWithin(final double x, final double y, final double z) {
-    return topPlane.isWithin(x, y, z) &&
+    return backingPlane.isWithin(x, y, z) &&
+        topPlane.isWithin(x, y, z) &&
         leftPlane.isWithin(x, y, z) &&
         rightPlane.isWithin(x, y, z);
   }
@@ -173,50 +205,21 @@ class GeoSouthRectangle extends GeoBaseBBox {
   }
 
   @Override
+  public boolean intersects(final GeoShape geoShape) {
+    return geoShape.intersects(topPlane, topPlanePoints, leftPlane, rightPlane) ||
+        geoShape.intersects(leftPlane, leftPlanePoints, rightPlane, topPlane) ||
+        geoShape.intersects(rightPlane, rightPlanePoints, leftPlane, topPlane);
+  }
+
+  @Override
   public void getBounds(Bounds bounds) {
     super.getBounds(bounds);
     bounds
       .addHorizontalPlane(planetModel, topLat, topPlane, leftPlane, rightPlane)
       .addVerticalPlane(planetModel, leftLon, leftPlane, topPlane, rightPlane)
       .addVerticalPlane(planetModel, rightLon, rightPlane, topPlane, leftPlane)
-      .addIntersection(planetModel, rightPlane, leftPlane, topPlane)
+      //.addIntersection(planetModel, rightPlane, leftPlane, topPlane)
       .addPoint(URHC).addPoint(ULHC).addPoint(planetModel.SOUTH_POLE);
-  }
-
-  @Override
-  public int getRelationship(final GeoShape path) {
-    //System.err.println(this+" getrelationship with "+path);
-    final int insideRectangle = isShapeInsideBBox(path);
-    if (insideRectangle == SOME_INSIDE) {
-      //System.err.println(" some inside");
-      return OVERLAPS;
-    }
-
-    final boolean insideShape = path.isWithin(planetModel.SOUTH_POLE);
-
-    if (insideRectangle == ALL_INSIDE && insideShape) {
-      //System.err.println(" inside of each other");
-      return OVERLAPS;
-    }
-
-    if (path.intersects(topPlane, topPlanePoints, leftPlane, rightPlane) ||
-        path.intersects(leftPlane, leftPlanePoints, topPlane, rightPlane) ||
-        path.intersects(rightPlane, rightPlanePoints, leftPlane, topPlane)) {
-      //System.err.println(" edges intersect");
-      return OVERLAPS;
-    }
-
-    if (insideRectangle == ALL_INSIDE) {
-      //System.err.println(" shape inside rectangle");
-      return WITHIN;
-    }
-
-    if (insideShape) {
-      //System.err.println(" shape contains rectangle");
-      return CONTAINS;
-    }
-    //System.err.println(" disjoint");
-    return DISJOINT;
   }
 
   @Override

@@ -22,20 +22,20 @@ import java.util.Arrays;
 import java.util.Collection;
 import java.util.Iterator;
 import java.util.NoSuchElementException;
+
 import org.apache.lucene.document.IntPoint;
-import org.apache.lucene.index.FieldInfo;
 import org.apache.lucene.index.LeafReader;
 import org.apache.lucene.index.LeafReaderContext;
+import org.apache.lucene.index.PointValues;
 import org.apache.lucene.index.PointValues.IntersectVisitor;
 import org.apache.lucene.index.PointValues.Relation;
-import org.apache.lucene.index.PointValues;
-import org.apache.lucene.index.PrefixCodedTerms.TermIterator;
 import org.apache.lucene.index.PrefixCodedTerms;
+import org.apache.lucene.index.PrefixCodedTerms.TermIterator;
 import org.apache.lucene.util.BytesRef;
 import org.apache.lucene.util.BytesRefBuilder;
 import org.apache.lucene.util.BytesRefIterator;
 import org.apache.lucene.util.DocIdSetBuilder;
-import org.apache.lucene.util.StringHelper;
+import org.apache.lucene.util.FutureArrays;
 
 /**
  * Abstract query class to find all documents whose single or multi-dimensional point values, previously indexed with e.g. {@link IntPoint},
@@ -106,7 +106,7 @@ public abstract class PointInSetQuery extends Query {
   }
 
   @Override
-  public final Weight createWeight(IndexSearcher searcher, boolean needsScores, float boost) throws IOException {
+  public final Weight createWeight(IndexSearcher searcher, ScoreMode scoreMode, float boost) throws IOException {
 
     // We don't use RandomAccessWeight here: it's no good to approximate with "match all docs".
     // This is an inverted structure and should be used in the first pass:
@@ -116,21 +116,18 @@ public abstract class PointInSetQuery extends Query {
       @Override
       public Scorer scorer(LeafReaderContext context) throws IOException {
         LeafReader reader = context.reader();
-        PointValues values = reader.getPointValues();
+
+        PointValues values = reader.getPointValues(field);
         if (values == null) {
-          // No docs in this segment indexed any points
+          // No docs in this segment/field indexed any points
           return null;
         }
-        FieldInfo fieldInfo = reader.getFieldInfos().fieldInfo(field);
-        if (fieldInfo == null) {
-          // No docs in this segment indexed this field at all
-          return null;
+
+        if (values.getNumIndexDimensions() != numDims) {
+          throw new IllegalArgumentException("field=\"" + field + "\" was indexed with numIndexDims=" + values.getNumIndexDimensions() + " but this query has numIndexDims=" + numDims);
         }
-        if (fieldInfo.getPointDimensionCount() != numDims) {
-          throw new IllegalArgumentException("field=\"" + field + "\" was indexed with numDims=" + fieldInfo.getPointDimensionCount() + " but this query has numDims=" + numDims);
-        }
-        if (fieldInfo.getPointNumBytes() != bytesPerDim) {
-          throw new IllegalArgumentException("field=\"" + field + "\" was indexed with bytesPerDim=" + fieldInfo.getPointNumBytes() + " but this query has bytesPerDim=" + bytesPerDim);
+        if (values.getBytesPerDimension() != bytesPerDim) {
+          throw new IllegalArgumentException("field=\"" + field + "\" was indexed with bytesPerDim=" + values.getBytesPerDimension() + " but this query has bytesPerDim=" + bytesPerDim);
         }
 
         DocIdSetBuilder result = new DocIdSetBuilder(reader.maxDoc(), values, field);
@@ -138,7 +135,7 @@ public abstract class PointInSetQuery extends Query {
         if (numDims == 1) {
 
           // We optimize this common case, effectively doing a merge sort of the indexed values vs the queried set:
-          values.intersect(field, new MergePointVisitor(sortedPackedPoints, result));
+          values.intersect(new MergePointVisitor(sortedPackedPoints, result));
 
         } else {
           // NOTE: this is naive implementation, where for each point we re-walk the KD tree to intersect.  We could instead do a similar
@@ -148,12 +145,18 @@ public abstract class PointInSetQuery extends Query {
           TermIterator iterator = sortedPackedPoints.iterator();
           for (BytesRef point = iterator.next(); point != null; point = iterator.next()) {
             visitor.setPoint(point);
-            values.intersect(field, visitor);
+            values.intersect(visitor);
           }
         }
 
-        return new ConstantScoreScorer(this, score(), result.build().iterator());
+        return new ConstantScoreScorer(this, score(), scoreMode, result.build().iterator());
       }
+
+      @Override
+      public boolean isCacheable(LeafReaderContext ctx) {
+        return true;
+      }
+
     };
   }
 
@@ -172,7 +175,7 @@ public abstract class PointInSetQuery extends Query {
       this.result = result;
       this.sortedPackedPoints = sortedPackedPoints;
       scratch.length = bytesPerDim;
-      this.iterator = sortedPackedPoints.iterator();
+      this.iterator = this.sortedPackedPoints.iterator();
       nextQueryPoint = iterator.next();
     }
 
@@ -281,12 +284,12 @@ public abstract class PointInSetQuery extends Query {
       for(int dim=0;dim<numDims;dim++) {
         int offset = dim*bytesPerDim;
 
-        int cmpMin = StringHelper.compare(bytesPerDim, minPackedValue, offset, pointBytes, offset);
+        int cmpMin = FutureArrays.compareUnsigned(minPackedValue, offset, offset + bytesPerDim, pointBytes, offset, offset + bytesPerDim);
         if (cmpMin > 0) {
           return Relation.CELL_OUTSIDE_QUERY;
         }
 
-        int cmpMax = StringHelper.compare(bytesPerDim, maxPackedValue, offset, pointBytes, offset);
+        int cmpMax = FutureArrays.compareUnsigned(maxPackedValue, offset, offset + bytesPerDim, pointBytes, offset, offset + bytesPerDim);
         if (cmpMax < 0) {
           return Relation.CELL_OUTSIDE_QUERY;
         }
@@ -330,7 +333,7 @@ public abstract class PointInSetQuery extends Query {
 
             upto++;
             BytesRef next = iterator.next();
-            return Arrays.copyOfRange(next.bytes, next.offset, next.length);
+            return BytesRef.deepCopyOf(next).bytes;
           }
         };
       }

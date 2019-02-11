@@ -16,29 +16,35 @@
  */
 package org.apache.solr.core;
 import java.io.IOException;
+import java.lang.invoke.MethodHandles;
 
 import org.apache.lucene.store.Directory;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Directory provider for implementations that do not persist over reboots.
  * 
  */
 public abstract class EphemeralDirectoryFactory extends CachingDirectoryFactory {
+  private static final Logger log = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
   
   @Override
   public boolean exists(String path) throws IOException {
     String fullPath = normalize(path);
     synchronized (this) {
-      CacheValue cacheValue = byPathCache.get(fullPath);
-      Directory directory = null;
-      if (cacheValue != null) {
-        directory = cacheValue.directory;
-      }
-      if (directory == null) {
+      final CacheValue cacheValue = byPathCache.get(fullPath);
+      if (null == cacheValue) {
         return false;
-      } else {
-        return true;
       }
+      final Directory directory = cacheValue.directory;
+      if (null == directory) {
+        return false;
+      }
+      if (0 < directory.listAll().length) {
+        return true;
+      } 
+      return false;
     }
   }
   
@@ -60,6 +66,10 @@ public abstract class EphemeralDirectoryFactory extends CachingDirectoryFactory 
   @Override
   public void remove(String path) throws IOException {
     // ram dir does not persist its dir anywhere
+  }
+  
+  public void cleanupOldIndexDirectories(final String dataDirPath, final String currentIndexDirPath, boolean reload) {
+    // currently a no-op
   }
 
 }

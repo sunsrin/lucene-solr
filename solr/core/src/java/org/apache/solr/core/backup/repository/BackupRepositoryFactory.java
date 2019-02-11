@@ -20,6 +20,7 @@ package org.apache.solr.core.backup.repository;
 import java.lang.invoke.MethodHandles;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Objects;
 
 import org.apache.solr.common.SolrException;
 import org.apache.solr.common.SolrException.ErrorCode;
@@ -29,10 +30,8 @@ import org.apache.solr.core.SolrResourceLoader;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import com.google.common.base.Preconditions;
-
 public class BackupRepositoryFactory {
-  private static final Logger LOG = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
+  private static final Logger log = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
 
   private final Map<String,PluginInfo> backupRepoPluginByName = new HashMap<>();
   private PluginInfo defaultBackupRepoPlugin = null;
@@ -53,23 +52,23 @@ public class BackupRepositoryFactory {
           this.defaultBackupRepoPlugin = backupRepoPlugins[i];
         }
         backupRepoPluginByName.put(name, backupRepoPlugins[i]);
-        LOG.info("Added backup repository with configuration params {}", backupRepoPlugins[i]);
+        log.info("Added backup repository with configuration params {}", backupRepoPlugins[i]);
       }
       if (backupRepoPlugins.length == 1) {
         this.defaultBackupRepoPlugin = backupRepoPlugins[0];
       }
 
       if (this.defaultBackupRepoPlugin != null) {
-        LOG.info("Default configuration for backup repository is with configuration params {}",
+        log.info("Default configuration for backup repository is with configuration params {}",
             defaultBackupRepoPlugin);
       }
     }
   }
 
   public BackupRepository newInstance(SolrResourceLoader loader, String name) {
-    Preconditions.checkNotNull(loader);
-    Preconditions.checkNotNull(name);
-    PluginInfo repo = Preconditions.checkNotNull(backupRepoPluginByName.get(name),
+    Objects.requireNonNull(loader);
+    Objects.requireNonNull(name);
+    PluginInfo repo = Objects.requireNonNull(backupRepoPluginByName.get(name),
         "Could not find a backup repository with name " + name);
 
     BackupRepository result = loader.newInstance(repo.className, BackupRepository.class);

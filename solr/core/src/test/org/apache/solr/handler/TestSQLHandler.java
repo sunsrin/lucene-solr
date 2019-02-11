@@ -16,30 +16,41 @@
  */
 package org.apache.solr.handler;
 
+import java.io.BufferedReader;
 import java.io.IOException;
+import java.io.InputStream;
+import java.io.InputStreamReader;
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.List;
+import java.util.Random;
+import java.util.concurrent.TimeUnit;
 
-import com.facebook.presto.sql.parser.SqlParser;
-import com.facebook.presto.sql.tree.Statement;
+import org.apache.lucene.util.LuceneTestCase;
+import org.apache.solr.SolrTestCaseJ4;
+import org.apache.solr.client.solrj.SolrClient;
+import org.apache.solr.client.solrj.SolrRequest;
+import org.apache.solr.client.solrj.SolrServerException;
+import org.apache.solr.client.solrj.impl.InputStreamResponseParser;
 import org.apache.solr.client.solrj.io.Tuple;
 import org.apache.solr.client.solrj.io.stream.ExceptionStream;
 import org.apache.solr.client.solrj.io.stream.SolrStream;
 import org.apache.solr.client.solrj.io.stream.TupleStream;
+import org.apache.solr.client.solrj.request.QueryRequest;
 import org.apache.solr.cloud.AbstractFullDistribZkTestBase;
+import org.apache.solr.cloud.SolrCloudTestCase;
 import org.apache.solr.common.cloud.Replica;
 import org.apache.solr.common.params.CommonParams;
 import org.apache.solr.common.params.ModifiableSolrParams;
 import org.apache.solr.common.params.SolrParams;
-
+import org.apache.solr.common.util.NamedList;
 import org.junit.After;
-import org.junit.AfterClass;
 import org.junit.Before;
 import org.junit.Test;
 
+@LuceneTestCase.Slow
+@SolrTestCaseJ4.SuppressSSL
+@LuceneTestCase.SuppressCodecs({"Lucene3x", "Lucene40","Lucene41","Lucene42","Lucene45"})
 public class TestSQLHandler extends AbstractFullDistribZkTestBase {
-
 
   static {
     schemaString = "schema-sql.xml";
@@ -49,26 +60,20 @@ public class TestSQLHandler extends AbstractFullDistribZkTestBase {
     sliceCount = 2;
   }
 
-  //@BeforeClass
-  //public static void beforeSuperClass() {
-    //AbstractZkTestCase.SOLRHOME = new File(SOLR_HOME());
- // }
-
-  @AfterClass
-  public static void afterSuperClass() {
-
-  }
-
+  @Override
   protected String getCloudSolrConfig() {
     return "solrconfig-sql.xml";
+  }
+
+  @Override
+  protected String getCloudSchemaFile() {
+    return schemaString;
   }
 
   @Before
   @Override
   public void setUp() throws Exception {
     super.setUp();
-    // we expect this time of exception as shards go up and down...
-    //ignoreException(".*");
 
     System.setProperty("numShards", Integer.toString(sliceCount));
   }
@@ -80,17 +85,18 @@ public class TestSQLHandler extends AbstractFullDistribZkTestBase {
     resetExceptionIgnores();
   }
 
-  private void delete() throws Exception {
-    deleteCore();
-  }
-
   @Test
   public void doTest() throws Exception {
-    waitForRecoveriesToFinish(false);
-    testPredicate();
+    cloudClient.waitForState(DEFAULT_COLLECTION, 30, TimeUnit.SECONDS,
+        SolrCloudTestCase.activeClusterShape(sliceCount, 4));
+
     testBasicSelect();
+    testWhere();
     testMixedCaseFields();
     testBasicGrouping();
+    testBasicGroupingTint();
+    testBasicGroupingIntLongPoints();
+    testBasicGroupingFloatDoublePoints();
     testBasicGroupingFacets();
     testSelectDistinct();
     testSelectDistinctFacets();
@@ -101,1742 +107,1990 @@ public class TestSQLHandler extends AbstractFullDistribZkTestBase {
     testParallelBasicGrouping();
     testParallelSelectDistinct();
     testParallelTimeSeriesGrouping();
-    testCatalogStream();
-    testSchemasStream();
-    testTablesStream();
-  }
-
-  private void testPredicate() throws Exception {
-
-    SqlParser parser = new SqlParser();
-    String sql = "select a from b where c = 'd'";
-    Statement statement = parser.createStatement(sql);
-    SQLHandler.SQLVisitor sqlVistor = new SQLHandler.SQLVisitor(new StringBuilder());
-    sqlVistor.process(statement, new Integer(0));
-
-    assert(sqlVistor.query.equals("(c:\"d\")"));
-
-    //Add parens
-    parser = new SqlParser();
-    sql = "select a from b where (c = 'd')";
-    statement = parser.createStatement(sql);
-    sqlVistor = new SQLHandler.SQLVisitor(new StringBuilder());
-    sqlVistor.process(statement, new Integer(0));
-
-    assert(sqlVistor.query.equals("(c:\"d\")"));
-
-
-    //Upper case
-    parser = new SqlParser();
-    sql = "select a from b where ('CcC' = 'D')";
-    statement = parser.createStatement(sql);
-    sqlVistor = new SQLHandler.SQLVisitor(new StringBuilder());
-    sqlVistor.process(statement, new Integer(0));
-    assert(sqlVistor.query.equals("(CcC:\"D\")"));
-
-    //Phrase
-    parser = new SqlParser();
-    sql = "select a from b where (c = 'd d')";
-    statement = parser.createStatement(sql);
-    sqlVistor = new SQLHandler.SQLVisitor(new StringBuilder());
-    sqlVistor.process(statement, new Integer(0));
-
-    assert(sqlVistor.query.equals("(c:\"d d\")"));
-
-    // AND
-    parser = new SqlParser();
-    sql = "select a from b where ((c = 'd') AND (l = 'z'))";
-    statement = parser.createStatement(sql);
-    sqlVistor = new SQLHandler.SQLVisitor(new StringBuilder());
-    sqlVistor.process(statement, new Integer(0));
-
-    assert(sqlVistor.query.equals("((c:\"d\") AND (l:\"z\"))"));
-
-    // OR
-
-    parser = new SqlParser();
-    sql = "select a from b where ((c = 'd') OR (l = 'z'))";
-    statement = parser.createStatement(sql);
-    sqlVistor = new SQLHandler.SQLVisitor(new StringBuilder());
-    sqlVistor.process(statement, new Integer(0));
-
-    assert(sqlVistor.query.equals("((c:\"d\") OR (l:\"z\"))"));
-
-    // AND NOT
-
-    parser = new SqlParser();
-    sql = "select a from b where ((c = 'd') AND NOT (l = 'z'))";
-    statement = parser.createStatement(sql);
-    sqlVistor = new SQLHandler.SQLVisitor(new StringBuilder());
-    sqlVistor.process(statement, new Integer(0));
-
-    assert(sqlVistor.query.equals("((c:\"d\") AND -(l:\"z\"))"));
-
-    // NESTED
-    parser = new SqlParser();
-    sql = "select a from b where ((c = 'd') OR ((l = 'z') AND (m = 'j')))";
-    statement = parser.createStatement(sql);
-    sqlVistor = new SQLHandler.SQLVisitor(new StringBuilder());
-    sqlVistor.process(statement, new Integer(0));
-
-    assert(sqlVistor.query.equals("((c:\"d\") OR ((l:\"z\") AND (m:\"j\")))"));
-
-    // NESTED NOT
-    parser = new SqlParser();
-    sql = "select a from b where ((c = 'd') OR ((l = 'z') AND NOT (m = 'j')))";
-    statement = parser.createStatement(sql);
-    sqlVistor = new SQLHandler.SQLVisitor(new StringBuilder());
-    sqlVistor.process(statement, new Integer(0));
-
-    assert(sqlVistor.query.equals("((c:\"d\") OR ((l:\"z\") AND -(m:\"j\")))"));
-
-    // RANGE - Will have to do until SQL BETWEEN is supported.
-    // NESTED
-    parser = new SqlParser();
-    sql = "select a from b where ((c = '[0 TO 100]') OR ((l = '(z)') AND (m = 'j')))";
-    statement = parser.createStatement(sql);
-    sqlVistor = new SQLHandler.SQLVisitor(new StringBuilder());
-    sqlVistor.process(statement, new Integer(0));
-
-    assert(sqlVistor.query.equals("((c:[0 TO 100]) OR ((l:(z)) AND (m:\"j\")))"));
-
-    // Wildcard
-    parser = new SqlParser();
-    sql = "select a from b where ((c = '[0 TO 100]') OR ((l = '(z*)') AND (m = 'j')))";
-    statement = parser.createStatement(sql);
-    sqlVistor = new SQLHandler.SQLVisitor(new StringBuilder());
-    sqlVistor.process(statement, new Integer(0));
-    assert(sqlVistor.query.equals("((c:[0 TO 100]) OR ((l:(z*)) AND (m:\"j\")))"));
-
-    // Complex Lucene/Solr Query
-    parser = new SqlParser();
-    sql = "select a from b where (('c' = '[0 TO 100]') OR ((l = '(z*)') AND ('M' = '(j OR (k NOT s))')))";
-    statement = parser.createStatement(sql);
-    sqlVistor = new SQLHandler.SQLVisitor(new StringBuilder());
-    sqlVistor.process(statement, new Integer(0));
-    assert(sqlVistor.query.equals("((c:[0 TO 100]) OR ((l:(z*)) AND (M:(j OR (k NOT s)))))"));
   }
 
   private void testBasicSelect() throws Exception {
-    try {
 
-      CloudJettyRunner jetty = this.cloudJettys.get(0);
+    CloudJettyRunner jetty = this.cloudJettys.get(0);
 
-      del("*:*");
+    del("*:*");
 
-      commit();
+    commit();
 
-      indexDoc(sdoc("id", "1", "text", "XXXX XXXX", "str_s", "a", "field_i", "7"));
-      indexDoc(sdoc("id", "2", "text", "XXXX XXXX", "str_s", "b", "field_i", "8"));
-      indexDoc(sdoc("id", "3", "text", "XXXX XXXX", "str_s", "a", "field_i", "20"));
-      indexDoc(sdoc("id", "4", "text", "XXXX XXXX", "str_s", "b", "field_i", "11"));
-      indexDoc(sdoc("id", "5", "text", "XXXX XXXX", "str_s", "c", "field_i", "30"));
-      indexDoc(sdoc("id", "6", "text", "XXXX XXXX", "str_s", "c", "field_i", "40"));
-      indexDoc(sdoc("id", "7", "text", "XXXX XXXX", "str_s", "c", "field_i", "50"));
-      indexDoc(sdoc("id", "8", "text", "XXXX XXXX", "str_s", "c", "field_i", "60"));
-      commit();
-      
-      SolrParams sParams = mapParams(CommonParams.QT, "/sql", 
-          "stmt", "select 'id', field_i, str_s from collection1 where 'text'='XXXX' order by field_i desc");
+    indexDoc(sdoc("id", "1", "text", "XXXX XXXX", "str_s", "a", "field_i", "7", "field_i_p", "7",
+        "field_f_p", "7.5", "field_d_p", "7.5", "field_l_p", "7"));
+    indexDoc(sdoc("id", "2", "text", "XXXX XXXX", "str_s", "b", "field_i", "8", "field_i_p", "8",
+        "field_f_p", "8.5", "field_d_p", "8.5", "field_l_p", "8"));
+    indexDoc(sdoc("id", "3", "text", "XXXX XXXX", "str_s", "a", "field_i", "20", "field_i_p", "20",
+        "field_f_p", "20.5", "field_d_p", "20.5", "field_l_p", "20"));
+    indexDoc(sdoc("id", "4", "text", "XXXX XXXX", "str_s", "b", "field_i", "11", "field_i_p", "11",
+        "field_f_p", "11.5", "field_d_p", "11.5", "field_l_p", "11"));
+    indexDoc(sdoc("id", "5", "text", "XXXX XXXX", "str_s", "c", "field_i", "30", "field_i_p", "30", "" +
+        "field_f_p", "30.5", "field_d_p", "30.5", "field_l_p", "30"));
+    indexDoc(sdoc("id", "6", "text", "XXXX XXXX", "str_s", "c", "field_i", "40", "field_i_p", "40",
+        "field_f_p", "40.5", "field_d_p", "40.5", "field_l_p", "40"));
+    indexDoc(sdoc("id", "7", "text", "XXXX XXXX", "str_s", "c", "field_i", "50", "field_i_p", "50",
+        "field_f_p", "50.5", "field_d_p", "50.5", "field_l_p", "50"));
+    indexDoc(sdoc("id", "8", "text", "XXXX XXXX", "str_s", "c", "field_i", "60", "field_i_p", "60",
+        "field_f_p", "60.5", "field_d_p", "60.5", "field_l_p", "60"));
+    commit();
 
-      SolrStream solrStream = new SolrStream(jetty.url, sParams);
-      List<Tuple> tuples = getTuples(solrStream);
+    System.out.println("############# testBasicSelect() ############");
 
-      assert(tuples.size() == 8);
+    SolrParams sParams = mapParams(CommonParams.QT, "/sql",
+        "stmt",
+        "select id, field_i, str_s, field_i_p, field_f_p, field_d_p, field_l_p from collection1 where (text='(XXXX)' OR text='XXXX') AND text='XXXX' order by field_i desc");
 
-      Tuple tuple = null;
+    SolrStream solrStream = new SolrStream(jetty.url, sParams);
+    List<Tuple> tuples = getTuples(solrStream);
 
-      tuple = tuples.get(0);
-      assert(tuple.getLong("id") == 8);
-      assert(tuple.getLong("field_i") == 60);
-      assert(tuple.get("str_s").equals("c"));
+    assert (tuples.size() == 8);
+    Tuple tuple;
 
-      tuple = tuples.get(1);
-      assert(tuple.getLong("id") == 7);
-      assert(tuple.getLong("field_i") == 50);
-      assert(tuple.get("str_s").equals("c"));
+    tuple = tuples.get(0);
+    assertEquals(tuple.getLong("id").longValue(), 8);
+    assertEquals(tuple.getLong("field_i").longValue(), 60);
+    assert (tuple.get("str_s").equals("c"));
+    assertEquals(tuple.getLong("field_i_p").longValue(), 60L);
+    assertEquals(tuple.getDouble("field_f_p"), 60.5, 0.0);
+    assertEquals(tuple.getDouble("field_d_p"), 60.5, 0.0);
+    assertEquals(tuple.getLong("field_l_p").longValue(), 60);
 
-      tuple = tuples.get(2);
-      assert(tuple.getLong("id") == 6);
-      assert(tuple.getLong("field_i") == 40);
-      assert(tuple.get("str_s").equals("c"));
+    tuple = tuples.get(1);
+    assertEquals(tuple.getLong("id").longValue(), 7);
+    assertEquals(tuple.getLong("field_i").longValue(), 50);
+    assert (tuple.get("str_s").equals("c"));
+    assertEquals(tuple.getLong("field_i_p").longValue(), 50);
+    assertEquals(tuple.getDouble("field_f_p"), 50.5, 0.0);
+    assertEquals(tuple.getDouble("field_d_p"), 50.5, 0.0);
+    assertEquals(tuple.getLong("field_l_p").longValue(), 50);
 
-      tuple = tuples.get(3);
-      assert(tuple.getLong("id") == 5);
-      assert(tuple.getLong("field_i") == 30);
-      assert(tuple.get("str_s").equals("c"));
+    tuple = tuples.get(2);
+    assertEquals(tuple.getLong("id").longValue(), 6);
+    assertEquals(tuple.getLong("field_i").longValue(), 40);
+    assert (tuple.get("str_s").equals("c"));
+    assertEquals(tuple.getLong("field_i_p").longValue(), 40);
+    assertEquals(tuple.getDouble("field_f_p"), 40.5, 0.0);
+    assertEquals(tuple.getDouble("field_d_p"), 40.5, 0.0);
+    assertEquals(tuple.getLong("field_l_p").longValue(), 40);
 
-      tuple = tuples.get(4);
-      assert(tuple.getLong("id") == 3);
-      assert(tuple.getLong("field_i") == 20);
-      assert(tuple.get("str_s").equals("a"));
+    tuple = tuples.get(3);
+    assertEquals(tuple.getLong("id").longValue(), 5);
+    assertEquals(tuple.getLong("field_i").longValue(), 30);
+    assert (tuple.get("str_s").equals("c"));
+    assertEquals(tuple.getLong("field_i_p").longValue(), 30);
+    assertEquals(tuple.getDouble("field_f_p"), 30.5, 0.0);
+    assertEquals(tuple.getDouble("field_d_p"), 30.5, 0.0);
+    assertEquals(tuple.getLong("field_l_p").longValue(), 30);
 
-      tuple = tuples.get(5);
-      assert(tuple.getLong("id") == 4);
-      assert(tuple.getLong("field_i") == 11);
-      assert(tuple.get("str_s").equals("b"));
+    tuple = tuples.get(4);
+    assertEquals(tuple.getLong("id").longValue(), 3);
+    assertEquals(tuple.getLong("field_i").longValue(), 20);
+    assert (tuple.get("str_s").equals("a"));
+    assertEquals(tuple.getLong("field_i_p").longValue(), 20);
+    assertEquals(tuple.getDouble("field_f_p"), 20.5, 0.0);
+    assertEquals(tuple.getDouble("field_d_p"), 20.5, 0.0);
+    assertEquals(tuple.getLong("field_l_p").longValue(), 20);
 
-      tuple = tuples.get(6);
-      assert(tuple.getLong("id") == 2);
-      assert(tuple.getLong("field_i") == 8);
-      assert(tuple.get("str_s").equals("b"));
+    tuple = tuples.get(5);
+    assertEquals(tuple.getLong("id").longValue(), 4);
+    assertEquals(tuple.getLong("field_i").longValue(), 11);
+    assert (tuple.get("str_s").equals("b"));
+    assertEquals(tuple.getLong("field_i_p").longValue(), 11);
+    assertEquals(tuple.getDouble("field_f_p"), 11.5, 0.0);
+    assertEquals(tuple.getDouble("field_d_p"), 11.5, 0.0);
+    assertEquals(tuple.getLong("field_l_p").longValue(), 11);
 
-      tuple = tuples.get(7);
-      assert(tuple.getLong("id") == 1);
-      assert(tuple.getLong("field_i") == 7);
-      assert(tuple.get("str_s").equals("a"));
+    tuple = tuples.get(6);
+    assertEquals(tuple.getLong("id").longValue(), 2);
+    assertEquals(tuple.getLong("field_i").longValue(), 8);
+    assert (tuple.get("str_s").equals("b"));
+    assertEquals(tuple.getLong("field_i_p").longValue(), 8);
+    assertEquals(tuple.getDouble("field_f_p"), 8.5, 0.0);
+    assertEquals(tuple.getDouble("field_d_p"), 8.5, 0.0);
+    assertEquals(tuple.getLong("field_l_p").longValue(), 8);
 
-      //Test unlimited unsorted result. Should sort on _version_ desc
-      sParams = mapParams(CommonParams.QT, "/sql", "stmt", "select 'id', field_i, str_s from collection1 where 'text'='XXXX'");
+    tuple = tuples.get(7);
+    assertEquals(tuple.getLong("id").longValue(), 1);
+    assertEquals(tuple.getLong("field_i").longValue(), 7);
+    assert (tuple.get("str_s").equals("a"));
+    assertEquals(tuple.getLong("field_i_p").longValue(), 7);
+    assertEquals(tuple.getDouble("field_f_p"), 7.5, 0.0);
+    assertEquals(tuple.getDouble("field_d_p"), 7.5, 0.0);
+    assertEquals(tuple.getLong("field_l_p").longValue(), 7);
 
-      solrStream = new SolrStream(jetty.url, sParams);
-      tuples = getTuples(solrStream);
+    // Assert field order
+    assertResponseContains(clients.get(0), sParams,
+        "{\"docs\":[{\"id\":\"8\",\"field_i\":60,\"str_s\":\"c\",\"field_i_p\":60,\"field_f_p\":60.5,\"field_d_p\":60.5,\"field_l_p\":60}");
 
-      assert(tuples.size() == 8);
+    // Test unlimited unsorted result. Should sort on _version_ desc
+    sParams = mapParams(CommonParams.QT, "/sql", "stmt",
+        "select id, field_i, str_s from collection1 where text='XXXX'");
 
-      tuple = tuples.get(0);
-      assert(tuple.getLong("id") == 8);
-      assert(tuple.getLong("field_i") == 60);
-      assert(tuple.get("str_s").equals("c"));
+    solrStream = new SolrStream(jetty.url, sParams);
+    tuples = getTuples(solrStream);
 
-      tuple = tuples.get(1);
-      assert(tuple.getLong("id") == 7);
-      assert(tuple.getLong("field_i") == 50);
-      assert(tuple.get("str_s").equals("c"));
+    assert (tuples.size() == 8);
 
-      tuple = tuples.get(2);
-      assert(tuple.getLong("id") == 6);
-      assert(tuple.getLong("field_i") == 40);
-      assert(tuple.get("str_s").equals("c"));
+    tuple = tuples.get(0);
+    assert (tuple.getLong("id") == 8);
+    assert (tuple.getLong("field_i") == 60);
+    assert (tuple.get("str_s").equals("c"));
 
-      tuple = tuples.get(3);
-      assert(tuple.getLong("id") == 5);
-      assert(tuple.getLong("field_i") == 30);
-      assert(tuple.get("str_s").equals("c"));
+    tuple = tuples.get(1);
+    assert (tuple.getLong("id") == 7);
+    assert (tuple.getLong("field_i") == 50);
+    assert (tuple.get("str_s").equals("c"));
 
-      tuple = tuples.get(4);
-      assert(tuple.getLong("id") == 4);
-      assert(tuple.getLong("field_i") == 11);
-      assert(tuple.get("str_s").equals("b"));
+    tuple = tuples.get(2);
+    assert (tuple.getLong("id") == 6);
+    assert (tuple.getLong("field_i") == 40);
+    assert (tuple.get("str_s").equals("c"));
 
-      tuple = tuples.get(5);
-      assert(tuple.getLong("id") == 3);
-      assert(tuple.getLong("field_i") == 20);
-      assert(tuple.get("str_s").equals("a"));
+    tuple = tuples.get(3);
+    assert (tuple.getLong("id") == 5);
+    assert (tuple.getLong("field_i") == 30);
+    assert (tuple.get("str_s").equals("c"));
 
-      tuple = tuples.get(6);
-      assert(tuple.getLong("id") == 2);
-      assert(tuple.getLong("field_i") == 8);
-      assert(tuple.get("str_s").equals("b"));
+    tuple = tuples.get(4);
+    assert (tuple.getLong("id") == 4);
+    assert (tuple.getLong("field_i") == 11);
+    assert (tuple.get("str_s").equals("b"));
 
-      tuple = tuples.get(7);
-      assert(tuple.getLong("id") == 1);
-      assert(tuple.getLong("field_i") == 7);
-      assert(tuple.get("str_s").equals("a"));
+    tuple = tuples.get(5);
+    assert (tuple.getLong("id") == 3);
+    assert (tuple.getLong("field_i") == 20);
+    assert (tuple.get("str_s").equals("a"));
 
+    tuple = tuples.get(6);
+    assert (tuple.getLong("id") == 2);
+    assert (tuple.getLong("field_i") == 8);
+    assert (tuple.get("str_s").equals("b"));
 
-      sParams = mapParams(CommonParams.QT, "/sql", 
-          "stmt", "select id, field_i, str_s from collection1 where text='XXXX' order by field_i desc limit 1");
+    tuple = tuples.get(7);
+    assert (tuple.getLong("id") == 1);
+    assert (tuple.getLong("field_i") == 7);
+    assert (tuple.get("str_s").equals("a"));
 
-      solrStream = new SolrStream(jetty.url, sParams);
-      tuples = getTuples(solrStream);
+    sParams = mapParams(CommonParams.QT, "/sql",
+        "stmt", "select id, field_i, str_s from collection1 where text='XXXX' order by field_i desc limit 1");
 
-      assert(tuples.size() == 1);
+    solrStream = new SolrStream(jetty.url, sParams);
+    tuples = getTuples(solrStream);
 
-      tuple = tuples.get(0);
-      assert(tuple.getLong("id") == 8);
-      assert(tuple.getLong("field_i") == 60);
-      assert(tuple.get("str_s").equals("c"));
+    assert (tuples.size() == 1);
 
-      sParams = mapParams(CommonParams.QT, "/sql", "stmt", "select id, field_i, str_s from collection1 where text='XXXX' AND id='(1 2 3)' order by field_i desc");
+    tuple = tuples.get(0);
+    assert (tuple.getLong("id") == 8);
+    assert (tuple.getLong("field_i") == 60);
+    assert (tuple.get("str_s").equals("c"));
 
-      solrStream = new SolrStream(jetty.url, sParams);
-      tuples = getTuples(solrStream);
+    sParams = mapParams(CommonParams.QT, "/sql", "stmt",
+        "select id, field_i, str_s from collection1 where text='XXXX' AND id='(1 2 3)' order by field_i desc");
 
-      assert(tuples.size() == 3);
+    solrStream = new SolrStream(jetty.url, sParams);
+    tuples = getTuples(solrStream);
 
-      tuple = tuples.get(0);
-      assert(tuple.getLong("id") == 3);
-      assert(tuple.getLong("field_i") == 20);
-      assert(tuple.get("str_s").equals("a"));
+    assert (tuples.size() == 3);
 
-      tuple = tuples.get(1);
-      assert(tuple.getLong("id") == 2);
-      assert(tuple.getLong("field_i") == 8);
-      assert(tuple.get("str_s").equals("b"));
+    tuple = tuples.get(0);
+    assert (tuple.getLong("id") == 3);
+    assert (tuple.getLong("field_i") == 20);
+    assert (tuple.get("str_s").equals("a"));
 
-      tuple = tuples.get(2);
-      assert(tuple.getLong("id") == 1);
-      assert(tuple.getLong("field_i") == 7);
-      assert(tuple.get("str_s").equals("a"));
+    tuple = tuples.get(1);
+    assert (tuple.getLong("id") == 2);
+    assert (tuple.getLong("field_i") == 8);
+    assert (tuple.get("str_s").equals("b"));
 
-      sParams = mapParams(CommonParams.QT, "/sql", 
-          "stmt", "select id as myId, field_i as myInt, str_s as myString from collection1 where text='XXXX' AND id='(1 2 3)' order by myInt desc");
+    tuple = tuples.get(2);
+    assert (tuple.getLong("id") == 1);
+    assert (tuple.getLong("field_i") == 7);
+    assert (tuple.get("str_s").equals("a"));
 
-      solrStream = new SolrStream(jetty.url, sParams);
-      tuples = getTuples(solrStream);
+    sParams = mapParams(CommonParams.QT, "/sql",
+        "stmt",
+        "select id as myId, field_i as myInt, str_s as myString from collection1 where text='XXXX' AND id='(1 2 3)' order by myInt desc");
 
-      assert(tuples.size() == 3);
+    solrStream = new SolrStream(jetty.url, sParams);
+    tuples = getTuples(solrStream);
 
-      tuple = tuples.get(0);
-      assert(tuple.getLong("myId") == 3);
-      assert(tuple.getLong("myInt") == 20);
-      assert(tuple.get("myString").equals("a"));
+    assert (tuples.size() == 3);
 
-      tuple = tuples.get(1);
-      assert(tuple.getLong("myId") == 2);
-      assert(tuple.getLong("myInt") == 8);
-      assert(tuple.get("myString").equals("b"));
+    tuple = tuples.get(0);
+    assert (tuple.getLong("myId") == 3);
+    assert (tuple.getLong("myInt") == 20);
+    assert (tuple.get("myString").equals("a"));
 
-      tuple = tuples.get(2);
-      assert(tuple.getLong("myId") == 1);
-      assert(tuple.getLong("myInt") == 7);
-      assert(tuple.get("myString").equals("a"));
+    tuple = tuples.get(1);
+    assert (tuple.getLong("myId") == 2);
+    assert (tuple.getLong("myInt") == 8);
+    assert (tuple.get("myString").equals("b"));
 
+    tuple = tuples.get(2);
+    assert (tuple.getLong("myId") == 1);
+    assert (tuple.getLong("myInt") == 7);
+    assert (tuple.get("myString").equals("a"));
 
-      sParams = mapParams(CommonParams.QT, "/sql",
-          "stmt", "select id as myId, field_i as myInt, str_s as myString from collection1 where text='XXXX' AND id='(1 2 3)' order by field_i desc");
+    sParams = mapParams(CommonParams.QT, "/sql",
+        "stmt",
+        "select id as myId, field_i as myInt, str_s as myString from collection1 where text='XXXX' AND id='(1 2 3)' order by field_i desc");
 
-      solrStream = new SolrStream(jetty.url, sParams);
-      tuples = getTuples(solrStream);
+    solrStream = new SolrStream(jetty.url, sParams);
+    tuples = getTuples(solrStream);
 
-      assert(tuples.size() == 3);
+    assert (tuples.size() == 3);
 
-      tuple = tuples.get(0);
-      assert(tuple.getLong("myId") == 3);
-      assert(tuple.getLong("myInt") == 20);
-      assert(tuple.get("myString").equals("a"));
+    tuple = tuples.get(0);
+    assert (tuple.getLong("myId") == 3);
+    assert (tuple.getLong("myInt") == 20);
+    assert (tuple.get("myString").equals("a"));
 
-      tuple = tuples.get(1);
-      assert(tuple.getLong("myId") == 2);
-      assert(tuple.getLong("myInt") == 8);
-      assert(tuple.get("myString").equals("b"));
+    tuple = tuples.get(1);
+    assert (tuple.getLong("myId") == 2);
+    assert (tuple.getLong("myInt") == 8);
+    assert (tuple.get("myString").equals("b"));
 
-      tuple = tuples.get(2);
-      assert(tuple.getLong("myId") == 1);
-      assert(tuple.getLong("myInt") == 7);
-      assert(tuple.get("myString").equals("a"));
+    tuple = tuples.get(2);
+    assert (tuple.getLong("myId") == 1);
+    assert (tuple.getLong("myInt") == 7);
+    assert (tuple.get("myString").equals("a"));
 
-      //Test after reload SOLR-9059//
-      Replica leader = getShardLeader("collection1", "shard1", 30 /* timeout secs */);
+    // Test after reload SOLR-9059//
+    Replica leader = getShardLeader("collection1", "shard1", 30 /* timeout secs */);
 
-      // reload collection and wait to see the core report it has been reloaded
-      boolean wasReloaded = reloadCollection(leader, "collection1");
-      assertTrue(wasReloaded);
+    // reload collection and wait to see the core report it has been reloaded
+    boolean wasReloaded = reloadCollection(leader, "collection1");
+    assertTrue(wasReloaded);
 
-      sParams = mapParams(CommonParams.QT, "/sql",
-          "stmt", "select id as myId, field_i as myInt, str_s as myString from collection1 where text='XXXX' AND id='(1 2 3)' order by field_i desc");
+    sParams = mapParams(CommonParams.QT, "/sql",
+        "stmt",
+        "select id as myId, field_i as myInt, str_s as myString from collection1 where text='XXXX' AND id='(1 2 3)' order by field_i desc");
 
-      solrStream = new SolrStream(jetty.url, sParams);
-      tuples = getTuples(solrStream);
+    solrStream = new SolrStream(jetty.url, sParams);
+    tuples = getTuples(solrStream);
 
-      assert(tuples.size() == 3);
+    assert (tuples.size() == 3);
 
-      tuple = tuples.get(0);
-      assert(tuple.getLong("myId") == 3);
-      assert(tuple.getLong("myInt") == 20);
-      assert(tuple.get("myString").equals("a"));
+    tuple = tuples.get(0);
+    assert (tuple.getLong("myId") == 3);
+    assert (tuple.getLong("myInt") == 20);
+    assert (tuple.get("myString").equals("a"));
 
-      tuple = tuples.get(1);
-      assert(tuple.getLong("myId") == 2);
-      assert(tuple.getLong("myInt") == 8);
-      assert(tuple.get("myString").equals("b"));
+    tuple = tuples.get(1);
+    assert (tuple.getLong("myId") == 2);
+    assert (tuple.getLong("myInt") == 8);
+    assert (tuple.get("myString").equals("b"));
 
-      tuple = tuples.get(2);
-      assert(tuple.getLong("myId") == 1);
-      assert(tuple.getLong("myInt") == 7);
-      assert(tuple.get("myString").equals("a"));
+    tuple = tuples.get(2);
+    assert (tuple.getLong("myId") == 1);
+    assert (tuple.getLong("myInt") == 7);
+    assert (tuple.get("myString").equals("a"));
 
-    } finally {
-      delete();
-    }
+    // SOLR-8845 - Test to make sure that 1 = 0 works for things like Spark SQL
+    sParams = mapParams(CommonParams.QT, "/sql",
+        "stmt", "select id, field_i, str_s from collection1 where 1 = 0");
+
+    solrStream = new SolrStream(jetty.url, sParams);
+    tuples = getTuples(solrStream);
+
+    assertEquals(0, tuples.size());
+
   }
 
+  private void testWhere() throws Exception {
+
+    CloudJettyRunner jetty = this.cloudJettys.get(0);
+
+    del("*:*");
+
+    commit();
+
+    indexDoc(sdoc("id", "1", "text", "XXXX XXXX", "str_s", "a", "field_i", "7"));
+    indexDoc(sdoc("id", "2", "text", "XXXX XXXX", "str_s", "b", "field_i", "8"));
+    indexDoc(sdoc("id", "3", "text", "XXXX XXXX", "str_s", "a", "field_i", "20"));
+    indexDoc(sdoc("id", "4", "text", "XXXX XXXX", "str_s", "b", "field_i", "11"));
+    indexDoc(sdoc("id", "5", "text", "XXXX XXXX", "str_s", "c", "field_i", "30"));
+    indexDoc(sdoc("id", "6", "text", "XXXX XXXX", "str_s", "c", "field_i", "40"));
+    indexDoc(sdoc("id", "7", "text", "XXXX XXXX", "str_s", "c", "field_i", "50"));
+    indexDoc(sdoc("id", "8", "text", "XXXX XXXX", "str_s", "c", "field_i", "60"));
+    commit();
+
+    // Equals
+    SolrParams sParams = mapParams(CommonParams.QT, "/sql",
+        "stmt", "select id from collection1 where id = 1 order by id asc");
+
+    SolrStream solrStream = new SolrStream(jetty.url, sParams);
+    List<Tuple> tuples = getTuples(solrStream);
+
+    assertEquals(1, tuples.size());
+
+    Tuple tuple = tuples.get(0);
+    assertEquals("1", tuple.get("id"));
+
+    // Not Equals <>
+    sParams = mapParams(CommonParams.QT, "/sql",
+        "stmt", "select id from collection1 where id <> 1 order by id asc limit 10");
+
+    solrStream = new SolrStream(jetty.url, sParams);
+    tuples = getTuples(solrStream);
+
+    assertEquals(7, tuples.size());
+
+    tuple = tuples.get(0);
+    assertEquals("2", tuple.get("id"));
+    tuple = tuples.get(1);
+    assertEquals("3", tuple.get("id"));
+    tuple = tuples.get(2);
+    assertEquals("4", tuple.get("id"));
+    tuple = tuples.get(3);
+    assertEquals("5", tuple.get("id"));
+    tuple = tuples.get(4);
+    assertEquals("6", tuple.get("id"));
+    tuple = tuples.get(5);
+    assertEquals("7", tuple.get("id"));
+    tuple = tuples.get(6);
+    assertEquals("8", tuple.get("id"));
+
+    // TODO requires different Calcite SQL conformance level
+    // Not Equals !=
+    // sParams = mapParams(CommonParams.QT, "/sql",
+    // "stmt", "select id from collection1 where id != 1 order by id asc limit 10");
+    //
+    // solrStream = new SolrStream(jetty.url, sParams);
+    // tuples = getTuples(solrStream);
+    //
+    // assertEquals(7, tuples.size());
+    //
+    // tuple = tuples.get(0);
+    // assertEquals(2L, tuple.get("id"));
+    // tuple = tuples.get(1);
+    // assertEquals(3L, tuple.get("id"));
+    // tuple = tuples.get(2);
+    // assertEquals(4L, tuple.get("id"));
+    // tuple = tuples.get(3);
+    // assertEquals(5L, tuple.get("id"));
+    // tuple = tuples.get(4);
+    // assertEquals(6L, tuple.get("id"));
+    // tuple = tuples.get(5);
+    // assertEquals(7L, tuple.get("id"));
+    // tuple = tuples.get(6);
+    // assertEquals(8L, tuple.get("id"));
+
+    // Less than
+    sParams = mapParams(CommonParams.QT, "/sql",
+        "stmt", "select id from collection1 where id < 2 order by id asc");
+
+    solrStream = new SolrStream(jetty.url, sParams);
+    tuples = getTuples(solrStream);
+
+    assertEquals(1, tuples.size());
+
+    tuple = tuples.get(0);
+    assertEquals("1", tuple.get("id"));
+
+    // Less than equal
+    sParams = mapParams(CommonParams.QT, "/sql",
+        "stmt", "select id from collection1 where id <= 2 order by id asc");
+
+    solrStream = new SolrStream(jetty.url, sParams);
+    tuples = getTuples(solrStream);
+
+    assertEquals(2, tuples.size());
+
+    tuple = tuples.get(0);
+    assertEquals("1", tuple.get("id"));
+    tuple = tuples.get(1);
+    assertEquals("2", tuple.get("id"));
+
+    // Greater than
+    sParams = mapParams(CommonParams.QT, "/sql",
+        "stmt", "select id from collection1 where id > 7 order by id asc");
+
+    solrStream = new SolrStream(jetty.url, sParams);
+    tuples = getTuples(solrStream);
+
+    assertEquals(1, tuples.size());
+
+    tuple = tuples.get(0);
+    assertEquals("8", tuple.get("id"));
+
+    // Greater than equal
+    sParams = mapParams(CommonParams.QT, "/sql",
+        "stmt", "select id from collection1 where id >= 7 order by id asc");
+
+    solrStream = new SolrStream(jetty.url, sParams);
+    tuples = getTuples(solrStream);
+
+    assertEquals(2, tuples.size());
+
+    tuple = tuples.get(0);
+    assertEquals("7", tuple.get("id"));
+    tuple = tuples.get(1);
+    assertEquals("8", tuple.get("id"));
+
+  }
 
   private void testMixedCaseFields() throws Exception {
-    try {
 
-      CloudJettyRunner jetty = this.cloudJettys.get(0);
+    CloudJettyRunner jetty = this.cloudJettys.get(0);
 
-      del("*:*");
+    del("*:*");
 
-      commit();
+    commit();
 
-      indexDoc(sdoc("id", "1", "Text_t", "XXXX XXXX", "Str_s", "a", "Field_i", "7"));
-      indexDoc(sdoc("id", "2", "Text_t", "XXXX XXXX", "Str_s", "b", "Field_i", "8"));
-      indexDoc(sdoc("id", "3", "Text_t", "XXXX XXXX", "Str_s", "a", "Field_i", "20"));
-      indexDoc(sdoc("id", "4", "Text_t", "XXXX XXXX", "Str_s", "b", "Field_i", "11"));
-      indexDoc(sdoc("id", "5", "Text_t", "XXXX XXXX", "Str_s", "c", "Field_i", "30"));
-      indexDoc(sdoc("id", "6", "Text_t", "XXXX XXXX", "Str_s", "c", "Field_i", "40"));
-      indexDoc(sdoc("id", "7", "Text_t", "XXXX XXXX", "Str_s", "c", "Field_i", "50"));
-      indexDoc(sdoc("id", "8", "Text_t", "XXXX XXXX", "Str_s", "c", "Field_i", "60"));
-      commit();
-      SolrParams sParams = mapParams(CommonParams.QT, "/sql",
-          "stmt", "select id, Field_i, Str_s from Collection1 where Text_t='XXXX' order by Field_i desc");
+    indexDoc(sdoc("id", "1", "Text_t", "XXXX XXXX", "Str_s", "a", "Field_i", "7"));
+    indexDoc(sdoc("id", "2", "Text_t", "XXXX XXXX", "Str_s", "b", "Field_i", "8"));
+    indexDoc(sdoc("id", "3", "Text_t", "XXXX XXXX", "Str_s", "a", "Field_i", "20"));
+    indexDoc(sdoc("id", "4", "Text_t", "XXXX XXXX", "Str_s", "b", "Field_i", "11"));
+    indexDoc(sdoc("id", "5", "Text_t", "XXXX XXXX", "Str_s", "c", "Field_i", "30"));
+    indexDoc(sdoc("id", "6", "Text_t", "XXXX XXXX", "Str_s", "c", "Field_i", "40"));
+    indexDoc(sdoc("id", "7", "Text_t", "XXXX XXXX", "Str_s", "c", "Field_i", "50"));
+    indexDoc(sdoc("id", "8", "Text_t", "XXXX XXXX", "Str_s", "c", "Field_i", "60"));
+    commit();
 
-      SolrStream solrStream = new SolrStream(jetty.url, sParams);
-      List<Tuple> tuples = getTuples(solrStream);
+    SolrParams sParams = mapParams(CommonParams.QT, "/sql", "aggregationMode", "map_reduce",
+        "stmt", "select id, Field_i, Str_s from collection1 where Text_t='XXXX' order by Field_i desc");
 
-      assert(tuples.size() == 8);
+    SolrStream solrStream = new SolrStream(jetty.url, sParams);
+    List<Tuple> tuples = getTuples(solrStream);
 
-      Tuple tuple = null;
+    assert (tuples.size() == 8);
 
-      tuple = tuples.get(0);
-      assert(tuple.getLong("id") == 8);
-      assert(tuple.getLong("Field_i") == 60);
-      assert(tuple.get("Str_s").equals("c"));
+    Tuple tuple;
 
-      tuple = tuples.get(1);
-      assert(tuple.getLong("id") == 7);
-      assert(tuple.getLong("Field_i") == 50);
-      assert(tuple.get("Str_s").equals("c"));
+    tuple = tuples.get(0);
+    assert (tuple.getLong("id") == 8);
+    assert (tuple.getLong("Field_i") == 60);
+    assert (tuple.get("Str_s").equals("c"));
 
-      tuple = tuples.get(2);
-      assert(tuple.getLong("id") == 6);
-      assert(tuple.getLong("Field_i") == 40);
-      assert(tuple.get("Str_s").equals("c"));
+    tuple = tuples.get(1);
+    assert (tuple.getLong("id") == 7);
+    assert (tuple.getLong("Field_i") == 50);
+    assert (tuple.get("Str_s").equals("c"));
 
-      tuple = tuples.get(3);
-      assert(tuple.getLong("id") == 5);
-      assert(tuple.getLong("Field_i") == 30);
-      assert(tuple.get("Str_s").equals("c"));
+    tuple = tuples.get(2);
+    assert (tuple.getLong("id") == 6);
+    assert (tuple.getLong("Field_i") == 40);
+    assert (tuple.get("Str_s").equals("c"));
 
-      tuple = tuples.get(4);
-      assert(tuple.getLong("id") == 3);
-      assert(tuple.getLong("Field_i") == 20);
-      assert(tuple.get("Str_s").equals("a"));
+    tuple = tuples.get(3);
+    assert (tuple.getLong("id") == 5);
+    assert (tuple.getLong("Field_i") == 30);
+    assert (tuple.get("Str_s").equals("c"));
 
-      tuple = tuples.get(5);
-      assert(tuple.getLong("id") == 4);
-      assert(tuple.getLong("Field_i") == 11);
-      assert(tuple.get("Str_s").equals("b"));
+    tuple = tuples.get(4);
+    assert (tuple.getLong("id") == 3);
+    assert (tuple.getLong("Field_i") == 20);
+    assert (tuple.get("Str_s").equals("a"));
 
-      tuple = tuples.get(6);
-      assert(tuple.getLong("id") == 2);
-      assert(tuple.getLong("Field_i") == 8);
-      assert(tuple.get("Str_s").equals("b"));
+    tuple = tuples.get(5);
+    assert (tuple.getLong("id") == 4);
+    assert (tuple.getLong("Field_i") == 11);
+    assert (tuple.get("Str_s").equals("b"));
 
-      tuple = tuples.get(7);
-      assert(tuple.getLong("id") == 1);
-      assert(tuple.getLong("Field_i") == 7);
-      assert(tuple.get("Str_s").equals("a"));
+    tuple = tuples.get(6);
+    assert (tuple.getLong("id") == 2);
+    assert (tuple.getLong("Field_i") == 8);
+    assert (tuple.get("Str_s").equals("b"));
 
-      sParams = mapParams(CommonParams.QT, "/sql", 
-          "stmt", "select Str_s, sum(Field_i) from Collection1 where 'id'='(1 8)' group by Str_s having (sum(Field_i) = 7 OR 'sum(Field_i)' = 60) order by 'sum(Field_i)' desc");
+    tuple = tuples.get(7);
+    assert (tuple.getLong("id") == 1);
+    assert (tuple.getLong("Field_i") == 7);
+    assert (tuple.get("Str_s").equals("a"));
 
-      solrStream = new SolrStream(jetty.url, sParams);
-      tuples = getTuples(solrStream);
+    // TODO get sum(Field_i) as named one
+    sParams = mapParams(CommonParams.QT, "/sql",
+        "stmt",
+        "select Str_s, sum(Field_i) from collection1 where id='(1 8)' group by Str_s having (sum(Field_i) = 7 OR sum(Field_i) = 60) order by sum(Field_i) desc");
 
-      assert(tuples.size() == 2);
+    solrStream = new SolrStream(jetty.url, sParams);
+    tuples = getTuples(solrStream);
 
-      tuple = tuples.get(0);
-      assert(tuple.get("Str_s").equals("c"));
-      assert(tuple.getDouble("sum(Field_i)") == 60);
+    assert (tuples.size() == 2);
 
-      tuple = tuples.get(1);
-      assert(tuple.get("Str_s").equals("a"));
-      assert(tuple.getDouble("sum(Field_i)") == 7);
+    tuple = tuples.get(0);
+    assert (tuple.get("Str_s").equals("c"));
+    assert (tuple.getDouble("EXPR$1") == 60);
 
-      sParams = mapParams(CommonParams.QT, "/sql",
-        "stmt", "select Str_s, sum(Field_i) from Collection1 where 'id'='(1 8)' group by 'Str_s' having (sum(Field_i) = 7 OR 'sum(Field_i)' = 60) order by 'sum(Field_i)' desc");
+    tuple = tuples.get(1);
+    assert (tuple.get("Str_s").equals("a"));
+    assert (tuple.getDouble("EXPR$1") == 7);
 
-      solrStream = new SolrStream(jetty.url, sParams);
-      tuples = getTuples(solrStream);
+    sParams = mapParams(CommonParams.QT, "/sql", "aggregationMode", "map_reduce",
+        "stmt",
+        "select Str_s, sum(Field_i) from collection1 where id='(1 8)' group by Str_s having (sum(Field_i) = 7 OR sum(Field_i) = 60) order by sum(Field_i) desc");
 
-      assert(tuples.size() == 2);
+    solrStream = new SolrStream(jetty.url, sParams);
+    tuples = getTuples(solrStream);
 
-      tuple = tuples.get(0);
-      assert(tuple.get("Str_s").equals("c"));
-      assert(tuple.getDouble("sum(Field_i)") == 60);
+    assert (tuples.size() == 2);
 
-      tuple = tuples.get(1);
-      assert(tuple.get("Str_s").equals("a"));
-      assert(tuple.getDouble("sum(Field_i)") == 7);
+    tuple = tuples.get(0);
+    assert (tuple.get("Str_s").equals("c"));
+    assert (tuple.getDouble("EXPR$1") == 60);
 
+    tuple = tuples.get(1);
+    assert (tuple.get("Str_s").equals("a"));
+    assert (tuple.getDouble("EXPR$1") == 7);
 
-    } finally {
-      delete();
-    }
   }
 
   private void testSQLException() throws Exception {
-    try {
 
-      CloudJettyRunner jetty = this.cloudJettys.get(0);
+    CloudJettyRunner jetty = this.cloudJettys.get(0);
 
-      del("*:*");
+    del("*:*");
 
-      commit();
+    commit();
 
-      indexDoc(sdoc("id", "1", "text", "XXXX XXXX", "str_s", "a", "field_i", "7"));
-      indexDoc(sdoc("id", "2", "text", "XXXX XXXX", "str_s", "b", "field_i", "8"));
-      indexDoc(sdoc("id", "3", "text", "XXXX XXXX", "str_s", "a", "field_i", "20"));
-      indexDoc(sdoc("id", "4", "text", "XXXX XXXX", "str_s", "b", "field_i", "11"));
-      indexDoc(sdoc("id", "5", "text", "XXXX XXXX", "str_s", "c", "field_i", "30"));
-      indexDoc(sdoc("id", "6", "text", "XXXX XXXX", "str_s", "c", "field_i", "40"));
-      indexDoc(sdoc("id", "7", "text", "XXXX XXXX", "str_s", "c", "field_i", "50"));
-      indexDoc(sdoc("id", "8", "text", "XXXX XXXX", "str_s", "c", "field_i", "60"));
-      commit();
+    indexDoc(sdoc("id", "1", "text", "XXXX XXXX", "str_s", "a", "field_i", "7"));
+    indexDoc(sdoc("id", "2", "text", "XXXX XXXX", "str_s", "b", "field_i", "8"));
+    indexDoc(sdoc("id", "3", "text", "XXXX XXXX", "str_s", "a", "field_i", "20"));
+    indexDoc(sdoc("id", "4", "text", "XXXX XXXX", "str_s", "b", "field_i", "11"));
+    indexDoc(sdoc("id", "5", "text", "XXXX XXXX", "str_s", "c", "field_i", "30"));
+    indexDoc(sdoc("id", "6", "text", "XXXX XXXX", "str_s", "c", "field_i", "40"));
+    indexDoc(sdoc("id", "7", "text", "XXXX XXXX", "str_s", "c", "field_i", "50"));
+    indexDoc(sdoc("id", "8", "text", "XXXX XXXX", "str_s", "c", "field_i", "60"));
+    commit();
 
-      SolrParams sParams = mapParams(CommonParams.QT, "/sql",
-          "stmt", "select id, field_i, str_s from collection1 where text='XXXX' order by field_iff desc");
+    SolrParams sParams = mapParams(CommonParams.QT, "/sql", "aggregationMode", "map_reduce",
+        "stmt", "select id, str_s from collection1 where text='XXXX' order by field_iff desc");
 
-      SolrStream solrStream = new SolrStream(jetty.url, sParams);
-      Tuple tuple = getTuple(new ExceptionStream(solrStream));
-      assert(tuple.EOF);
-      assert(tuple.EXCEPTION);
-      //A parse exception detected before being sent to the search engine
-      assert(tuple.getException().contains("Fields in the sort spec must be included in the field list"));
+    SolrStream solrStream = new SolrStream(jetty.url, sParams);
+    Tuple tuple = getTuple(new ExceptionStream(solrStream));
+    assert (tuple.EOF);
+    assert (tuple.EXCEPTION);
+    assert (tuple.getException().contains("Column 'field_iff' not found in any table"));
 
-      sParams = mapParams(CommonParams.QT, "/sql",
+    sParams = mapParams(CommonParams.QT, "/sql",
         "stmt", "select id, field_iff, str_s from collection1 where text='XXXX' order by field_iff desc");
 
-      solrStream = new SolrStream(jetty.url, sParams);
-      tuple = getTuple(new ExceptionStream(solrStream));
-      assert(tuple.EOF);
-      assert(tuple.EXCEPTION);
-      //An exception not detected by the parser thrown from the /select handler
-      assert(tuple.getException().contains("sort param field can't be found:"));
+    solrStream = new SolrStream(jetty.url, sParams);
+    tuple = getTuple(new ExceptionStream(solrStream));
+    assert (tuple.EOF);
+    assert (tuple.EXCEPTION);
 
-      sParams = mapParams(CommonParams.QT, "/sql",
-          "stmt", "select str_s, count(*), sum(field_iff), min(field_i), max(field_i), avg(field_i) from collection1 where text='XXXX' group by str_s having ((sum(field_iff) = 19) AND (min(field_i) = 8))");
+    assert (tuple.getException().contains("Column 'field_iff' not found in any table"));
 
-      solrStream = new SolrStream(jetty.url, sParams);
-      tuple = getTuple(new ExceptionStream(solrStream));
-      assert(tuple.EOF);
-      assert(tuple.EXCEPTION);
-      //An exception not detected by the parser thrown from the /export handler
-      assert(tuple.getException().contains("undefined field:"));
+    sParams = mapParams(CommonParams.QT, "/sql", "aggregationMode", "map_reduce",
+        "stmt",
+        "select str_s, count(*), sum(field_iff), min(field_i), max(field_i), cast(avg(1.0 * field_i) as float) from collection1 where text='XXXX' group by str_s having ((sum(field_iff) = 19) AND (min(field_i) = 8))");
 
-      sParams = mapParams(CommonParams.QT, "/sql",
-          "stmt", "select str_s, count(*), blah(field_iff), min(field_i), max(field_i), avg(field_i) from collection1 where text='XXXX' group by str_s having ((sum(field_iff) = 19) AND (min(field_i) = 8))");
+    solrStream = new SolrStream(jetty.url, sParams);
+    tuple = getTuple(new ExceptionStream(solrStream));
+    assert (tuple.EOF);
+    assert (tuple.EXCEPTION);
+    assert (tuple.getException().contains("Column 'field_iff' not found in any table"));
 
-      solrStream = new SolrStream(jetty.url, sParams);
-      tuple = getTuple(new ExceptionStream(solrStream));
-      assert(tuple.EOF);
-      assert(tuple.EXCEPTION);
-      //An exception not detected by the parser thrown from the /export handler
-      assert(tuple.getException().contains("Invalid function: blah"));
+    sParams = mapParams(CommonParams.QT, "/sql", "aggregationMode", "map_reduce",
+        "stmt",
+        "select str_s, count(*), blah(field_i), min(field_i), max(field_i), cast(avg(1.0 * field_i) as float) from collection1 where text='XXXX' group by str_s having ((sum(field_i) = 19) AND (min(field_i) = 8))");
 
-      sParams = mapParams(CommonParams.QT, "/sql",
-          "stmt", "select str_s from collection1 where text='XXXX' group by str_s");
+    solrStream = new SolrStream(jetty.url, sParams);
+    tuple = getTuple(new ExceptionStream(solrStream));
+    assert (tuple.EOF);
+    assert (tuple.EXCEPTION);
+    assert (tuple.getException().contains("No match found for function signature blah"));
 
-      solrStream = new SolrStream(jetty.url, sParams);
-      tuple = getTuple(new ExceptionStream(solrStream));
-      assert(tuple.EOF);
-      assert(tuple.EXCEPTION);
-      assert(tuple.getException().contains("Group by queries must include atleast one aggregate function."));
-
-    } finally {
-      delete();
-    }
   }
 
   private void testBasicGrouping() throws Exception {
-    try {
 
-      CloudJettyRunner jetty = this.cloudJettys.get(0);
+    CloudJettyRunner jetty = this.cloudJettys.get(0);
 
-      del("*:*");
+    del("*:*");
 
-      commit();
+    commit();
 
-      indexr("id", "1", "text", "XXXX XXXX", "str_s", "a", "field_i", "7");
-      indexr("id", "2", "text", "XXXX XXXX", "str_s", "b", "field_i", "8");
-      indexr("id", "3", "text", "XXXX XXXX", "str_s", "a", "field_i", "20");
-      indexr("id", "4", "text", "XXXX XXXX", "str_s", "b", "field_i", "11");
-      indexr("id", "5", "text", "XXXX XXXX", "str_s", "c", "field_i", "30");
-      indexr("id", "6", "text", "XXXX XXXX", "str_s", "c", "field_i", "40");
-      indexr("id", "7", "text", "XXXX XXXX", "str_s", "c", "field_i", "50");
-      indexr("id", "8", "text", "XXXX XXXX", "str_s", "c", "field_i", "60");
-      commit();
-      
-      SolrParams sParams = mapParams(CommonParams.QT, "/sql",
-        "stmt", "select str_s, 'count(*)', sum('field_i'), min(field_i), max(field_i), avg(field_i) from collection1 where text='XXXX' group by 'str_s' order by 'sum(field_i)' asc limit 2");
+    indexr("id", "1", "text", "XXXX XXXX", "str_s", "a", "field_i", "7");
+    indexr("id", "2", "text", "XXXX XXXX", "str_s", "b", "field_i", "8");
+    indexr("id", "3", "text", "XXXX XXXX", "str_s", "a", "field_i", "20");
+    indexr("id", "4", "text", "XXXX XXXX", "str_s", "b", "field_i", "11");
+    indexr("id", "5", "text", "XXXX XXXX", "str_s", "c", "field_i", "30");
+    indexr("id", "6", "text", "XXXX XXXX", "str_s", "c", "field_i", "40");
+    indexr("id", "7", "text", "XXXX XXXX", "str_s", "c", "field_i", "50");
+    indexr("id", "8", "text", "XXXX XXXX", "str_s", "c", "field_i", "60");
+    indexr("id", "9", "text", "XXXX XXXY", "str_s", "d", "field_i", "70");
+    commit();
 
-      SolrStream solrStream = new SolrStream(jetty.url, sParams);
-      List<Tuple> tuples = getTuples(solrStream);
+    SolrParams sParams = mapParams(CommonParams.QT, "/sql", "aggregationMode", "map_reduce",
+        "stmt",
+        "select str_s, count(*), sum(field_i), min(field_i), max(field_i), avg(field_i) from collection1 where text='XXXX' group by str_s order by sum(field_i) asc limit 2");
 
-      //Only two results because of the limit.
-      assert(tuples.size() == 2);
+    SolrStream solrStream = new SolrStream(jetty.url, sParams);
+    List<Tuple> tuples = getTuples(solrStream);
 
-      Tuple tuple = null;
+    // Only two results because of the limit.
+    assert (tuples.size() == 2);
+    Tuple tuple;
 
-      tuple = tuples.get(0);
-      assert(tuple.get("str_s").equals("b"));
-      assert(tuple.getDouble("count(*)") == 2);
-      assert(tuple.getDouble("sum(field_i)") == 19);
-      assert(tuple.getDouble("min(field_i)") == 8);
-      assert(tuple.getDouble("max(field_i)") == 11);
-      assert(tuple.getDouble("avg(field_i)") == 9.5D);
+    tuple = tuples.get(0);
+    assert (tuple.get("str_s").equals("b"));
+    assert (tuple.getDouble("EXPR$1") == 2); // count(*)
+    assert (tuple.getDouble("EXPR$2") == 19); // sum(field_i)
+    assert (tuple.getDouble("EXPR$3") == 8); // min(field_i)
+    assert (tuple.getDouble("EXPR$4") == 11); // max(field_i)
+    assert (tuple.getDouble("EXPR$5") == 10); // avg(field_i)
 
-      tuple = tuples.get(1);
-      assert(tuple.get("str_s").equals("a"));
-      assert(tuple.getDouble("count(*)") == 2);
-      assert(tuple.getDouble("sum(field_i)") == 27);
-      assert(tuple.getDouble("min(field_i)") == 7);
-      assert(tuple.getDouble("max(field_i)") == 20);
-      assert(tuple.getDouble("avg(field_i)") == 13.5D);
+    tuple = tuples.get(1);
+    assert (tuple.get("str_s").equals("a"));
+    assert (tuple.getDouble("EXPR$1") == 2); // count(*)
+    assert (tuple.getDouble("EXPR$2") == 27); // sum(field_i)
+    assert (tuple.getDouble("EXPR$3") == 7); // min(field_i)
+    assert (tuple.getDouble("EXPR$4") == 20); // max(field_i)
+    assert (tuple.getDouble("EXPR$5") == 14); // avg(field_i)
 
+    sParams = mapParams(CommonParams.QT, "/sql", "aggregationMode", "map_reduce",
+        "stmt",
+        "select str_s, count(*), sum(field_i), min(field_i), max(field_i), cast(avg(1.0 * field_i) as float) as blah from collection1 where text='XXXX' group by str_s order by sum(field_i) asc limit 2");
 
-      sParams = mapParams(CommonParams.QT, "/sql",
-          "stmt", "select str_s as myString, 'count(*)', sum('field_i') as sum, min(field_i), max(field_i), avg(field_i) from collection1 where text='XXXX' group by 'str_s' order by sum asc limit 2");
+    solrStream = new SolrStream(jetty.url, sParams);
+    tuples = getTuples(solrStream);
 
-      solrStream = new SolrStream(jetty.url, sParams);
-      tuples = getTuples(solrStream);
+    // Only two results because of the limit.
+    assert (tuples.size() == 2);
 
-      //Only two results because of the limit.
-      assert(tuples.size() == 2);
+    tuple = tuples.get(0);
+    assert (tuple.get("str_s").equals("b"));
+    assert (tuple.getDouble("EXPR$1") == 2); // count(*)
+    assert (tuple.getDouble("EXPR$2") == 19); // sum(field_i)
+    assert (tuple.getDouble("EXPR$3") == 8); // min(field_i)
+    assert (tuple.getDouble("EXPR$4") == 11); // max(field_i)
+    assert (tuple.getDouble("blah") == 9.5); // avg(field_i)
 
-      tuple = tuples.get(0);
-      assert(tuple.get("myString").equals("b"));
-      assert(tuple.getDouble("count(*)") == 2);
-      assert(tuple.getDouble("sum") == 19);
-      assert(tuple.getDouble("min(field_i)") == 8);
-      assert(tuple.getDouble("max(field_i)") == 11);
-      assert(tuple.getDouble("avg(field_i)") == 9.5D);
+    tuple = tuples.get(1);
+    assert (tuple.get("str_s").equals("a"));
+    assert (tuple.getDouble("EXPR$1") == 2); // count(*)
+    assert (tuple.getDouble("EXPR$2") == 27); // sum(field_i)
+    assert (tuple.getDouble("EXPR$3") == 7); // min(field_i)
+    assert (tuple.getDouble("EXPR$4") == 20); // max(field_i)
+    assert (tuple.getDouble("blah") == 13.5); // avg(field_i)
 
-      tuple = tuples.get(1);
-      assert(tuple.get("myString").equals("a"));
-      assert(tuple.getDouble("count(*)") == 2);
-      assert(tuple.getDouble("sum") == 27);
-      assert(tuple.getDouble("min(field_i)") == 7);
-      assert(tuple.getDouble("max(field_i)") == 20);
-      assert(tuple.getDouble("avg(field_i)") == 13.5D);
+    sParams = mapParams(CommonParams.QT, "/sql", "aggregationMode", "map_reduce",
+        "stmt",
+        "select str_s as myString, count(*), sum(field_i) as mySum, min(field_i), max(field_i), avg(field_i)  from collection1 where text='XXXX' group by str_s order by mySum asc limit 2");
 
+    solrStream = new SolrStream(jetty.url, sParams);
+    tuples = getTuples(solrStream);
 
-      sParams = mapParams(CommonParams.QT, "/sql",
-        "stmt", "select str_s, count(*), sum(field_i), min(field_i), max(field_i), avg(field_i) from collection1 where (text='XXXX' AND NOT text='XXXX XXX') group by str_s order by str_s desc");
+    // Only two results because of the limit.
+    assert (tuples.size() == 2);
 
-      solrStream = new SolrStream(jetty.url, sParams);
-      tuples = getTuples(solrStream);
+    tuple = tuples.get(0);
+    assert (tuple.get("myString").equals("b"));
+    assert (tuple.getDouble("EXPR$1") == 2); // count(*)
+    assert (tuple.getDouble("mySum") == 19);
+    assert (tuple.getDouble("EXPR$3") == 8); // min(field_i)
+    assert (tuple.getDouble("EXPR$4") == 11); // max(field_i)
+    assert (tuple.getDouble("EXPR$5") == 10); // avg(field_i)
 
-      //The sort by and order by match and no limit is applied. All the Tuples should be returned in
-      //this scenario.
+    tuple = tuples.get(1);
+    assert (tuple.get("myString").equals("a"));
+    assert (tuple.getDouble("EXPR$1") == 2); // count(*)
+    assert (tuple.getDouble("mySum") == 27);
+    assert (tuple.getDouble("EXPR$3") == 7); // min(field_i)
+    assert (tuple.getDouble("EXPR$4") == 20); // max(field_i)
+    assert (tuple.getDouble("EXPR$5") == 14); // avg(field_i)
 
-      assert(tuples.size() == 3);
+    sParams = mapParams(CommonParams.QT, "/sql", "aggregationMode", "map_reduce",
+        "stmt", "select str_s, count(*), sum(field_i), min(field_i), max(field_i), "
+            + "avg(field_i) from collection1 where (text='XXXX' AND NOT ((text='XXXY') AND (text='XXXY' OR text='XXXY'))) "
+            + "group by str_s order by str_s desc");
 
-      tuple = tuples.get(0);
-      assert(tuple.get("str_s").equals("c"));
-      assert(tuple.getDouble("count(*)") == 4);
-      assert(tuple.getDouble("sum(field_i)") == 180);
-      assert(tuple.getDouble("min(field_i)") == 30);
-      assert(tuple.getDouble("max(field_i)") == 60);
-      assert(tuple.getDouble("avg(field_i)") == 45);
+    solrStream = new SolrStream(jetty.url, sParams);
+    tuples = getTuples(solrStream);
 
-      tuple = tuples.get(1);
-      assert(tuple.get("str_s").equals("b"));
-      assert(tuple.getDouble("count(*)") == 2);
-      assert(tuple.getDouble("sum(field_i)") == 19);
-      assert(tuple.getDouble("min(field_i)") == 8);
-      assert(tuple.getDouble("max(field_i)") == 11);
-      assert(tuple.getDouble("avg(field_i)") == 9.5D);
+    // The sort by and order by match and no limit is applied. All the Tuples should be returned in
+    // this scenario.
 
-      tuple = tuples.get(2);
-      assert(tuple.get("str_s").equals("a"));
-      assert(tuple.getDouble("count(*)") == 2);
-      assert(tuple.getDouble("sum(field_i)") == 27);
-      assert(tuple.getDouble("min(field_i)") == 7);
-      assert(tuple.getDouble("max(field_i)") == 20);
-      assert(tuple.getDouble("avg(field_i)") == 13.5D);
+    assert (tuples.size() == 3);
 
+    tuple = tuples.get(0);
+    assert (tuple.get("str_s").equals("c"));
+    assert (tuple.getDouble("EXPR$1") == 4); // count(*)
+    assert (tuple.getDouble("EXPR$2") == 180); // sum(field_i)
+    assert (tuple.getDouble("EXPR$3") == 30); // min(field_i)
+    assert (tuple.getDouble("EXPR$4") == 60); // max(field_i)
+    assert (tuple.getDouble("EXPR$5") == 45); // avg(field_i)
 
-      sParams = mapParams(CommonParams.QT, "/sql",
-          "stmt", "select str_s as myString, count(*) as count, sum(field_i) as sum, min(field_i) as min, max(field_i) as max, avg(field_i) as avg from collection1 where (text='XXXX' AND NOT text='XXXX XXX') group by str_s order by str_s desc");
+    tuple = tuples.get(1);
+    assert (tuple.get("str_s").equals("b"));
+    assert (tuple.getDouble("EXPR$1") == 2); // count(*)
+    assert (tuple.getDouble("EXPR$2") == 19); // sum(field_i)
+    assert (tuple.getDouble("EXPR$3") == 8); // min(field_i)
+    assert (tuple.getDouble("EXPR$4") == 11); // max(field_i)
+    assert (tuple.getDouble("EXPR$5") == 10D); // avg(field_i)
 
-      solrStream = new SolrStream(jetty.url, sParams);
-      tuples = getTuples(solrStream);
+    tuple = tuples.get(2);
+    assert (tuple.get("str_s").equals("a"));
+    assert (tuple.getDouble("EXPR$1") == 2); // count(*)
+    assert (tuple.getDouble("EXPR$2") == 27); // sum(field_i)
+    assert (tuple.getDouble("EXPR$3") == 7); // min(field_i)
+    assert (tuple.getDouble("EXPR$4") == 20); // max(field_i)
 
-      //The sort by and order by match and no limit is applied. All the Tuples should be returned in
-      //this scenario.
+    assert (tuple.getDouble("EXPR$5") == 14); // avg(field_i)
 
-      assert(tuples.size() == 3);
+    sParams = mapParams(CommonParams.QT, "/sql", "aggregationMode", "map_reduce",
+        "stmt", "select str_s as myString, count(*) as myCount, sum(field_i) as mySum, min(field_i) as myMin, "
+            + "max(field_i) as myMax, avg(field_i) as myAvg from collection1 "
+            + "where (text='XXXX' AND NOT (text='XXXY')) group by str_s order by str_s desc");
 
-      tuple = tuples.get(0);
-      assert(tuple.get("myString").equals("c"));
-      assert(tuple.getDouble("count") == 4);
-      assert(tuple.getDouble("sum") == 180);
-      assert(tuple.getDouble("min") == 30);
-      assert(tuple.getDouble("max") == 60);
-      assert(tuple.getDouble("avg") == 45);
+    solrStream = new SolrStream(jetty.url, sParams);
+    tuples = getTuples(solrStream);
 
-      tuple = tuples.get(1);
-      assert(tuple.get("myString").equals("b"));
-      assert(tuple.getDouble("count") == 2);
-      assert(tuple.getDouble("sum") == 19);
-      assert(tuple.getDouble("min") == 8);
-      assert(tuple.getDouble("max") == 11);
-      assert(tuple.getDouble("avg") == 9.5D);
+    // The sort by and order by match and no limit is applied. All the Tuples should be returned in
+    // this scenario.
 
-      tuple = tuples.get(2);
-      assert(tuple.get("myString").equals("a"));
-      assert(tuple.getDouble("count") == 2);
-      assert(tuple.getDouble("sum") == 27);
-      assert(tuple.getDouble("min") == 7);
-      assert(tuple.getDouble("max") == 20);
-      assert(tuple.getDouble("avg") == 13.5D);
+    assert (tuples.size() == 3);
 
+    tuple = tuples.get(0);
+    assert (tuple.get("myString").equals("c"));
+    assert (tuple.getDouble("myCount") == 4);
+    assert (tuple.getDouble("mySum") == 180);
+    assert (tuple.getDouble("myMin") == 30);
+    assert (tuple.getDouble("myMax") == 60);
+    assert (tuple.getDouble("myAvg") == 45);
 
+    tuple = tuples.get(1);
+    assert (tuple.get("myString").equals("b"));
+    assert (tuple.getDouble("myCount") == 2);
+    assert (tuple.getDouble("mySum") == 19);
+    assert (tuple.getDouble("myMin") == 8);
+    assert (tuple.getDouble("myMax") == 11);
+    assert (tuple.getDouble("myAvg") == 10);
 
-      sParams = mapParams(CommonParams.QT, "/sql",
-        "stmt", "select str_s, count(*), sum(field_i), min(field_i), max(field_i), avg(field_i) from collection1 where text='XXXX' group by str_s having sum(field_i) = 19");
+    tuple = tuples.get(2);
+    assert (tuple.get("myString").equals("a"));
+    assert (tuple.getDouble("myCount") == 2);
+    assert (tuple.getDouble("mySum") == 27);
+    assert (tuple.getDouble("myMin") == 7);
+    assert (tuple.getDouble("myMax") == 20);
+    assert (tuple.getDouble("myAvg") == 14);
 
-      solrStream = new SolrStream(jetty.url, sParams);
-      tuples = getTuples(solrStream);
+    sParams = mapParams(CommonParams.QT, "/sql", "aggregationMode", "map_reduce",
+        "stmt", "select str_s, count(*), sum(field_i), min(field_i), max(field_i), avg(field_i) " +
+            "from collection1 where text='XXXX' group by str_s having sum(field_i) = 19");
 
-      assert(tuples.size() == 1);
+    solrStream = new SolrStream(jetty.url, sParams);
+    tuples = getTuples(solrStream);
 
-      tuple = tuples.get(0);
-      assert(tuple.get("str_s").equals("b"));
-      assert(tuple.getDouble("count(*)") == 2);
-      assert(tuple.getDouble("sum(field_i)") == 19);
-      assert(tuple.getDouble("min(field_i)") == 8);
-      assert(tuple.getDouble("max(field_i)") == 11);
-      assert(tuple.getDouble("avg(field_i)") == 9.5D);
+    assert (tuples.size() == 1);
 
-      sParams = mapParams(CommonParams.QT, "/sql",
-        "stmt", "select str_s, count(*), sum(field_i), min(field_i), max(field_i), avg(field_i) from collection1 where text='XXXX' group by str_s having ((sum(field_i) = 19) AND (min(field_i) = 8))");
+    tuple = tuples.get(0);
+    assert (tuple.get("str_s").equals("b"));
+    assert (tuple.getDouble("EXPR$1") == 2); // count(*)
+    assert (tuple.getDouble("EXPR$2") == 19); // sum(field_i)
+    assert (tuple.getDouble("EXPR$3") == 8); // min(field_i)
+    assert (tuple.getDouble("EXPR$4") == 11); // max(field_i)
+    assert (tuple.getDouble("EXPR$5") == 10); // avg(field_i)
 
-      solrStream = new SolrStream(jetty.url, sParams);
-      tuples = getTuples(solrStream);
+    sParams = mapParams(CommonParams.QT, "/sql", "aggregationMode", "map_reduce",
+        "stmt", "select str_s, count(*), sum(field_i), min(field_i), max(field_i), avg(field_i) " +
+            "from collection1 where text='XXXX' group by str_s having ((sum(field_i) = 19) AND (min(field_i) = 8))");
 
-      //Only two results because of the limit.
-      assert(tuples.size() == 1);
+    solrStream = new SolrStream(jetty.url, sParams);
+    tuples = getTuples(solrStream);
 
-      tuple = tuples.get(0);
-      assert(tuple.get("str_s").equals("b"));
-      assert(tuple.getDouble("count(*)") == 2);
-      assert(tuple.getDouble("sum(field_i)") == 19);
-      assert(tuple.getDouble("min(field_i)") == 8);
-      assert(tuple.getDouble("max(field_i)") == 11);
-      assert(tuple.getDouble("avg(field_i)") == 9.5D);
+    assert (tuples.size() == 1);
 
-      sParams = mapParams(CommonParams.QT, "/sql",
-          "stmt", "select str_s as myString, count(*), sum(field_i) as sum, min(field_i), max(field_i), avg(field_i) from collection1 where text='XXXX' group by myString having ((sum = 19) AND (min(field_i) = 8))");
+    tuple = tuples.get(0);
+    assert (tuple.get("str_s").equals("b"));
+    assert (tuple.getDouble("EXPR$1") == 2); // count(*)
+    assert (tuple.getDouble("EXPR$2") == 19); // sum(field_i)
+    assert (tuple.getDouble("EXPR$3") == 8); // min(field_i)
+    assert (tuple.getDouble("EXPR$4") == 11); // max(field_i)
+    assert (tuple.getDouble("EXPR$5") == 10); // avg(field_i)
 
-      solrStream = new SolrStream(jetty.url, sParams);
-      tuples = getTuples(solrStream);
+    sParams = mapParams(CommonParams.QT, "/sql", "aggregationMode", "map_reduce",
+        "stmt", "select str_s, count(*), sum(field_i) as mySum, min(field_i), max(field_i), " +
+            "avg(field_i) from collection1 where text='XXXX' group by str_s " +
+            "having ((sum(field_i) = 19) AND (min(field_i) = 8))");
 
-      //Only two results because of the limit.
-      assert(tuples.size() == 1);
+    solrStream = new SolrStream(jetty.url, sParams);
+    tuples = getTuples(solrStream);
 
-      tuple = tuples.get(0);
-      assert(tuple.get("myString").equals("b"));
-      assert(tuple.getDouble("count(*)") == 2);
-      assert(tuple.getDouble("sum") == 19);
-      assert(tuple.getDouble("min(field_i)") == 8);
-      assert(tuple.getDouble("max(field_i)") == 11);
-      assert(tuple.getDouble("avg(field_i)") == 9.5D);
+    assert (tuples.size() == 1);
 
+    tuple = tuples.get(0);
+    assert (tuple.get("str_s").equals("b"));
+    assert (tuple.getDouble("EXPR$1") == 2); // count(*)
+    assert (tuple.getDouble("mySum") == 19);
+    assert (tuple.getDouble("EXPR$3") == 8); // min(field_i)
+    assert (tuple.getDouble("EXPR$4") == 11); // max(field_i)
+    assert (tuple.getDouble("EXPR$5") == 10); // avg(field_i)
 
-      sParams = mapParams(CommonParams.QT, "/sql",
-        "stmt", "select str_s, count(*), sum(field_i), min(field_i), max(field_i), avg(field_i) from collection1 where text='XXXX' group by str_s having ((sum(field_i) = 19) AND (min(field_i) = 100))");
+    sParams = mapParams(CommonParams.QT, "/sql", "aggregationMode", "map_reduce",
+        "stmt", "select str_s, count(*), sum(field_i), min(field_i), max(field_i), " +
+            "avg(field_i) from collection1 where text='XXXX' group by str_s " +
+            "having ((sum(field_i) = 19) AND (min(field_i) = 100))");
 
-      solrStream = new SolrStream(jetty.url, sParams);
-      tuples = getTuples(solrStream);
+    solrStream = new SolrStream(jetty.url, sParams);
+    tuples = getTuples(solrStream);
 
-      assert(tuples.size() == 0);
+    assert (tuples.size() == 0);
 
-
-    } finally {
-      delete();
-    }
   }
 
+  private void testBasicGroupingTint() throws Exception {
+
+    CloudJettyRunner jetty = this.cloudJettys.get(0);
+
+    del("*:*");
+
+    commit();
+
+    indexr("id", "1", "text", "XXXX XXXX", "str_s", "a", "field_ti", "7");
+    indexr("id", "2", "text", "XXXX XXXX", "str_s", "b", "field_ti", "8");
+    indexr("id", "3", "text", "XXXX XXXX", "str_s", "a", "field_ti", "20");
+    indexr("id", "4", "text", "XXXX XXXX", "str_s", "b", "field_ti", "11");
+    indexr("id", "5", "text", "XXXX XXXX", "str_s", "c", "field_ti", "30");
+    indexr("id", "6", "text", "XXXX XXXX", "str_s", "c", "field_ti", "40");
+    indexr("id", "7", "text", "XXXX XXXX", "str_s", "c", "field_ti", "50");
+    indexr("id", "8", "text", "XXXX XXXX", "str_s", "c", "field_ti", "60");
+    indexr("id", "9", "text", "XXXX XXXY", "str_s", "d", "field_ti", "70");
+    commit();
+
+    SolrParams sParams = mapParams(CommonParams.QT, "/sql",
+        "stmt",
+        "select str_s, count(*), sum(field_ti), min(field_ti), max(field_ti), avg(field_ti) from collection1 where text='XXXX' group by str_s order by sum(field_ti) asc limit 2");
+
+    SolrStream solrStream = new SolrStream(jetty.url, sParams);
+    List<Tuple> tuples = getTuples(solrStream);
+
+    // Only two results because of the limit.
+    assert (tuples.size() == 2);
+    Tuple tuple;
+
+    tuple = tuples.get(0);
+    assert (tuple.get("str_s").equals("b"));
+    assert (tuple.getDouble("EXPR$1") == 2); // count(*)
+    assert (tuple.getDouble("EXPR$2") == 19); // sum(field_i)
+    assert (tuple.getDouble("EXPR$3") == 8); // min(field_i)
+    assert (tuple.getDouble("EXPR$4") == 11); // max(field_i)
+    assert (tuple.getDouble("EXPR$5") == 10); // avg(field_i)
+
+    tuple = tuples.get(1);
+    assert (tuple.get("str_s").equals("a"));
+    assert (tuple.getDouble("EXPR$1") == 2); // count(*)
+    assert (tuple.getDouble("EXPR$2") == 27); // sum(field_i)
+    assert (tuple.getDouble("EXPR$3") == 7); // min(field_i)
+    assert (tuple.getDouble("EXPR$4") == 20); // max(field_i)
+    assert (tuple.getDouble("EXPR$5") == 14); // avg(field_i)
+
+  }
+
+  private void testBasicGroupingIntLongPoints() throws Exception {
+
+    Random random = random();
+    int r = random.nextInt(2);
+    String[] intOrLong = {"field_i_p", "field_l_p"};
+    String[] facetOrMap = {"facet", "map_reduce"};
+    String field = intOrLong[r];
+    r = random.nextInt(2);
+    String mode = facetOrMap[r];
+    CloudJettyRunner jetty = this.cloudJettys.get(0);
+
+    del("*:*");
+
+    commit();
+
+    indexr("id", "1", "text", "XXXX XXXX", "str_s", "a", field, "7");
+    indexr("id", "2", "text", "XXXX XXXX", "str_s", "b", field, "8");
+    indexr("id", "3", "text", "XXXX XXXX", "str_s", "a", field, "20");
+    indexr("id", "4", "text", "XXXX XXXX", "str_s", "b", field, "11");
+    indexr("id", "5", "text", "XXXX XXXX", "str_s", "c", field, "30");
+    indexr("id", "6", "text", "XXXX XXXX", "str_s", "c", field, "40");
+    indexr("id", "7", "text", "XXXX XXXX", "str_s", "c", field, "50");
+    indexr("id", "8", "text", "XXXX XXXX", "str_s", "c", field, "60");
+    indexr("id", "9", "text", "XXXX XXXY", "str_s", "d", field, "70");
+    commit();
+
+    SolrParams sParams = mapParams(CommonParams.QT, "/sql", "aggregationMode", mode,
+        "stmt", "select str_s, count(*), sum(" + field + "), min(" + field + "), max(" + field + "), avg(" + field
+            + ") from collection1 where text='XXXX' group by str_s order by sum(" + field + ") asc limit 2");
+
+    SolrStream solrStream = new SolrStream(jetty.url, sParams);
+    List<Tuple> tuples = getTuples(solrStream);
+
+    // Only two results because of the limit.
+    assert (tuples.size() == 2);
+    Tuple tuple;
+
+    tuple = tuples.get(0);
+    assert (tuple.get("str_s").equals("b"));
+    assert (tuple.getDouble("EXPR$1") == 2); // count(*)
+    assert (tuple.getDouble("EXPR$2") == 19); // sum(field_i)
+    assert (tuple.getDouble("EXPR$3") == 8); // min(field_i)
+    assert (tuple.getDouble("EXPR$4") == 11); // max(field_i)
+    assert (tuple.getDouble("EXPR$5") == 10); // avg(field_i)
+
+    tuple = tuples.get(1);
+    assert (tuple.get("str_s").equals("a"));
+    assert (tuple.getDouble("EXPR$1") == 2); // count(*)
+    assert (tuple.getDouble("EXPR$2") == 27); // sum(field_i)
+    assert (tuple.getDouble("EXPR$3") == 7); // min(field_i)
+    assert (tuple.getDouble("EXPR$4") == 20); // max(field_i)
+    assert (tuple.getDouble("EXPR$5") == 14); // avg(field_i)
+
+  }
+
+  private void testBasicGroupingFloatDoublePoints() throws Exception {
+
+    Random random = random();
+    int r = random.nextInt(2);
+    String[] intOrLong = {"field_f_p", "field_d_p"};
+    String[] facetOrMap = {"facet", "map_reduce"};
+    String field = intOrLong[r];
+    r = random.nextInt(2);
+    String mode = facetOrMap[r];
+
+    CloudJettyRunner jetty = this.cloudJettys.get(0);
+
+    del("*:*");
+
+    commit();
+
+    indexr("id", "1", "text", "XXXX XXXX", "str_s", "a", field, "7.0");
+    indexr("id", "2", "text", "XXXX XXXX", "str_s", "b", field, "8.0");
+    indexr("id", "3", "text", "XXXX XXXX", "str_s", "a", field, "20.0");
+    indexr("id", "4", "text", "XXXX XXXX", "str_s", "b", field, "11.0");
+    indexr("id", "5", "text", "XXXX XXXX", "str_s", "c", field, "30.0");
+    indexr("id", "6", "text", "XXXX XXXX", "str_s", "c", field, "40.0");
+    indexr("id", "7", "text", "XXXX XXXX", "str_s", "c", field, "50.0");
+    indexr("id", "8", "text", "XXXX XXXX", "str_s", "c", field, "60.0");
+    indexr("id", "9", "text", "XXXX XXXY", "str_s", "d", field, "70.0");
+    commit();
+
+    SolrParams sParams = mapParams(CommonParams.QT, "/sql", "aggregationMode", mode,
+        "stmt", "select str_s, count(*), sum(" + field + "), min(" + field + "), max(" + field + "), avg(" + field
+            + ") from collection1 where text='XXXX' group by str_s order by sum(" + field + ") asc limit 2");
+
+    SolrStream solrStream = new SolrStream(jetty.url, sParams);
+    List<Tuple> tuples = getTuples(solrStream);
+
+    // Only two results because of the limit.
+    assert (tuples.size() == 2);
+    Tuple tuple;
+
+    tuple = tuples.get(0);
+    assert (tuple.get("str_s").equals("b"));
+    assertEquals(tuple.getDouble("EXPR$1"), 2, 0.0); // count(*)
+    assertEquals(tuple.getDouble("EXPR$2"), 19, 0.0); // sum(field_i)
+    assertEquals(tuple.getDouble("EXPR$3"), 8, 0.0); // min(field_i)
+    assertEquals(tuple.getDouble("EXPR$4"), 11, 0.0); // max(field_i)
+    assertEquals(tuple.getDouble("EXPR$5"), 9.5, 0.0); // avg(field_i)
+
+    tuple = tuples.get(1);
+    assert (tuple.get("str_s").equals("a"));
+    assertEquals(tuple.getDouble("EXPR$1"), 2, 0.0); // count(*)
+    assertEquals(tuple.getDouble("EXPR$2"), 27, 0.0); // sum(field_i)
+    assertEquals(tuple.getDouble("EXPR$3"), 7, 0.0); // min(field_i)
+    assertEquals(tuple.getDouble("EXPR$4"), 20, 0.0); // max(field_i)
+    assertEquals(tuple.getDouble("EXPR$5"), 13.5, 0.0); // avg(field_i)
+
+  }
 
   private void testSelectDistinctFacets() throws Exception {
-    try {
 
-      CloudJettyRunner jetty = this.cloudJettys.get(0);
+    CloudJettyRunner jetty = this.cloudJettys.get(0);
 
-      del("*:*");
+    del("*:*");
 
-      commit();
+    commit();
 
-      indexr("id", "1", "text", "XXXX XXXX", "str_s", "a", "field_i", "1");
-      indexr("id", "2", "text", "XXXX XXXX", "str_s", "b", "field_i", "2");
-      indexr("id", "3", "text", "XXXX XXXX", "str_s", "a", "field_i", "20");
-      indexr("id", "4", "text", "XXXX XXXX", "str_s", "b", "field_i", "2");
-      indexr("id", "5", "text", "XXXX XXXX", "str_s", "c", "field_i", "30");
-      indexr("id", "6", "text", "XXXX XXXX", "str_s", "c", "field_i", "30");
-      indexr("id", "7", "text", "XXXX XXXX", "str_s", "c", "field_i", "50");
-      indexr("id", "8", "text", "XXXX XXXX", "str_s", "c", "field_i", "60");
-      commit();
-      SolrParams sParams = mapParams(CommonParams.QT, "/sql", "aggregationMode", "facet",
-        "stmt", "select distinct 'str_s', 'field_i' from collection1 order by 'str_s' asc, 'field_i' asc");
+    indexr("id", "1", "text", "XXXX XXXX", "str_s", "a", "field_i", "1");
+    indexr("id", "2", "text", "XXXX XXXX", "str_s", "b", "field_i", "2");
+    indexr("id", "3", "text", "XXXX XXXX", "str_s", "a", "field_i", "20");
+    indexr("id", "4", "text", "XXXX XXXX", "str_s", "b", "field_i", "2");
+    indexr("id", "5", "text", "XXXX XXXX", "str_s", "c", "field_i", "30");
+    indexr("id", "6", "text", "XXXX XXXX", "str_s", "c", "field_i", "30");
+    indexr("id", "7", "text", "XXXX XXXX", "str_s", "c", "field_i", "50");
+    indexr("id", "8", "text", "XXXX XXXX", "str_s", "c", "field_i", "60");
+    commit();
 
-      SolrStream solrStream = new SolrStream(jetty.url, sParams);
-      List<Tuple> tuples = getTuples(solrStream);
+    SolrParams sParams = mapParams(CommonParams.QT, "/sql", "aggregationMode", "facet",
+        "stmt", "select distinct str_s, field_i from collection1 order by str_s asc, field_i asc");
 
-      assert(tuples.size() == 6);
+    System.out.println("######## selectDistinctFacets #######");
 
-      Tuple tuple = null;
+    SolrStream solrStream = new SolrStream(jetty.url, sParams);
+    List<Tuple> tuples = getTuples(solrStream);
 
-      tuple = tuples.get(0);
-      assert(tuple.get("str_s").equals("a"));
-      assert(tuple.getLong("field_i") == 1);
+    // assert(false);
+    assert (tuples.size() == 6);
 
-      tuple = tuples.get(1);
-      assert(tuple.get("str_s").equals("a"));
-      assert(tuple.getLong("field_i") == 20);
+    Tuple tuple;
 
-      tuple = tuples.get(2);
-      assert(tuple.get("str_s").equals("b"));
-      assert(tuple.getLong("field_i") == 2);
+    tuple = tuples.get(0);
+    assert (tuple.get("str_s").equals("a"));
+    assert (tuple.getLong("field_i") == 1);
 
-      tuple = tuples.get(3);
-      assert(tuple.get("str_s").equals("c"));
-      assert(tuple.getLong("field_i") == 30);
+    tuple = tuples.get(1);
+    assert (tuple.get("str_s").equals("a"));
+    assert (tuple.getLong("field_i") == 20);
 
-      tuple = tuples.get(4);
-      assert(tuple.get("str_s").equals("c"));
-      assert(tuple.getLong("field_i") == 50);
+    tuple = tuples.get(2);
+    assert (tuple.get("str_s").equals("b"));
+    assert (tuple.getLong("field_i") == 2);
 
-      tuple = tuples.get(5);
-      assert(tuple.get("str_s").equals("c"));
-      assert(tuple.getLong("field_i") == 60);
+    tuple = tuples.get(3);
+    assert (tuple.get("str_s").equals("c"));
+    assert (tuple.getLong("field_i") == 30);
 
+    tuple = tuples.get(4);
+    assert (tuple.get("str_s").equals("c"));
+    assert (tuple.getLong("field_i") == 50);
 
-      //reverse the sort
-      sParams = mapParams(CommonParams.QT, "/sql", "aggregationMode", "facet",
+    tuple = tuples.get(5);
+    assert (tuple.get("str_s").equals("c"));
+    assert (tuple.getLong("field_i") == 60);
+
+    // reverse the sort
+    sParams = mapParams(CommonParams.QT, "/sql", "aggregationMode", "facet",
         "stmt", "select distinct str_s, field_i from collection1 order by str_s desc, field_i desc");
 
-      solrStream = new SolrStream(jetty.url, sParams);
-      tuples = getTuples(solrStream);
+    solrStream = new SolrStream(jetty.url, sParams);
+    tuples = getTuples(solrStream);
 
-      assert(tuples.size() == 6);
+    assert (tuples.size() == 6);
 
-      tuple = tuples.get(0);
-      assert(tuple.get("str_s").equals("c"));
-      assert(tuple.getLong("field_i") == 60);
+    tuple = tuples.get(0);
+    assert (tuple.get("str_s").equals("c"));
+    assert (tuple.getLong("field_i") == 60);
 
-      tuple = tuples.get(1);
-      assert(tuple.get("str_s").equals("c"));
-      assert(tuple.getLong("field_i") == 50);
+    tuple = tuples.get(1);
+    assert (tuple.get("str_s").equals("c"));
+    assert (tuple.getLong("field_i") == 50);
 
+    tuple = tuples.get(2);
+    assert (tuple.get("str_s").equals("c"));
+    assert (tuple.getLong("field_i") == 30);
 
-      tuple = tuples.get(2);
-      assert(tuple.get("str_s").equals("c"));
-      assert(tuple.getLong("field_i") == 30);
+    tuple = tuples.get(3);
+    assert (tuple.get("str_s").equals("b"));
+    assert (tuple.getLong("field_i") == 2);
 
-      tuple = tuples.get(3);
-      assert(tuple.get("str_s").equals("b"));
-      assert(tuple.getLong("field_i") == 2);
+    tuple = tuples.get(4);
+    assert (tuple.get("str_s").equals("a"));
+    assert (tuple.getLong("field_i") == 20);
 
+    tuple = tuples.get(5);
+    assert (tuple.get("str_s").equals("a"));
+    assert (tuple.getLong("field_i") == 1);
 
-      tuple = tuples.get(4);
-      assert(tuple.get("str_s").equals("a"));
-      assert(tuple.getLong("field_i") == 20);
-
-      tuple = tuples.get(5);
-      assert(tuple.get("str_s").equals("a"));
-      assert(tuple.getLong("field_i") == 1);
-
-
-      //reverse the sort
-      sParams = mapParams(CommonParams.QT, "/sql", "aggregationMode", "facet",
+    // reverse the sort
+    sParams = mapParams(CommonParams.QT, "/sql", "aggregationMode", "facet",
         "stmt", "select distinct str_s as myString, field_i as myInt from collection1 order by str_s desc, myInt desc");
 
-      solrStream = new SolrStream(jetty.url, sParams);
-      tuples = getTuples(solrStream);
+    solrStream = new SolrStream(jetty.url, sParams);
+    tuples = getTuples(solrStream);
 
-      assert(tuples.size() == 6);
+    assert (tuples.size() == 6);
 
-      tuple = tuples.get(0);
-      assert(tuple.get("myString").equals("c"));
-      assert(tuple.getLong("myInt") == 60);
+    tuple = tuples.get(0);
+    assert (tuple.get("myString").equals("c"));
+    assert (tuple.getLong("myInt") == 60);
 
-      tuple = tuples.get(1);
-      assert(tuple.get("myString").equals("c"));
-      assert(tuple.getLong("myInt") == 50);
+    tuple = tuples.get(1);
+    assert (tuple.get("myString").equals("c"));
+    assert (tuple.getLong("myInt") == 50);
 
+    tuple = tuples.get(2);
+    assert (tuple.get("myString").equals("c"));
+    assert (tuple.getLong("myInt") == 30);
 
-      tuple = tuples.get(2);
-      assert(tuple.get("myString").equals("c"));
-      assert(tuple.getLong("myInt") == 30);
+    tuple = tuples.get(3);
+    assert (tuple.get("myString").equals("b"));
+    assert (tuple.getLong("myInt") == 2);
 
-      tuple = tuples.get(3);
-      assert(tuple.get("myString").equals("b"));
-      assert(tuple.getLong("myInt") == 2);
+    tuple = tuples.get(4);
+    assert (tuple.get("myString").equals("a"));
+    assert (tuple.getLong("myInt") == 20);
 
+    tuple = tuples.get(5);
+    assert (tuple.get("myString").equals("a"));
+    assert (tuple.getLong("myInt") == 1);
 
-      tuple = tuples.get(4);
-      assert(tuple.get("myString").equals("a"));
-      assert(tuple.getLong("myInt") == 20);
-
-      tuple = tuples.get(5);
-      assert(tuple.get("myString").equals("a"));
-      assert(tuple.getLong("myInt") == 1);
-
-      //test with limit
-      sParams = mapParams(CommonParams.QT, "/sql", "aggregationMode", "facet",
+    // test with limit
+    sParams = mapParams(CommonParams.QT, "/sql", "aggregationMode", "facet",
         "stmt", "select distinct str_s, field_i from collection1 order by str_s desc, field_i desc limit 2");
 
-      solrStream = new SolrStream(jetty.url, sParams);
-      tuples = getTuples(solrStream);
+    solrStream = new SolrStream(jetty.url, sParams);
+    tuples = getTuples(solrStream);
 
-      assert(tuples.size() == 2);
+    assert (tuples.size() == 2);
 
-      tuple = tuples.get(0);
-      assert(tuple.get("str_s").equals("c"));
-      assert(tuple.getLong("field_i") == 60);
+    tuple = tuples.get(0);
+    assert (tuple.get("str_s").equals("c"));
+    assert (tuple.getLong("field_i") == 60);
 
-      tuple = tuples.get(1);
-      assert(tuple.get("str_s").equals("c"));
-      assert(tuple.getLong("field_i") == 50);
+    tuple = tuples.get(1);
+    assert (tuple.get("str_s").equals("c"));
+    assert (tuple.getLong("field_i") == 50);
 
-
-      // Test without a sort. Sort should be asc by default.
-
-      sParams = mapParams(CommonParams.QT, "/sql", "aggregationMode", "facet",
+    // Test without a sort. Sort should be asc by default.
+    sParams = mapParams(CommonParams.QT, "/sql", "aggregationMode", "facet",
         "stmt", "select distinct str_s, field_i from collection1");
 
-      solrStream = new SolrStream(jetty.url, sParams);
-      tuples = getTuples(solrStream);
+    solrStream = new SolrStream(jetty.url, sParams);
+    tuples = getTuples(solrStream);
 
-      assert(tuples.size() == 6);
+    assert (tuples.size() == 6);
 
-      tuple = tuples.get(0);
-      assert(tuple.get("str_s").equals("a"));
-      assert(tuple.getLong("field_i") == 1);
+    tuple = tuples.get(0);
+    assert (tuple.get("str_s").equals("a"));
+    assert (tuple.getLong("field_i") == 1);
 
-      tuple = tuples.get(1);
-      assert(tuple.get("str_s").equals("a"));
-      assert(tuple.getLong("field_i") == 20);
+    tuple = tuples.get(1);
 
-      tuple = tuples.get(2);
-      assert(tuple.get("str_s").equals("b"));
-      assert(tuple.getLong("field_i") == 2);
+    assert (tuple.get("str_s").equals("a"));
+    assert (tuple.getLong("field_i") == 20);
 
-      tuple = tuples.get(3);
-      assert(tuple.get("str_s").equals("c"));
-      assert(tuple.getLong("field_i") == 30);
+    tuple = tuples.get(2);
 
-      tuple = tuples.get(4);
-      assert(tuple.get("str_s").equals("c"));
-      assert(tuple.getLong("field_i") == 50);
+    assert (tuple.get("str_s").equals("b"));
+    assert (tuple.getLong("field_i") == 2);
 
-      tuple = tuples.get(5);
-      assert(tuple.get("str_s").equals("c"));
-      assert(tuple.getLong("field_i") == 60);
+    tuple = tuples.get(3);
 
+    assert (tuple.get("str_s").equals("c"));
+    assert (tuple.getLong("field_i") == 30);
 
-      // Test with a predicate.
+    tuple = tuples.get(4);
 
-      sParams = mapParams(CommonParams.QT, "/sql", "aggregationMode", "facet",
+    assert (tuple.get("str_s").equals("c"));
+    assert (tuple.getLong("field_i") == 50);
+
+    tuple = tuples.get(5);
+
+    assert (tuple.get("str_s").equals("c"));
+    assert (tuple.getLong("field_i") == 60);
+
+    // Test with a predicate.
+    sParams = mapParams(CommonParams.QT, "/sql", "aggregationMode", "facet",
         "stmt", "select distinct str_s, field_i from collection1 where str_s = 'a'");
 
-      solrStream = new SolrStream(jetty.url, sParams);
-      tuples = getTuples(solrStream);
+    solrStream = new SolrStream(jetty.url, sParams);
+    tuples = getTuples(solrStream);
 
-      assert(tuples.size() == 2);
+    assert (tuples.size() == 2);
 
-      tuple = tuples.get(0);
-      assert(tuple.get("str_s").equals("a"));
-      assert (tuple.getLong("field_i") == 1);
+    tuple = tuples.get(0);
+    assert (tuple.get("str_s").equals("a"));
+    assert (tuple.getLong("field_i") == 1);
 
-      tuple = tuples.get(1);
-      assert(tuple.get("str_s").equals("a"));
-      assert(tuple.getLong("field_i") == 20);
+    tuple = tuples.get(1);
+    assert (tuple.get("str_s").equals("a"));
+    assert (tuple.getLong("field_i") == 20);
 
-
-    } finally {
-      delete();
-    }
   }
 
-
   private void testSelectDistinct() throws Exception {
-    try {
 
-      CloudJettyRunner jetty = this.cloudJettys.get(0);
+    CloudJettyRunner jetty = this.cloudJettys.get(0);
 
-      del("*:*");
+    del("*:*");
 
-      commit();
+    commit();
 
-      indexr("id", "1", "text", "XXXX XXXX", "str_s", "a", "field_i", "1");
-      indexr("id", "2", "text", "XXXX XXXX", "str_s", "b", "field_i", "2");
-      indexr("id", "3", "text", "XXXX XXXX", "str_s", "a", "field_i", "20");
-      indexr("id", "4", "text", "XXXX XXXX", "str_s", "b", "field_i", "2");
-      indexr("id", "5", "text", "XXXX XXXX", "str_s", "c", "field_i", "30");
-      indexr("id", "6", "text", "XXXX XXXX", "str_s", "c", "field_i", "30");
-      indexr("id", "7", "text", "XXXX XXXX", "str_s", "c", "field_i", "50");
-      indexr("id", "8", "text", "XXXX XXXX", "str_s", "c", "field_i", "60");
-      commit();
-      
-      SolrParams sParams = mapParams(CommonParams.QT, "/sql",
-        "stmt", "select distinct 'str_s', 'field_i' from collection1 order by 'str_s' asc, 'field_i' asc");
+    indexr("id", "1", "text", "XXXX XXXX", "str_s", "a", "field_i", "1");
+    indexr("id", "2", "text", "XXXX XXXX", "str_s", "b", "field_i", "2");
+    indexr("id", "3", "text", "XXXX XXXX", "str_s", "a", "field_i", "20");
+    indexr("id", "4", "text", "XXXX XXXX", "str_s", "b", "field_i", "2");
+    indexr("id", "5", "text", "XXXX XXXX", "str_s", "c", "field_i", "30");
+    indexr("id", "6", "text", "XXXX XXXX", "str_s", "c", "field_i", "30");
+    indexr("id", "7", "text", "XXXX XXXX", "str_s", "c", "field_i", "50");
+    indexr("id", "8", "text", "XXXX XXXX", "str_s", "c", "field_i", "60");
+    commit();
 
-      SolrStream solrStream = new SolrStream(jetty.url, sParams);
-      List<Tuple> tuples = getTuples(solrStream);
+    SolrParams sParams = mapParams(CommonParams.QT, "/sql", "aggregationMode", "map_reduce",
+        "stmt", "select distinct str_s, field_i from collection1 order by str_s asc, field_i asc");
 
-      assert(tuples.size() == 6);
+    System.out.println("##################### testSelectDistinct()");
 
-      Tuple tuple = null;
+    TupleStream solrStream = new SolrStream(jetty.url, sParams);
+    List<Tuple> tuples = getTuples(solrStream);
 
-      tuple = tuples.get(0);
-      assert(tuple.get("str_s").equals("a"));
-      assert(tuple.getLong("field_i") == 1);
+    assert (tuples.size() == 6);
+    Tuple tuple = tuples.get(0);
+    assert (tuple.get("str_s").equals("a"));
+    assert (tuple.getLong("field_i") == 1);
 
-      tuple = tuples.get(1);
-      assert(tuple.get("str_s").equals("a"));
-      assert(tuple.getLong("field_i") == 20);
+    tuple = tuples.get(1);
+    assert (tuple.get("str_s").equals("a"));
+    assert (tuple.getLong("field_i") == 20);
 
-      tuple = tuples.get(2);
-      assert(tuple.get("str_s").equals("b"));
-      assert(tuple.getLong("field_i") == 2);
+    tuple = tuples.get(2);
+    assert (tuple.get("str_s").equals("b"));
+    assert (tuple.getLong("field_i") == 2);
 
-      tuple = tuples.get(3);
-      assert(tuple.get("str_s").equals("c"));
-      assert(tuple.getLong("field_i") == 30);
+    tuple = tuples.get(3);
+    assert (tuple.get("str_s").equals("c"));
+    assert (tuple.getLong("field_i") == 30);
 
-      tuple = tuples.get(4);
-      assert(tuple.get("str_s").equals("c"));
-      assert(tuple.getLong("field_i") == 50);
+    tuple = tuples.get(4);
+    assert (tuple.get("str_s").equals("c"));
+    assert (tuple.getLong("field_i") == 50);
 
-      tuple = tuples.get(5);
-      assert(tuple.get("str_s").equals("c"));
-      assert(tuple.getLong("field_i") == 60);
+    tuple = tuples.get(5);
+    assert (tuple.get("str_s").equals("c"));
+    assert (tuple.getLong("field_i") == 60);
 
-
-      //reverse the sort
-      sParams = mapParams(CommonParams.QT, "/sql",
+    // reverse the sort
+    sParams = mapParams(CommonParams.QT, "/sql", "aggregationMode", "map_reduce",
         "stmt", "select distinct str_s, field_i from collection1 order by str_s desc, field_i desc");
 
-      solrStream = new SolrStream(jetty.url, sParams);
-      tuples = getTuples(solrStream);
+    solrStream = new SolrStream(jetty.url, sParams);
+    tuples = getTuples(solrStream);
 
-      assert(tuples.size() == 6);
+    assert (tuples.size() == 6);
 
-      tuple = tuples.get(0);
-      assert(tuple.get("str_s").equals("c"));
-      assert(tuple.getLong("field_i") == 60);
+    tuple = tuples.get(0);
+    assert (tuple.get("str_s").equals("c"));
+    assert (tuple.getLong("field_i") == 60);
 
-      tuple = tuples.get(1);
-      assert(tuple.get("str_s").equals("c"));
-      assert(tuple.getLong("field_i") == 50);
+    tuple = tuples.get(1);
+    assert (tuple.get("str_s").equals("c"));
+    assert (tuple.getLong("field_i") == 50);
 
+    tuple = tuples.get(2);
+    assert (tuple.get("str_s").equals("c"));
+    assert (tuple.getLong("field_i") == 30);
 
-      tuple = tuples.get(2);
-      assert(tuple.get("str_s").equals("c"));
-      assert(tuple.getLong("field_i") == 30);
+    tuple = tuples.get(3);
+    assert (tuple.get("str_s").equals("b"));
+    assert (tuple.getLong("field_i") == 2);
 
-      tuple = tuples.get(3);
-      assert(tuple.get("str_s").equals("b"));
-      assert(tuple.getLong("field_i") == 2);
+    tuple = tuples.get(4);
+    assert (tuple.get("str_s").equals("a"));
+    assert (tuple.getLong("field_i") == 20);
 
+    tuple = tuples.get(5);
+    assert (tuple.get("str_s").equals("a"));
+    assert (tuple.getLong("field_i") == 1);
 
-      tuple = tuples.get(4);
-      assert(tuple.get("str_s").equals("a"));
-      assert(tuple.getLong("field_i") == 20);
-
-      tuple = tuples.get(5);
-      assert(tuple.get("str_s").equals("a"));
-      assert(tuple.getLong("field_i") == 1);
-
-
-      sParams = mapParams(CommonParams.QT, "/sql",
+    sParams = mapParams(CommonParams.QT, "/sql", "aggregationMode", "map_reduce",
         "stmt", "select distinct str_s as myString, field_i from collection1 order by myString desc, field_i desc");
 
-      solrStream = new SolrStream(jetty.url, sParams);
-      tuples = getTuples(solrStream);
+    solrStream = new SolrStream(jetty.url, sParams);
+    tuples = getTuples(solrStream);
 
-      assert(tuples.size() == 6);
+    assert (tuples.size() == 6);
 
-      tuple = tuples.get(0);
-      assert(tuple.get("myString").equals("c"));
-      assert(tuple.getLong("field_i") == 60);
+    tuple = tuples.get(0);
+    assert (tuple.get("myString").equals("c"));
+    assert (tuple.getLong("field_i") == 60);
 
-      tuple = tuples.get(1);
-      assert(tuple.get("myString").equals("c"));
-      assert(tuple.getLong("field_i") == 50);
+    tuple = tuples.get(1);
+    assert (tuple.get("myString").equals("c"));
+    assert (tuple.getLong("field_i") == 50);
 
+    tuple = tuples.get(2);
+    assert (tuple.get("myString").equals("c"));
+    assert (tuple.getLong("field_i") == 30);
 
-      tuple = tuples.get(2);
-      assert(tuple.get("myString").equals("c"));
-      assert(tuple.getLong("field_i") == 30);
+    tuple = tuples.get(3);
+    assert (tuple.get("myString").equals("b"));
+    assert (tuple.getLong("field_i") == 2);
 
-      tuple = tuples.get(3);
-      assert(tuple.get("myString").equals("b"));
-      assert(tuple.getLong("field_i") == 2);
+    tuple = tuples.get(4);
+    assert (tuple.get("myString").equals("a"));
+    assert (tuple.getLong("field_i") == 20);
 
+    tuple = tuples.get(5);
+    assert (tuple.get("myString").equals("a"));
+    assert (tuple.getLong("field_i") == 1);
 
-      tuple = tuples.get(4);
-      assert(tuple.get("myString").equals("a"));
-      assert(tuple.getLong("field_i") == 20);
-
-      tuple = tuples.get(5);
-      assert(tuple.get("myString").equals("a"));
-      assert(tuple.getLong("field_i") == 1);
-
-
-      //test with limit
-      sParams = mapParams(CommonParams.QT, "/sql",
+    // test with limit
+    sParams = mapParams(CommonParams.QT, "/sql", "aggregationMode", "map_reduce",
         "stmt", "select distinct str_s, field_i from collection1 order by str_s desc, field_i desc limit 2");
 
-      solrStream = new SolrStream(jetty.url, sParams);
-      tuples = getTuples(solrStream);
+    solrStream = new SolrStream(jetty.url, sParams);
+    tuples = getTuples(solrStream);
 
-      assert(tuples.size() == 2);
+    assert (tuples.size() == 2);
 
-      tuple = tuples.get(0);
-      assert(tuple.get("str_s").equals("c"));
-      assert(tuple.getLong("field_i") == 60);
+    tuple = tuples.get(0);
+    assert (tuple.get("str_s").equals("c"));
+    assert (tuple.getLong("field_i") == 60);
 
-      tuple = tuples.get(1);
-      assert(tuple.get("str_s").equals("c"));
-      assert(tuple.getLong("field_i") == 50);
+    tuple = tuples.get(1);
+    assert (tuple.get("str_s").equals("c"));
+    assert (tuple.getLong("field_i") == 50);
 
-
-      // Test without a sort. Sort should be asc by default.
-
-      sParams = mapParams(CommonParams.QT, "/sql",
+    // Test without a sort. Sort should be asc by default.
+    sParams = mapParams(CommonParams.QT, "/sql", "aggregationMode", "map_reduce",
         "stmt", "select distinct str_s, field_i from collection1");
 
-      solrStream = new SolrStream(jetty.url, sParams);
-      tuples = getTuples(solrStream);
+    solrStream = new SolrStream(jetty.url, sParams);
+    tuples = getTuples(solrStream);
 
-      assert(tuples.size() == 6);
+    assert (tuples.size() == 6);
 
-      tuple = tuples.get(0);
-      assert(tuple.get("str_s").equals("a"));
-      assert(tuple.getLong("field_i") == 1);
+    tuple = tuples.get(0);
+    assert (tuple.get("str_s").equals("a"));
+    assert (tuple.getLong("field_i") == 1);
 
-      tuple = tuples.get(1);
-      assert(tuple.get("str_s").equals("a"));
-      assert(tuple.getLong("field_i") == 20);
+    tuple = tuples.get(1);
+    assert (tuple.get("str_s").equals("a"));
+    assert (tuple.getLong("field_i") == 20);
 
-      tuple = tuples.get(2);
-      assert(tuple.get("str_s").equals("b"));
-      assert(tuple.getLong("field_i") == 2);
+    tuple = tuples.get(2);
+    assert (tuple.get("str_s").equals("b"));
+    assert (tuple.getLong("field_i") == 2);
 
-      tuple = tuples.get(3);
-      assert(tuple.get("str_s").equals("c"));
-      assert(tuple.getLong("field_i") == 30);
+    tuple = tuples.get(3);
+    assert (tuple.get("str_s").equals("c"));
+    assert (tuple.getLong("field_i") == 30);
 
-      tuple = tuples.get(4);
-      assert(tuple.get("str_s").equals("c"));
-      assert(tuple.getLong("field_i") == 50);
+    tuple = tuples.get(4);
+    assert (tuple.get("str_s").equals("c"));
+    assert (tuple.getLong("field_i") == 50);
 
-      tuple = tuples.get(5);
-      assert(tuple.get("str_s").equals("c"));
-      assert(tuple.getLong("field_i") == 60);
+    tuple = tuples.get(5);
+    assert (tuple.get("str_s").equals("c"));
+    assert (tuple.getLong("field_i") == 60);
 
-      // Test with a predicate.
-
-      sParams = mapParams(CommonParams.QT, "/sql",
+    // Test with a predicate.
+    sParams = mapParams(CommonParams.QT, "/sql", "aggregationMode", "map_reduce",
         "stmt", "select distinct str_s, field_i from collection1 where str_s = 'a'");
 
-      solrStream = new SolrStream(jetty.url, sParams);
-      tuples = getTuples(solrStream);
+    solrStream = new SolrStream(jetty.url, sParams);
+    tuples = getTuples(solrStream);
 
-      assert(tuples.size() == 2);
+    assert (tuples.size() == 2);
 
-      tuple = tuples.get(0);
-      assert(tuple.get("str_s").equals("a"));
-      assert(tuple.getLong("field_i") == 1);
+    tuple = tuples.get(0);
+    assert (tuple.get("str_s").equals("a"));
+    assert (tuple.getLong("field_i") == 1);
 
-      tuple = tuples.get(1);
-      assert(tuple.get("str_s").equals("a"));
-      assert(tuple.getLong("field_i") == 20);
+    tuple = tuples.get(1);
+    assert (tuple.get("str_s").equals("a"));
+    assert (tuple.getLong("field_i") == 20);
 
-
-    } finally {
-      delete();
-    }
   }
 
   private void testParallelSelectDistinct() throws Exception {
-    try {
 
-      CloudJettyRunner jetty = this.cloudJettys.get(0);
+    CloudJettyRunner jetty = this.cloudJettys.get(0);
 
-      del("*:*");
+    del("*:*");
 
-      commit();
+    commit();
 
-      indexr("id", "1", "text", "XXXX XXXX", "str_s", "a", "field_i", "1");
-      indexr("id", "2", "text", "XXXX XXXX", "str_s", "b", "field_i", "2");
-      indexr("id", "3", "text", "XXXX XXXX", "str_s", "a", "field_i", "20");
-      indexr("id", "4", "text", "XXXX XXXX", "str_s", "b", "field_i", "2");
-      indexr("id", "5", "text", "XXXX XXXX", "str_s", "c", "field_i", "30");
-      indexr("id", "6", "text", "XXXX XXXX", "str_s", "c", "field_i", "30");
-      indexr("id", "7", "text", "XXXX XXXX", "str_s", "c", "field_i", "50");
-      indexr("id", "8", "text", "XXXX XXXX", "str_s", "c", "field_i", "60");
-      commit();
-      SolrParams sParams = mapParams(CommonParams.QT, "/sql", "numWorkers", "2",
+    indexr("id", "1", "text", "XXXX XXXX", "str_s", "a", "field_i", "1");
+    indexr("id", "2", "text", "XXXX XXXX", "str_s", "b", "field_i", "2");
+    indexr("id", "3", "text", "XXXX XXXX", "str_s", "a", "field_i", "20");
+    indexr("id", "4", "text", "XXXX XXXX", "str_s", "b", "field_i", "2");
+    indexr("id", "5", "text", "XXXX XXXX", "str_s", "c", "field_i", "30");
+    indexr("id", "6", "text", "XXXX XXXX", "str_s", "c", "field_i", "30");
+    indexr("id", "7", "text", "XXXX XXXX", "str_s", "c", "field_i", "50");
+    indexr("id", "8", "text", "XXXX XXXX", "str_s", "c", "field_i", "60");
+    commit();
+    SolrParams sParams = mapParams(CommonParams.QT, "/sql", "numWorkers", "2", "aggregationMode", "map_reduce",
         "stmt", "select distinct str_s, field_i from collection1 order by str_s asc, field_i asc");
 
-      SolrStream solrStream = new SolrStream(jetty.url, sParams);
-      List<Tuple> tuples = getTuples(solrStream);
+    SolrStream solrStream = new SolrStream(jetty.url, sParams);
+    List<Tuple> tuples = getTuples(solrStream);
 
-      assert(tuples.size() == 6);
+    assert (tuples.size() == 6);
 
-      Tuple tuple = null;
+    Tuple tuple;
 
-      tuple = tuples.get(0);
-      assert(tuple.get("str_s").equals("a"));
-      assert(tuple.getLong("field_i") == 1);
+    tuple = tuples.get(0);
+    assert (tuple.get("str_s").equals("a"));
+    assert (tuple.getLong("field_i") == 1);
 
-      tuple = tuples.get(1);
-      assert(tuple.get("str_s").equals("a"));
-      assert(tuple.getLong("field_i") == 20);
+    tuple = tuples.get(1);
+    assert (tuple.get("str_s").equals("a"));
+    assert (tuple.getLong("field_i") == 20);
 
-      tuple = tuples.get(2);
-      assert(tuple.get("str_s").equals("b"));
-      assert(tuple.getLong("field_i") == 2);
+    tuple = tuples.get(2);
+    assert (tuple.get("str_s").equals("b"));
+    assert (tuple.getLong("field_i") == 2);
 
-      tuple = tuples.get(3);
-      assert(tuple.get("str_s").equals("c"));
-      assert(tuple.getLong("field_i") == 30);
+    tuple = tuples.get(3);
+    assert (tuple.get("str_s").equals("c"));
+    assert (tuple.getLong("field_i") == 30);
 
-      tuple = tuples.get(4);
-      assert(tuple.get("str_s").equals("c"));
-      assert(tuple.getLong("field_i") == 50);
+    tuple = tuples.get(4);
+    assert (tuple.get("str_s").equals("c"));
+    assert (tuple.getLong("field_i") == 50);
 
-      tuple = tuples.get(5);
-      assert(tuple.get("str_s").equals("c"));
-      assert(tuple.getLong("field_i") == 60);
+    tuple = tuples.get(5);
+    assert (tuple.get("str_s").equals("c"));
+    assert (tuple.getLong("field_i") == 60);
 
-
-      //reverse the sort
-      sParams = mapParams(CommonParams.QT, "/sql", "numWorkers", "2",
+    // reverse the sort
+    sParams = mapParams(CommonParams.QT, "/sql", "numWorkers", "2", "aggregationMode", "map_reduce",
         "stmt", "select distinct str_s, field_i from collection1 order by str_s desc, field_i desc");
 
-      solrStream = new SolrStream(jetty.url, sParams);
-      tuples = getTuples(solrStream);
+    solrStream = new SolrStream(jetty.url, sParams);
+    tuples = getTuples(solrStream);
 
-      assert(tuples.size() == 6);
+    assert (tuples.size() == 6);
 
-      tuple = tuples.get(0);
-      assert(tuple.get("str_s").equals("c"));
-      assert(tuple.getLong("field_i") == 60);
+    tuple = tuples.get(0);
+    assert (tuple.get("str_s").equals("c"));
+    assert (tuple.getLong("field_i") == 60);
 
-      tuple = tuples.get(1);
-      assert(tuple.get("str_s").equals("c"));
-      assert(tuple.getLong("field_i") == 50);
+    tuple = tuples.get(1);
+    assert (tuple.get("str_s").equals("c"));
+    assert (tuple.getLong("field_i") == 50);
 
+    tuple = tuples.get(2);
+    assert (tuple.get("str_s").equals("c"));
+    assert (tuple.getLong("field_i") == 30);
 
-      tuple = tuples.get(2);
-      assert(tuple.get("str_s").equals("c"));
-      assert(tuple.getLong("field_i") == 30);
+    tuple = tuples.get(3);
+    assert (tuple.get("str_s").equals("b"));
+    assert (tuple.getLong("field_i") == 2);
 
-      tuple = tuples.get(3);
-      assert(tuple.get("str_s").equals("b"));
-      assert(tuple.getLong("field_i") == 2);
+    tuple = tuples.get(4);
+    assert (tuple.get("str_s").equals("a"));
+    assert (tuple.getLong("field_i") == 20);
 
+    tuple = tuples.get(5);
+    assert (tuple.get("str_s").equals("a"));
+    assert (tuple.getLong("field_i") == 1);
 
-      tuple = tuples.get(4);
-      assert(tuple.get("str_s").equals("a"));
-      assert(tuple.getLong("field_i") == 20);
-
-      tuple = tuples.get(5);
-      assert(tuple.get("str_s").equals("a"));
-      assert(tuple.getLong("field_i") == 1);
-
-
-      //reverse the sort
-      sParams = mapParams(CommonParams.QT, "/sql", "numWorkers", "2",
+    // reverse the sort
+    sParams = mapParams(CommonParams.QT, "/sql", "numWorkers", "2", "aggregationMode", "map_reduce",
         "stmt", "select distinct str_s as myString, field_i from collection1 order by myString desc, field_i desc");
 
-      solrStream = new SolrStream(jetty.url, sParams);
-      tuples = getTuples(solrStream);
+    solrStream = new SolrStream(jetty.url, sParams);
+    tuples = getTuples(solrStream);
 
-      assert(tuples.size() == 6);
+    assert (tuples.size() == 6);
 
-      tuple = tuples.get(0);
-      assert(tuple.get("myString").equals("c"));
-      assert(tuple.getLong("field_i") == 60);
+    tuple = tuples.get(0);
+    assert (tuple.get("myString").equals("c"));
+    assert (tuple.getLong("field_i") == 60);
 
-      tuple = tuples.get(1);
-      assert(tuple.get("myString").equals("c"));
-      assert(tuple.getLong("field_i") == 50);
+    tuple = tuples.get(1);
+    assert (tuple.get("myString").equals("c"));
+    assert (tuple.getLong("field_i") == 50);
 
+    tuple = tuples.get(2);
+    assert (tuple.get("myString").equals("c"));
+    assert (tuple.getLong("field_i") == 30);
 
-      tuple = tuples.get(2);
-      assert(tuple.get("myString").equals("c"));
-      assert(tuple.getLong("field_i") == 30);
+    tuple = tuples.get(3);
+    assert (tuple.get("myString").equals("b"));
+    assert (tuple.getLong("field_i") == 2);
 
-      tuple = tuples.get(3);
-      assert(tuple.get("myString").equals("b"));
-      assert(tuple.getLong("field_i") == 2);
+    tuple = tuples.get(4);
+    assert (tuple.get("myString").equals("a"));
+    assert (tuple.getLong("field_i") == 20);
 
+    tuple = tuples.get(5);
+    assert (tuple.get("myString").equals("a"));
+    assert (tuple.getLong("field_i") == 1);
 
-      tuple = tuples.get(4);
-      assert(tuple.get("myString").equals("a"));
-      assert(tuple.getLong("field_i") == 20);
-
-      tuple = tuples.get(5);
-      assert(tuple.get("myString").equals("a"));
-      assert(tuple.getLong("field_i") == 1);
-
-
-      //test with limit
-      sParams = mapParams(CommonParams.QT, "/sql", "numWorkers", "2",
+    // test with limit
+    sParams = mapParams(CommonParams.QT, "/sql", "numWorkers", "2", "aggregationMode", "map_reduce",
         "stmt", "select distinct str_s, field_i from collection1 order by str_s desc, field_i desc limit 2");
 
-      solrStream = new SolrStream(jetty.url, sParams);
-      tuples = getTuples(solrStream);
+    solrStream = new SolrStream(jetty.url, sParams);
+    tuples = getTuples(solrStream);
 
-      assert(tuples.size() == 2);
+    assert (tuples.size() == 2);
 
-      tuple = tuples.get(0);
-      assert(tuple.get("str_s").equals("c"));
-      assert(tuple.getLong("field_i") == 60);
+    tuple = tuples.get(0);
+    assert (tuple.get("str_s").equals("c"));
+    assert (tuple.getLong("field_i") == 60);
 
-      tuple = tuples.get(1);
-      assert(tuple.get("str_s").equals("c"));
-      assert(tuple.getLong("field_i") == 50);
+    tuple = tuples.get(1);
+    assert (tuple.get("str_s").equals("c"));
+    assert (tuple.getLong("field_i") == 50);
 
-
-      // Test without a sort. Sort should be asc by default.
-
-      sParams = mapParams(CommonParams.QT, "/sql", "numWorkers", "2",
+    // Test without a sort. Sort should be asc by default.
+    sParams = mapParams(CommonParams.QT, "/sql", "numWorkers", "2", "aggregationMode", "map_reduce",
         "stmt", "select distinct str_s, field_i from collection1");
 
-      solrStream = new SolrStream(jetty.url, sParams);
-      tuples = getTuples(solrStream);
+    solrStream = new SolrStream(jetty.url, sParams);
+    tuples = getTuples(solrStream);
 
-      assert(tuples.size() == 6);
+    assert (tuples.size() == 6);
 
-      tuple = tuples.get(0);
-      assert(tuple.get("str_s").equals("a"));
-      assert(tuple.getLong("field_i") == 1);
+    tuple = tuples.get(0);
+    assert (tuple.get("str_s").equals("a"));
+    assert (tuple.getLong("field_i") == 1);
 
-      tuple = tuples.get(1);
-      assert(tuple.get("str_s").equals("a"));
-      assert(tuple.getLong("field_i") == 20);
+    tuple = tuples.get(1);
+    assert (tuple.get("str_s").equals("a"));
+    assert (tuple.getLong("field_i") == 20);
 
-      tuple = tuples.get(2);
-      assert(tuple.get("str_s").equals("b"));
-      assert(tuple.getLong("field_i") == 2);
+    tuple = tuples.get(2);
+    assert (tuple.get("str_s").equals("b"));
+    assert (tuple.getLong("field_i") == 2);
 
-      tuple = tuples.get(3);
-      assert(tuple.get("str_s").equals("c"));
-      assert(tuple.getLong("field_i") == 30);
+    tuple = tuples.get(3);
+    assert (tuple.get("str_s").equals("c"));
+    assert (tuple.getLong("field_i") == 30);
 
-      tuple = tuples.get(4);
-      assert(tuple.get("str_s").equals("c"));
-      assert(tuple.getLong("field_i") == 50);
+    tuple = tuples.get(4);
+    assert (tuple.get("str_s").equals("c"));
+    assert (tuple.getLong("field_i") == 50);
 
-      tuple = tuples.get(5);
-      assert(tuple.get("str_s").equals("c"));
-      assert(tuple.getLong("field_i") == 60);
+    tuple = tuples.get(5);
+    assert (tuple.get("str_s").equals("c"));
+    assert (tuple.getLong("field_i") == 60);
 
-      // Test with a predicate.
-
-      sParams = mapParams(CommonParams.QT, "/sql", "numWorkers", "2",
+    // Test with a predicate.
+    sParams = mapParams(CommonParams.QT, "/sql", "numWorkers", "2", "aggregationMode", "map_reduce",
         "stmt", "select distinct str_s, field_i from collection1 where str_s = 'a'");
 
-      solrStream = new SolrStream(jetty.url, sParams);
-      tuples = getTuples(solrStream);
+    solrStream = new SolrStream(jetty.url, sParams);
+    tuples = getTuples(solrStream);
 
-      assert(tuples.size() == 2);
+    assert (tuples.size() == 2);
 
-      tuple = tuples.get(0);
-      assert(tuple.get("str_s").equals("a"));
-      assert(tuple.getLong("field_i") == 1);
+    tuple = tuples.get(0);
+    assert (tuple.get("str_s").equals("a"));
+    assert (tuple.getLong("field_i") == 1);
 
-      tuple = tuples.get(1);
-      assert(tuple.get("str_s").equals("a"));
-      assert(tuple.getLong("field_i") == 20);
+    tuple = tuples.get(1);
+    assert (tuple.get("str_s").equals("a"));
+    assert (tuple.getLong("field_i") == 20);
 
-    } finally {
-      delete();
-    }
   }
-
-
 
   private void testBasicGroupingFacets() throws Exception {
-    try {
 
-      CloudJettyRunner jetty = this.cloudJettys.get(0);
+    CloudJettyRunner jetty = this.cloudJettys.get(0);
 
-      del("*:*");
+    del("*:*");
 
-      commit();
+    commit();
 
-      indexr("id", "1", "text", "XXXX XXXX", "str_s", "a", "field_i", "7");
-      indexr("id", "2", "text", "XXXX XXXX", "str_s", "b", "field_i", "8");
-      indexr("id", "3", "text", "XXXX XXXX", "str_s", "a", "field_i", "20");
-      indexr("id", "4", "text", "XXXX XXXX", "str_s", "b", "field_i", "11");
-      indexr("id", "5", "text", "XXXX XXXX", "str_s", "c", "field_i", "30");
-      indexr("id", "6", "text", "XXXX XXXX", "str_s", "c", "field_i", "40");
-      indexr("id", "7", "text", "XXXX XXXX", "str_s", "c", "field_i", "50");
-      indexr("id", "8", "text", "XXXX XXXX", "str_s", "c", "field_i", "60");
-      commit();
-      SolrParams sParams = mapParams(CommonParams.QT, "/sql", "aggregationMode", "facet",
-      "stmt", "select 'str_s', 'count(*)', sum(field_i), min(field_i), max(field_i), avg(field_i) from collection1 where text='XXXX' group by 'str_s' order by 'sum(field_i)' asc limit 2");
+    indexr("id", "1", "text", "XXXX XXXX", "str_s", "a", "field_i", "7");
+    indexr("id", "2", "text", "XXXX XXXX", "str_s", "b", "field_i", "8");
+    indexr("id", "3", "text", "XXXX XXXX", "str_s", "a", "field_i", "20");
+    indexr("id", "4", "text", "XXXX XXXX", "str_s", "b", "field_i", "11");
+    indexr("id", "5", "text", "XXXX XXXX", "str_s", "c", "field_i", "30");
+    indexr("id", "6", "text", "XXXX XXXX", "str_s", "c", "field_i", "40");
+    indexr("id", "7", "text", "XXXX XXXX", "str_s", "c", "field_i", "50");
+    indexr("id", "8", "text", "XXXX XXXX", "str_s", "c", "field_i", "60");
+    indexr("id", "9", "text", "XXXX XXXY", "str_s", "d", "field_i", "70");
+    commit();
 
-      SolrStream solrStream = new SolrStream(jetty.url, sParams);
-      List<Tuple> tuples = getTuples(solrStream);
+    SolrParams sParams = mapParams(CommonParams.QT, "/sql", "aggregationMode", "facet",
+        "stmt", "select str_s, count(*), sum(field_i), min(field_i), max(field_i), " +
+            "cast(avg(1.0 * field_i) as float) from collection1 where text='XXXX' group by str_s " +
+            "order by sum(field_i) asc limit 2");
 
-      //Only two results because of the limit.
-      assert(tuples.size() == 2);
+    SolrStream solrStream = new SolrStream(jetty.url, sParams);
+    List<Tuple> tuples = getTuples(solrStream);
 
-      Tuple tuple = null;
+    // Only two results because of the limit.
+    assert (tuples.size() == 2);
 
-      tuple = tuples.get(0);
-      assert(tuple.get("str_s").equals("b"));
-      assert(tuple.getDouble("count(*)") == 2);
-      assert(tuple.getDouble("sum(field_i)") == 19);
-      assert(tuple.getDouble("min(field_i)") == 8);
-      assert(tuple.getDouble("max(field_i)") == 11);
-      assert(tuple.getDouble("avg(field_i)") == 9.5D);
+    Tuple tuple;
 
-      tuple = tuples.get(1);
-      assert(tuple.get("str_s").equals("a"));
-      assert(tuple.getDouble("count(*)") == 2);
-      assert(tuple.getDouble("sum(field_i)") == 27);
-      assert(tuple.getDouble("min(field_i)") == 7);
-      assert(tuple.getDouble("max(field_i)") == 20);
-      assert(tuple.getDouble("avg(field_i)") == 13.5D);
+    tuple = tuples.get(0);
+    assert (tuple.get("str_s").equals("b"));
+    assert (tuple.getDouble("EXPR$1") == 2); // count(*)
+    assert (tuple.getDouble("EXPR$2") == 19); // sum(field_i)
+    assert (tuple.getDouble("EXPR$3") == 8); // min(field_i)
+    assert (tuple.getDouble("EXPR$4") == 11); // max(field_i)
+    assert (tuple.getDouble("EXPR$5") == 9.5D); // avg(field_i)
 
-      sParams = mapParams(CommonParams.QT, "/sql", "aggregationMode", "facet",
-        "stmt", "select str_s, count(*), sum(field_i), min(field_i), max(field_i), avg(field_i) from collection1 where (text='XXXX' AND NOT text='XXXX XXX') group by str_s order by str_s desc");
+    tuple = tuples.get(1);
+    assert (tuple.get("str_s").equals("a"));
+    assert (tuple.getDouble("EXPR$1") == 2); // count(*)
+    assert (tuple.getDouble("EXPR$2") == 27); // sum(field_i)
+    assert (tuple.getDouble("EXPR$3") == 7); // min(field_i)
+    assert (tuple.getDouble("EXPR$4") == 20); // max(field_i)
+    assert (tuple.getDouble("EXPR$5") == 13.5D); // avg(field_i)
 
-      solrStream = new SolrStream(jetty.url, sParams);
-      tuples = getTuples(solrStream);
+    sParams = mapParams(CommonParams.QT, "/sql", "aggregationMode", "facet",
+        "stmt", "select str_s, count(*), sum(field_i), min(field_i), max(field_i), " +
+            "avg(field_i) from collection1 where text='XXXX' group by str_s " +
+            "order by sum(field_i) asc limit 2");
 
-      //The sort by and order by match and no limit is applied. All the Tuples should be returned in
-      //this scenario.
+    solrStream = new SolrStream(jetty.url, sParams);
+    tuples = getTuples(solrStream);
 
-      assert(tuples.size() == 3);
+    // Only two results because of the limit.
+    assert (tuples.size() == 2);
 
-      tuple = tuples.get(0);
-      assert(tuple.get("str_s").equals("c"));
-      assert(tuple.getDouble("count(*)") == 4);
-      assert(tuple.getDouble("sum(field_i)") == 180);
-      assert(tuple.getDouble("min(field_i)") == 30);
-      assert(tuple.getDouble("max(field_i)") == 60);
-      assert(tuple.getDouble("avg(field_i)") == 45);
+    tuple = tuples.get(0);
+    assert (tuple.get("str_s").equals("b"));
+    assert (tuple.getDouble("EXPR$1") == 2); // count(*)
+    assert (tuple.getDouble("EXPR$2") == 19); // sum(field_i)
+    assert (tuple.getDouble("EXPR$3") == 8); // min(field_i)
+    assert (tuple.getDouble("EXPR$4") == 11); // max(field_i)
+    assert (tuple.getDouble("EXPR$5") == 10); // avg(field_i)
 
-      tuple = tuples.get(1);
-      assert(tuple.get("str_s").equals("b"));
-      assert(tuple.getDouble("count(*)") == 2);
-      assert(tuple.getDouble("sum(field_i)") == 19);
-      assert(tuple.getDouble("min(field_i)") == 8);
-      assert(tuple.getDouble("max(field_i)") == 11);
-      assert(tuple.getDouble("avg(field_i)") == 9.5D);
+    tuple = tuples.get(1);
+    assert (tuple.get("str_s").equals("a"));
+    assert (tuple.getDouble("EXPR$1") == 2); // count(*)
+    assert (tuple.getDouble("EXPR$2") == 27); // sum(field_i)
+    assert (tuple.getDouble("EXPR$3") == 7); // min(field_i)
+    assert (tuple.getDouble("EXPR$4") == 20); // max(field_i)
+    assert (tuple.getDouble("EXPR$5") == 14); // avg(field_i)
 
-      tuple = tuples.get(2);
-      assert(tuple.get("str_s").equals("a"));
-      assert(tuple.getDouble("count(*)") == 2);
-      assert(tuple.getDouble("sum(field_i)") == 27);
-      assert(tuple.getDouble("min(field_i)") == 7);
-      assert(tuple.getDouble("max(field_i)") == 20);
-      assert(tuple.getDouble("avg(field_i)") == 13.5D);
+    sParams = mapParams(CommonParams.QT, "/sql", "aggregationMode", "facet",
+        "stmt", "select str_s, count(*), sum(field_i), min(field_i), max(field_i), "
+            + "cast(avg(1.0 * field_i) as float) from collection1 where (text='XXXX' AND NOT (text='XXXY')) "
+            + "group by str_s order by str_s desc");
 
-      sParams = mapParams(CommonParams.QT, "/sql", "aggregationMode", "facet",
-        "stmt", "select str_s as myString, count(*), sum(field_i) as sum, min(field_i), max(field_i), avg(field_i) from collection1 where (text='XXXX' AND NOT text='XXXX XXX') group by myString order by myString desc");
+    solrStream = new SolrStream(jetty.url, sParams);
+    tuples = getTuples(solrStream);
 
-      solrStream = new SolrStream(jetty.url, sParams);
-      tuples = getTuples(solrStream);
+    // The sort by and order by match and no limit is applied. All the Tuples should be returned in
+    // this scenario.
 
-      //The sort by and order by match and no limit is applied. All the Tuples should be returned in
-      //this scenario.
+    assert (tuples.size() == 3);
 
-      assert(tuples.size() == 3);
+    tuple = tuples.get(0);
+    assert (tuple.get("str_s").equals("c"));
+    assert (tuple.getDouble("EXPR$1") == 4); // count(*)
+    assert (tuple.getDouble("EXPR$2") == 180); // sum(field_i)
+    assert (tuple.getDouble("EXPR$3") == 30); // min(field_i)
+    assert (tuple.getDouble("EXPR$4") == 60); // max(field_i)
+    assert (tuple.getDouble("EXPR$5") == 45); // avg(field_i)
 
-      tuple = tuples.get(0);
-      assert(tuple.get("myString").equals("c"));
-      assert(tuple.getDouble("count(*)") == 4);
-      assert(tuple.getDouble("sum") == 180);
-      assert(tuple.getDouble("min(field_i)") == 30);
-      assert(tuple.getDouble("max(field_i)") == 60);
-      assert(tuple.getDouble("avg(field_i)") == 45);
+    tuple = tuples.get(1);
+    assert (tuple.get("str_s").equals("b"));
+    assert (tuple.getDouble("EXPR$1") == 2); // count(*)
+    assert (tuple.getDouble("EXPR$2") == 19); // sum(field_i)
+    assert (tuple.getDouble("EXPR$3") == 8); // min(field_i)
+    assert (tuple.getDouble("EXPR$4") == 11); // max(field_i)
+    assert (tuple.getDouble("EXPR$5") == 9.5D); // avg(field_i)
 
-      tuple = tuples.get(1);
-      assert(tuple.get("myString").equals("b"));
-      assert(tuple.getDouble("count(*)") == 2);
-      assert(tuple.getDouble("sum") == 19);
-      assert(tuple.getDouble("min(field_i)") == 8);
-      assert(tuple.getDouble("max(field_i)") == 11);
-      assert(tuple.getDouble("avg(field_i)") == 9.5D);
+    tuple = tuples.get(2);
+    assert (tuple.get("str_s").equals("a"));
+    assert (tuple.getDouble("EXPR$1") == 2); // count(*)
+    assert (tuple.getDouble("EXPR$2") == 27); // sum(field_i)
+    assert (tuple.getDouble("EXPR$3") == 7); // min(field_i)
+    assert (tuple.getDouble("EXPR$4") == 20); // max(field_i)
+    assert (tuple.getDouble("EXPR$5") == 13.5D); // avg(field_i)
 
-      tuple = tuples.get(2);
-      assert(tuple.get("myString").equals("a"));
-      assert(tuple.getDouble("count(*)") == 2);
-      assert(tuple.getDouble("sum") == 27);
-      assert(tuple.getDouble("min(field_i)") == 7);
-      assert(tuple.getDouble("max(field_i)") == 20);
-      assert(tuple.getDouble("avg(field_i)") == 13.5D);
+    sParams = mapParams(CommonParams.QT, "/sql", "aggregationMode", "facet",
+        "stmt", "select str_s as myString, count(*), sum(field_i) as mySum, min(field_i), max(field_i), "
+            + "cast(avg(1.0 * field_i) as float) from collection1 where (text='XXXX' AND NOT (text='XXXY')) "
+            + "group by str_s order by myString desc");
 
+    solrStream = new SolrStream(jetty.url, sParams);
+    tuples = getTuples(solrStream);
 
+    // The sort by and order by match and no limit is applied. All the Tuples should be returned in
+    // this scenario.
 
+    assert (tuples.size() == 3);
 
-      sParams = mapParams(CommonParams.QT, "/sql", "aggregationMode", "facet",
-        "stmt", "select str_s, count(*), sum(field_i), min(field_i), max(field_i), avg(field_i) from collection1 where text='XXXX' group by str_s having 'sum(field_i)' = 19");
+    tuple = tuples.get(0);
+    assert (tuple.get("myString").equals("c"));
+    assert (tuple.getDouble("EXPR$1") == 4); // count(*)
+    assert (tuple.getDouble("mySum") == 180);
+    assert (tuple.getDouble("EXPR$3") == 30); // min(field_i)
+    assert (tuple.getDouble("EXPR$4") == 60); // max(field_i)
+    assert (tuple.getDouble("EXPR$5") == 45); // avg(field_i)
 
-      solrStream = new SolrStream(jetty.url, sParams);
-      tuples = getTuples(solrStream);
+    tuple = tuples.get(1);
+    assert (tuple.get("myString").equals("b"));
+    assert (tuple.getDouble("EXPR$1") == 2); // count(*)
+    assert (tuple.getDouble("mySum") == 19);
+    assert (tuple.getDouble("EXPR$3") == 8); // min(field_i)
+    assert (tuple.getDouble("EXPR$4") == 11); // max(field_i)
+    assert (tuple.getDouble("EXPR$5") == 9.5D); // avg(field_i)
 
-      assert(tuples.size() == 1);
+    tuple = tuples.get(2);
+    assert (tuple.get("myString").equals("a"));
+    assert (tuple.getDouble("EXPR$1") == 2); // count(*)
+    assert (tuple.getDouble("mySum") == 27);
+    assert (tuple.getDouble("EXPR$3") == 7); // min(field_i)
+    assert (tuple.getDouble("EXPR$4") == 20); // max(field_i)
+    assert (tuple.getDouble("EXPR$5") == 13.5D); // avg(field_i)
 
-      tuple = tuples.get(0);
-      assert(tuple.get("str_s").equals("b"));
-      assert(tuple.getDouble("count(*)") == 2);
-      assert(tuple.getDouble("sum(field_i)") == 19);
-      assert(tuple.getDouble("min(field_i)") == 8);
-      assert(tuple.getDouble("max(field_i)") == 11);
-      assert(tuple.getDouble("avg(field_i)") == 9.5D);
+    sParams = mapParams(CommonParams.QT, "/sql", "aggregationMode", "facet",
+        "stmt", "select str_s, count(*), sum(field_i), min(field_i), max(field_i), " +
+            "cast(avg(1.0 * field_i) as float) from collection1 where text='XXXX' group by str_s having sum(field_i) = 19");
 
-      sParams = mapParams(CommonParams.QT, "/sql", "aggregationMode", "facet",
-        "stmt", "select str_s, count(*), sum(field_i), min(field_i), max(field_i), avg(field_i) from collection1 where text='XXXX' group by str_s having (('sum(field_i)' = 19) AND (min(field_i) = 8))");
+    solrStream = new SolrStream(jetty.url, sParams);
+    tuples = getTuples(solrStream);
 
-      solrStream = new SolrStream(jetty.url, sParams);
-      tuples = getTuples(solrStream);
+    assert (tuples.size() == 1);
 
-      //Only two results because of the limit.
-      assert(tuples.size() == 1);
+    tuple = tuples.get(0);
+    assert (tuple.get("str_s").equals("b"));
+    assert (tuple.getDouble("EXPR$1") == 2); // count(*)
+    assert (tuple.getDouble("EXPR$2") == 19); // sum(field_i)
+    assert (tuple.getDouble("EXPR$3") == 8); // min(field_i)
+    assert (tuple.getDouble("EXPR$4") == 11); // max(field_i)
+    assert (tuple.getDouble("EXPR$5") == 9.5D); // avg(field_i)
 
-      tuple = tuples.get(0);
-      assert(tuple.get("str_s").equals("b"));
-      assert(tuple.getDouble("count(*)") == 2);
-      assert(tuple.getDouble("sum(field_i)") == 19);
-      assert(tuple.getDouble("min(field_i)") == 8);
-      assert(tuple.getDouble("max(field_i)") == 11);
-      assert(tuple.getDouble("avg(field_i)") == 9.5D);
+    sParams = mapParams(CommonParams.QT, "/sql", "aggregationMode", "facet",
+        "stmt", "select str_s, count(*), sum(field_i), min(field_i), max(field_i), " +
+            "cast(avg(1.0 * field_i) as float) from collection1 where text='XXXX' group by str_s " +
+            "having ((sum(field_i) = 19) AND (min(field_i) = 8))");
 
+    solrStream = new SolrStream(jetty.url, sParams);
+    tuples = getTuples(solrStream);
 
-      sParams = mapParams(CommonParams.QT, "/sql", "aggregationMode", "facet",
-        "stmt", "select str_s myString, count(*), sum(field_i) as sum, min(field_i), max(field_i), avg(field_i) from collection1 where text='XXXX' group by myString having ((sum = 19) AND (min(field_i) = 8))");
+    assert (tuples.size() == 1);
 
-      solrStream = new SolrStream(jetty.url, sParams);
-      tuples = getTuples(solrStream);
+    tuple = tuples.get(0);
+    assert (tuple.get("str_s").equals("b"));
+    assert (tuple.getDouble("EXPR$1") == 2); // count(*)
+    assert (tuple.getDouble("EXPR$2") == 19); // sum(field_i)
+    assert (tuple.getDouble("EXPR$3") == 8); // min(field_i)
+    assert (tuple.getDouble("EXPR$4") == 11); // max(field_i)
+    assert (tuple.getDouble("EXPR$5") == 9.5D); // avg(field_i)
 
-      //Only two results because of the limit.
-      assert(tuples.size() == 1);
+    sParams = mapParams(CommonParams.QT, "/sql", "aggregationMode", "facet",
+        "stmt", "select str_s, count(*), sum(field_i) as mySum, min(field_i), max(field_i), " +
+            "cast(avg(1.0 * field_i) as float) from collection1 where text='XXXX' group by str_s " +
+            "having ((sum(field_i) = 19) AND (min(field_i) = 8))");
 
-      tuple = tuples.get(0);
-      assert(tuple.get("myString").equals("b"));
-      assert(tuple.getDouble("count(*)") == 2);
-      assert(tuple.getDouble("sum") == 19);
-      assert(tuple.getDouble("min(field_i)") == 8);
-      assert(tuple.getDouble("max(field_i)") == 11);
-      assert(tuple.getDouble("avg(field_i)") == 9.5D);
+    solrStream = new SolrStream(jetty.url, sParams);
+    tuples = getTuples(solrStream);
 
-      sParams = mapParams(CommonParams.QT, "/sql", "aggregationMode", "facet",
-        "stmt", "select str_s, count(*), sum(field_i), min(field_i), max(field_i), avg(field_i) from collection1 where text='XXXX' group by str_s having ((sum(field_i) = 19) AND (min(field_i) = 100))");
+    assert (tuples.size() == 1);
 
-      solrStream = new SolrStream(jetty.url, sParams);
-      tuples = getTuples(solrStream);
+    tuple = tuples.get(0);
+    assert (tuple.get("str_s").equals("b"));
+    assert (tuple.getDouble("EXPR$1") == 2); // count(*)
+    assert (tuple.getDouble("mySum") == 19);
+    assert (tuple.getDouble("EXPR$3") == 8); // min(field_i)
+    assert (tuple.getDouble("EXPR$4") == 11); // max(field_i)
+    assert (tuple.getDouble("EXPR$5") == 9.5D); // avg(field_i)
 
-      assert(tuples.size() == 0);
+    sParams = mapParams(CommonParams.QT, "/sql", "aggregationMode", "facet",
+        "stmt", "select str_s, count(*), sum(field_i), min(field_i), max(field_i), " +
+            "cast(avg(1.0 * field_i) as float) from collection1 where text='XXXX' group by str_s " +
+            "having ((sum(field_i) = 19) AND (min(field_i) = 100))");
 
+    solrStream = new SolrStream(jetty.url, sParams);
+    tuples = getTuples(solrStream);
 
-    } finally {
-      delete();
-    }
+    assert (tuples.size() == 0);
+
   }
-
-
-
-
 
   private void testParallelBasicGrouping() throws Exception {
-    try {
 
-      CloudJettyRunner jetty = this.cloudJettys.get(0);
+    CloudJettyRunner jetty = this.cloudJettys.get(0);
 
-      del("*:*");
+    del("*:*");
 
-      commit();
+    commit();
 
-      indexr("id", "1", "text", "XXXX XXXX", "str_s", "a", "field_i", "7");
-      indexr("id", "2", "text", "XXXX XXXX", "str_s", "b", "field_i", "8");
-      indexr("id", "3", "text", "XXXX XXXX", "str_s", "a", "field_i", "20");
-      indexr("id", "4", "text", "XXXX XXXX", "str_s", "b", "field_i", "11");
-      indexr("id", "5", "text", "XXXX XXXX", "str_s", "c", "field_i", "30");
-      indexr("id", "6", "text", "XXXX XXXX", "str_s", "c", "field_i", "40");
-      indexr("id", "7", "text", "XXXX XXXX", "str_s", "c", "field_i", "50");
-      indexr("id", "8", "text", "XXXX XXXX", "str_s", "c", "field_i", "60");
-      commit();
-      SolrParams sParams = mapParams(CommonParams.QT, "/sql", "numWorkers", "2",
-        "stmt", "select str_s, count(*), sum(field_i), min(field_i), max(field_i), avg(field_i) from collection1 where text='XXXX' group by str_s order by sum(field_i) asc limit 2");
+    indexr("id", "1", "text", "XXXX XXXX", "str_s", "a", "field_i", "7");
+    indexr("id", "2", "text", "XXXX XXXX", "str_s", "b", "field_i", "8");
+    indexr("id", "3", "text", "XXXX XXXX", "str_s", "a", "field_i", "20");
+    indexr("id", "4", "text", "XXXX XXXX", "str_s", "b", "field_i", "11");
+    indexr("id", "5", "text", "XXXX XXXX", "str_s", "c", "field_i", "30");
+    indexr("id", "6", "text", "XXXX XXXX", "str_s", "c", "field_i", "40");
+    indexr("id", "7", "text", "XXXX XXXX", "str_s", "c", "field_i", "50");
+    indexr("id", "8", "text", "XXXX XXXX", "str_s", "c", "field_i", "60");
+    commit();
 
-      SolrStream solrStream = new SolrStream(jetty.url, sParams);
-      List<Tuple> tuples = getTuples(solrStream);
+    SolrParams sParams = mapParams(CommonParams.QT, "/sql", "numWorkers", "2", "aggregationMode", "map_reduce",
+        "stmt", "select str_s, count(*), sum(field_i), min(field_i), max(field_i), " +
+            "avg(field_i) from collection1 where text='XXXX' group by str_s " +
+            "order by sum(field_i) asc limit 2");
 
-      //Only two results because of the limit.
-      assert(tuples.size() == 2);
+    SolrStream solrStream = new SolrStream(jetty.url, sParams);
+    List<Tuple> tuples = getTuples(solrStream);
 
-      Tuple tuple = null;
+    // Only two results because of the limit.
+    assert (tuples.size() == 2);
 
-      tuple = tuples.get(0);
-      assert(tuple.get("str_s").equals("b"));
-      assert(tuple.getDouble("count(*)") == 2);
-      assert(tuple.getDouble("sum(field_i)") == 19);
-      assert(tuple.getDouble("min(field_i)") == 8);
-      assert(tuple.getDouble("max(field_i)") == 11);
-      assert(tuple.getDouble("avg(field_i)") == 9.5D);
+    Tuple tuple;
 
-      tuple = tuples.get(1);
-      assert(tuple.get("str_s").equals("a"));
-      assert(tuple.getDouble("count(*)") == 2);
-      assert(tuple.getDouble("sum(field_i)") == 27);
-      assert(tuple.getDouble("min(field_i)") == 7);
-      assert(tuple.getDouble("max(field_i)") == 20);
-      assert(tuple.getDouble("avg(field_i)") == 13.5D);
+    tuple = tuples.get(0);
+    assert (tuple.get("str_s").equals("b"));
+    assert (tuple.getDouble("EXPR$1") == 2); // count(*)
+    assert (tuple.getDouble("EXPR$2") == 19); // sum(field_i)
+    assert (tuple.getDouble("EXPR$3") == 8); // min(field_i)
+    assert (tuple.getDouble("EXPR$4") == 11); // max(field_i)
+    assert (tuple.getDouble("EXPR$5") == 10); // avg(field_i)
 
-      sParams = mapParams(CommonParams.QT, "/sql", "numWorkers", "2",
-        "stmt", "select str_s, count(*), sum(field_i) as sum, min(field_i), max(field_i), avg(field_i) from collection1 where text='XXXX' group by str_s order by sum asc limit 2");
+    tuple = tuples.get(1);
+    assert (tuple.get("str_s").equals("a"));
+    assert (tuple.getDouble("EXPR$1") == 2); // count(*)
+    assert (tuple.getDouble("EXPR$2") == 27); // sum(field_i)
+    assert (tuple.getDouble("EXPR$3") == 7); // min(field_i)
+    assert (tuple.getDouble("EXPR$4") == 20); // max(field_i)
+    assert (tuple.getDouble("EXPR$5") == 14); // avg(field_i)
 
-      solrStream = new SolrStream(jetty.url, sParams);
-      tuples = getTuples(solrStream);
+    sParams = mapParams(CommonParams.QT, "/sql", "numWorkers", "2", "aggregationMode", "map_reduce",
+        "stmt", "select str_s, count(*), sum(field_i), min(field_i), max(field_i), " +
+            "cast(avg(1.0 * field_i) as float) from collection1 where text='XXXX' group by str_s " +
+            "order by sum(field_i) asc limit 2");
 
-      //Only two results because of the limit.
-      assert(tuples.size() == 2);
+    solrStream = new SolrStream(jetty.url, sParams);
+    tuples = getTuples(solrStream);
 
-      tuple = tuples.get(0);
-      assert(tuple.get("str_s").equals("b"));
-      assert(tuple.getDouble("count(*)") == 2);
-      assert(tuple.getDouble("sum") == 19);
-      assert(tuple.getDouble("min(field_i)") == 8);
-      assert(tuple.getDouble("max(field_i)") == 11);
-      assert(tuple.getDouble("avg(field_i)") == 9.5D);
+    // Only two results because of the limit.
+    assert (tuples.size() == 2);
 
-      tuple = tuples.get(1);
-      assert(tuple.get("str_s").equals("a"));
-      assert(tuple.getDouble("count(*)") == 2);
-      assert(tuple.getDouble("sum") == 27);
-      assert(tuple.getDouble("min(field_i)") == 7);
-      assert(tuple.getDouble("max(field_i)") == 20);
-      assert(tuple.getDouble("avg(field_i)") == 13.5D);
+    tuple = tuples.get(0);
+    assert (tuple.get("str_s").equals("b"));
+    assert (tuple.getDouble("EXPR$1") == 2); // count(*)
+    assert (tuple.getDouble("EXPR$2") == 19); // sum(field_i)
+    assert (tuple.getDouble("EXPR$3") == 8); // min(field_i)
+    assert (tuple.getDouble("EXPR$4") == 11); // max(field_i)
+    assert (tuple.getDouble("EXPR$5") == 9.5); // avg(field_i)
 
+    tuple = tuples.get(1);
+    assert (tuple.get("str_s").equals("a"));
+    assert (tuple.getDouble("EXPR$1") == 2); // count(*)
+    assert (tuple.getDouble("EXPR$2") == 27); // sum(field_i)
+    assert (tuple.getDouble("EXPR$3") == 7); // min(field_i)
+    assert (tuple.getDouble("EXPR$4") == 20); // max(field_i)
+    assert (tuple.getDouble("EXPR$5") == 13.5); // avg(field_i)
 
-      sParams = mapParams(CommonParams.QT, "/sql", "numWorkers", "2",
-        "stmt", "select str_s, count(*), sum(field_i), min(field_i), max(field_i), avg(field_i) from collection1 where text='XXXX' group by str_s order by str_s desc");
+    sParams = mapParams(CommonParams.QT, "/sql", "numWorkers", "2", "aggregationMode", "map_reduce",
+        "stmt", "select str_s, count(*), sum(field_i) as mySum, min(field_i), max(field_i), " +
+            "avg(field_i) from collection1 where text='XXXX' group by str_s order by mySum asc limit 2");
 
-      solrStream = new SolrStream(jetty.url, sParams);
-      tuples = getTuples(solrStream);
+    solrStream = new SolrStream(jetty.url, sParams);
+    tuples = getTuples(solrStream);
 
-      //The sort by and order by match and no limit is applied. All the Tuples should be returned in
-      //this scenario.
+    // Only two results because of the limit.
+    assert (tuples.size() == 2);
 
-      assert(tuples.size() == 3);
+    tuple = tuples.get(0);
+    assert (tuple.get("str_s").equals("b"));
+    assert (tuple.getDouble("EXPR$1") == 2); // count(*)
+    assert (tuple.getDouble("mySum") == 19);
+    assert (tuple.getDouble("EXPR$3") == 8); // min(field_i)
+    assert (tuple.getDouble("EXPR$4") == 11); // max(field_i)
+    assert (tuple.getDouble("EXPR$5") == 10); // avg(field_i)
 
-      tuple = tuples.get(0);
-      assert(tuple.get("str_s").equals("c"));
-      assert(tuple.getDouble("count(*)") == 4);
-      assert(tuple.getDouble("sum(field_i)") == 180);
-      assert(tuple.getDouble("min(field_i)") == 30);
-      assert(tuple.getDouble("max(field_i)") == 60);
-      assert(tuple.getDouble("avg(field_i)") == 45);
+    tuple = tuples.get(1);
+    assert (tuple.get("str_s").equals("a"));
+    assert (tuple.getDouble("EXPR$1") == 2); // count(*)
+    assert (tuple.getDouble("mySum") == 27);
+    assert (tuple.getDouble("EXPR$3") == 7); // min(field_i)
+    assert (tuple.getDouble("EXPR$4") == 20); // max(field_i)
+    assert (tuple.getDouble("EXPR$5") == 14); // avg(field_i)
 
-      tuple = tuples.get(1);
-      assert(tuple.get("str_s").equals("b"));
-      assert(tuple.getDouble("count(*)") == 2);
-      assert(tuple.getDouble("sum(field_i)") == 19);
-      assert(tuple.getDouble("min(field_i)") == 8);
-      assert(tuple.getDouble("max(field_i)") == 11);
-      assert(tuple.getDouble("avg(field_i)") == 9.5D);
+    sParams = mapParams(CommonParams.QT, "/sql", "numWorkers", "2", "aggregationMode", "map_reduce",
+        "stmt", "select str_s, count(*), sum(field_i), min(field_i), max(field_i), " +
+            "avg(field_i) from collection1 where text='XXXX' group by str_s order by str_s desc");
 
-      tuple = tuples.get(2);
-      assert(tuple.get("str_s").equals("a"));
-      assert(tuple.getDouble("count(*)") == 2);
-      assert(tuple.getDouble("sum(field_i)") == 27);
-      assert(tuple.getDouble("min(field_i)") == 7);
-      assert(tuple.getDouble("max(field_i)") == 20);
-      assert(tuple.getDouble("avg(field_i)") == 13.5D);
+    solrStream = new SolrStream(jetty.url, sParams);
+    tuples = getTuples(solrStream);
 
+    // The sort by and order by match and no limit is applied. All the Tuples should be returned in
+    // this scenario.
 
-      sParams = mapParams(CommonParams.QT, "/sql", "numWorkers", "2",                           
-        "stmt", "select str_s as myString, count(*), sum(field_i), min(field_i), max(field_i), avg(field_i) from collection1 where text='XXXX' group by myString order by myString desc");
+    assert (tuples.size() == 3);
 
-      solrStream = new SolrStream(jetty.url, sParams);
-      tuples = getTuples(solrStream);
+    tuple = tuples.get(0);
+    assert (tuple.get("str_s").equals("c"));
+    assert (tuple.getDouble("EXPR$1") == 4); // count(*)
+    assert (tuple.getDouble("EXPR$2") == 180); // sum(field_i)
+    assert (tuple.getDouble("EXPR$3") == 30); // min(field_i)
+    assert (tuple.getDouble("EXPR$4") == 60); // max(field_i)
+    assert (tuple.getDouble("EXPR$5") == 45); // avg(field_i)
 
-      //The sort by and order by match and no limit is applied. All the Tuples should be returned in
-      //this scenario.
+    tuple = tuples.get(1);
+    assert (tuple.get("str_s").equals("b"));
+    assert (tuple.getDouble("EXPR$1") == 2); // count(*)
+    assert (tuple.getDouble("EXPR$2") == 19); // sum(field_i)
+    assert (tuple.getDouble("EXPR$3") == 8); // min(field_i)
+    assert (tuple.getDouble("EXPR$4") == 11); // max(field_i)
+    assert (tuple.getDouble("EXPR$5") == 10); // avg(field_i)
 
-      assert(tuples.size() == 3);
+    tuple = tuples.get(2);
+    assert (tuple.get("str_s").equals("a"));
+    assert (tuple.getDouble("EXPR$1") == 2); // count(*)
+    assert (tuple.getDouble("EXPR$2") == 27); // sum(field_i)
+    assert (tuple.getDouble("EXPR$3") == 7); // min(field_i)
+    assert (tuple.getDouble("EXPR$4") == 20); // max(field_i)
+    assert (tuple.getDouble("EXPR$5") == 14); // avg(field_i)
 
-      tuple = tuples.get(0);
-      assert(tuple.get("myString").equals("c"));
-      assert(tuple.getDouble("count(*)") == 4);
-      assert(tuple.getDouble("sum(field_i)") == 180);
-      assert(tuple.getDouble("min(field_i)") == 30);
-      assert(tuple.getDouble("max(field_i)") == 60);
-      assert(tuple.getDouble("avg(field_i)") == 45);
+    sParams = mapParams(CommonParams.QT, "/sql", "numWorkers", "2", "aggregationMode", "map_reduce",
+        "stmt", "select str_s as myString, count(*), sum(field_i), min(field_i), max(field_i), " +
+            "avg(field_i) from collection1 where text='XXXX' group by str_s order by myString desc");
 
-      tuple = tuples.get(1);
-      assert(tuple.get("myString").equals("b"));
-      assert(tuple.getDouble("count(*)") == 2);
-      assert(tuple.getDouble("sum(field_i)") == 19);
-      assert(tuple.getDouble("min(field_i)") == 8);
-      assert(tuple.getDouble("max(field_i)") == 11);
-      assert(tuple.getDouble("avg(field_i)") == 9.5D);
+    solrStream = new SolrStream(jetty.url, sParams);
+    tuples = getTuples(solrStream);
 
-      tuple = tuples.get(2);
-      assert(tuple.get("myString").equals("a"));
-      assert(tuple.getDouble("count(*)") == 2);
-      assert(tuple.getDouble("sum(field_i)") == 27);
-      assert(tuple.getDouble("min(field_i)") == 7);
-      assert(tuple.getDouble("max(field_i)") == 20);
-      assert(tuple.getDouble("avg(field_i)") == 13.5D);
+    // The sort by and order by match and no limit is applied. All the Tuples should be returned in
+    // this scenario.
 
+    assert (tuples.size() == 3);
 
-      sParams = mapParams(CommonParams.QT, "/sql", "numWorkers", "2",
-        "stmt", "select str_s, count(*), sum(field_i), min(field_i), max(field_i), avg(field_i) from collection1 where text='XXXX' group by str_s having sum(field_i) = 19");
+    tuple = tuples.get(0);
+    assert (tuple.get("myString").equals("c"));
+    assert (tuple.getDouble("EXPR$1") == 4); // count(*)
+    assert (tuple.getDouble("EXPR$2") == 180); // sum(field_i)
+    assert (tuple.getDouble("EXPR$3") == 30); // min(field_i)
+    assert (tuple.getDouble("EXPR$4") == 60); // max(field_i)
+    assert (tuple.getDouble("EXPR$5") == 45); // avg(field_i)
 
-      solrStream = new SolrStream(jetty.url, sParams);
-      tuples = getTuples(solrStream);
+    tuple = tuples.get(1);
+    assert (tuple.get("myString").equals("b"));
+    assert (tuple.getDouble("EXPR$1") == 2); // count(*)
+    assert (tuple.getDouble("EXPR$2") == 19); // sum(field_i)
+    assert (tuple.getDouble("EXPR$3") == 8); // min(field_i)
+    assert (tuple.getDouble("EXPR$4") == 11); // max(field_i)
+    assert (tuple.getDouble("EXPR$5") == 10); // avg(field_i)
 
-      //Only two results because of the limit.
-      assert(tuples.size() == 1);
+    tuple = tuples.get(2);
+    assert (tuple.get("myString").equals("a"));
+    assert (tuple.getDouble("EXPR$1") == 2); // count(*)
+    assert (tuple.getDouble("EXPR$2") == 27); // sum(field_i)
+    assert (tuple.getDouble("EXPR$3") == 7); // min(field_i)
+    assert (tuple.getDouble("EXPR$4") == 20); // max(field_i)
+    assert (tuple.getDouble("EXPR$5") == 14); // avg(field_i)
 
-      tuple = tuples.get(0);
-      assert(tuple.get("str_s").equals("b"));
-      assert(tuple.getDouble("count(*)") == 2);
-      assert(tuple.getDouble("sum(field_i)") == 19);
-      assert(tuple.getDouble("min(field_i)") == 8);
-      assert(tuple.getDouble("max(field_i)") == 11);
-      assert(tuple.getDouble("avg(field_i)") == 9.5D);
+    sParams = mapParams(CommonParams.QT, "/sql", "numWorkers", "2", "aggregationMode", "map_reduce",
+        "stmt", "select str_s, count(*), sum(field_i), min(field_i), max(field_i), " +
+            "avg(field_i) from collection1 where text='XXXX' group by str_s having sum(field_i) = 19");
 
-      tuple = tuples.get(0);
-      assert(tuple.get("str_s").equals("b"));
-      assert(tuple.getDouble("count(*)") == 2);
-      assert(tuple.getDouble("sum(field_i)") == 19);
-      assert(tuple.getDouble("min(field_i)") == 8);
-      assert(tuple.getDouble("max(field_i)") == 11);
-      assert(tuple.getDouble("avg(field_i)") == 9.5D);
+    solrStream = new SolrStream(jetty.url, sParams);
+    tuples = getTuples(solrStream);
 
-      sParams = mapParams(CommonParams.QT, "/sql", "numWorkers", "2",
-        "stmt", "select str_s, count(*), sum(field_i), min(field_i), max(field_i), avg(field_i) from collection1 where text='XXXX' group by str_s having ((sum(field_i) = 19) AND (min(field_i) = 8))");
+    assert (tuples.size() == 1);
 
-      solrStream = new SolrStream(jetty.url, sParams);
-      tuples = getTuples(solrStream);
+    tuple = tuples.get(0);
+    assert (tuple.get("str_s").equals("b"));
+    assert (tuple.getDouble("EXPR$1") == 2); // count(*)
+    assert (tuple.getDouble("EXPR$2") == 19); // sum(field_i)
+    assert (tuple.getDouble("EXPR$3") == 8); // min(field_i)
+    assert (tuple.getDouble("EXPR$4") == 11); // max(field_i)
+    assert (tuple.getDouble("EXPR$5") == 10); // avg(field_i)
 
-      //Only two results because of the limit.
-      assert(tuples.size() == 1);
+    sParams = mapParams(CommonParams.QT, "/sql", "numWorkers", "2", "aggregationMode", "map_reduce",
+        "stmt", "select str_s, count(*), sum(field_i), min(field_i), max(field_i), " +
+            "avg(field_i) from collection1 where text='XXXX' group by str_s " +
+            "having ((sum(field_i) = 19) AND (min(field_i) = 8))");
 
-      tuple = tuples.get(0);
-      assert(tuple.get("str_s").equals("b"));
-      assert(tuple.getDouble("count(*)") == 2);
-      assert(tuple.getDouble("sum(field_i)") == 19);
-      assert(tuple.getDouble("min(field_i)") == 8);
-      assert(tuple.getDouble("max(field_i)") == 11);
-      assert(tuple.getDouble("avg(field_i)") == 9.5D);
+    solrStream = new SolrStream(jetty.url, sParams);
+    tuples = getTuples(solrStream);
 
-      sParams = mapParams(CommonParams.QT, "/sql", "numWorkers", "2",
-        "stmt", "select str_s, count(*), sum(field_i), min(field_i), max(field_i), avg(field_i) from collection1 where text='XXXX' group by str_s having ((sum(field_i) = 19) AND (min(field_i) = 100))");
+    assert (tuples.size() == 1);
 
-      solrStream = new SolrStream(jetty.url, sParams);
-      tuples = getTuples(solrStream);
+    tuple = tuples.get(0);
+    assert (tuple.get("str_s").equals("b"));
+    assert (tuple.getDouble("EXPR$1") == 2); // count(*)
+    assert (tuple.getDouble("EXPR$2") == 19); // sum(field_i)
+    assert (tuple.getDouble("EXPR$3") == 8); // min(field_i)
+    assert (tuple.getDouble("EXPR$4") == 11); // max(field_i)
+    assert (tuple.getDouble("EXPR$5") == 10); // avg(field_i)
 
-      assert(tuples.size() == 0);
+    sParams = mapParams(CommonParams.QT, "/sql", "numWorkers", "2", "aggregationMode", "map_reduce",
+        "stmt", "select str_s, count(*), sum(field_i), min(field_i), max(field_i), " +
+            "avg(field_i) from collection1 where text='XXXX' group by str_s " +
+            "having ((sum(field_i) = 19) AND (min(field_i) = 100))");
 
-    } finally {
-      delete();
-    }
+    solrStream = new SolrStream(jetty.url, sParams);
+    tuples = getTuples(solrStream);
+
+    assert (tuples.size() == 0);
+
   }
 
-
   private void testAggregatesWithoutGrouping() throws Exception {
-
     CloudJettyRunner jetty = this.cloudJettys.get(0);
 
     del("*:*");
@@ -1856,569 +2110,512 @@ public class TestSQLHandler extends AbstractFullDistribZkTestBase {
 
     commit();
 
-    SolrParams sParams = mapParams(CommonParams.QT, "/sql", "stmt", "select count(*), sum(a_i), min(a_i), max(a_i), avg(a_i), sum(a_f), min(a_f), max(a_f), avg(a_f) from collection1");
+    SolrParams sParams = mapParams(CommonParams.QT, "/sql", "stmt",
+        "select count(*), sum(a_i), min(a_i), max(a_i), cast(avg(1.0 * a_i) as float), sum(a_f), " +
+            "min(a_f), max(a_f), avg(a_f) from collection1");
 
     SolrStream solrStream = new SolrStream(jetty.url, sParams);
 
-
     List<Tuple> tuples = getTuples(solrStream);
 
-    assert(tuples.size() == 1);
+    assert (tuples.size() == 1);
 
-    //Test Long and Double Sums
+    // Test Long and Double Sums
 
     Tuple tuple = tuples.get(0);
 
-    Double sumi = tuple.getDouble("sum(a_i)");
-    Double sumf = tuple.getDouble("sum(a_f)");
-    Double mini = tuple.getDouble("min(a_i)");
-    Double minf = tuple.getDouble("min(a_f)");
-    Double maxi = tuple.getDouble("max(a_i)");
-    Double maxf = tuple.getDouble("max(a_f)");
-    Double avgi = tuple.getDouble("avg(a_i)");
-    Double avgf = tuple.getDouble("avg(a_f)");
-    Double count = tuple.getDouble("count(*)");
+    Double count = tuple.getDouble("EXPR$0"); // count(*)
+    Double sumi = tuple.getDouble("EXPR$1"); // sum(a_i)
+    Double mini = tuple.getDouble("EXPR$2"); // min(a_i)
+    Double maxi = tuple.getDouble("EXPR$3"); // max(a_i)
+    Double avgi = tuple.getDouble("EXPR$4"); // avg(a_i)
+    Double sumf = tuple.getDouble("EXPR$5"); // sum(a_f)
+    Double minf = tuple.getDouble("EXPR$6"); // min(a_f)
+    Double maxf = tuple.getDouble("EXPR$7"); // max(a_f)
+    Double avgf = tuple.getDouble("EXPR$8"); // avg(a_f)
 
-    assertTrue(sumi.longValue() == 70);
-    assertTrue(sumf.doubleValue() == 55.0D);
-    assertTrue(mini.doubleValue() == 0.0D);
-    assertTrue(minf.doubleValue() == 1.0D);
-    assertTrue(maxi.doubleValue() == 14.0D);
-    assertTrue(maxf.doubleValue() == 10.0D);
-    assertTrue(avgi.doubleValue() == 7.0D);
-    assertTrue(avgf.doubleValue() == 5.5D);
-    assertTrue(count.doubleValue() == 10);
-
-
+    assertTrue(count == 10);
+    assertTrue(sumi == 70);
+    assertTrue(mini == 0.0D);
+    assertTrue(maxi == 14.0D);
+    assertTrue(avgi == 7.0D);
+    assertTrue(sumf == 55.0D);
+    assertTrue(minf == 1.0D);
+    assertTrue(maxf == 10.0D);
+    assertTrue(avgf == 5.5D);
 
     sParams = mapParams(CommonParams.QT, "/sql",
-      "stmt", "select count(*) as count, sum(a_i) as sum, min(a_i) as min, max(a_i) as max, avg(a_i) as avg, sum(a_f), min(a_f), max(a_f), avg(a_f) from collection1");
+        "stmt", "select count(*) as myCount, sum(a_i) as mySum, min(a_i) as myMin, max(a_i) as myMax, " +
+            "cast(avg(1.0 * a_i) as float) as myAvg, sum(a_f), min(a_f), max(a_f), avg(a_f) from collection1");
 
     solrStream = new SolrStream(jetty.url, sParams);
 
     tuples = getTuples(solrStream);
 
-    assert(tuples.size() == 1);
+    assert (tuples.size() == 1);
 
-    //Test Long and Double Sums
+    // Test Long and Double Sums
 
     tuple = tuples.get(0);
 
-    sumi = tuple.getDouble("sum");
-    sumf = tuple.getDouble("sum(a_f)");
-    mini = tuple.getDouble("min");
-    minf = tuple.getDouble("min(a_f)");
-    maxi = tuple.getDouble("max");
-    maxf = tuple.getDouble("max(a_f)");
-    avgi = tuple.getDouble("avg");
-    avgf = tuple.getDouble("avg(a_f)");
-    count = tuple.getDouble("count");
+    count = tuple.getDouble("myCount");
+    sumi = tuple.getDouble("mySum");
+    mini = tuple.getDouble("myMin");
+    maxi = tuple.getDouble("myMax");
+    avgi = tuple.getDouble("myAvg");
+    sumf = tuple.getDouble("EXPR$5"); // sum(a_f)
+    minf = tuple.getDouble("EXPR$6"); // min(a_f)
+    maxf = tuple.getDouble("EXPR$7"); // max(a_f)
+    avgf = tuple.getDouble("EXPR$8"); // avg(a_f)
 
-    assertTrue(sumi.longValue() == 70);
-    assertTrue(sumf.doubleValue() == 55.0D);
-    assertTrue(mini.doubleValue() == 0.0D);
-    assertTrue(minf.doubleValue() == 1.0D);
-    assertTrue(maxi.doubleValue() == 14.0D);
-    assertTrue(maxf.doubleValue() == 10.0D);
-    assertTrue(avgi.doubleValue() == 7.0D);
-    assertTrue(avgf.doubleValue() == 5.5D);
-    assertTrue(count.doubleValue() == 10);
+    assertTrue(count == 10);
+    assertTrue(mini == 0.0D);
+    assertTrue(maxi == 14.0D);
+    assertTrue(sumi == 70);
+    assertTrue(avgi == 7.0D);
+    assertTrue(sumf == 55.0D);
+    assertTrue(minf == 1.0D);
+    assertTrue(maxf == 10.0D);
+    assertTrue(avgf == 5.5D);
 
+    // Test without cast on average int field
+    sParams = mapParams(CommonParams.QT, "/sql",
+        "stmt", "select count(*) as myCount, sum(a_i) as mySum, min(a_i) as myMin, max(a_i) as myMax, " +
+            "avg(a_i) as myAvg, sum(a_f), min(a_f), max(a_f), avg(a_f) from collection1");
 
+    solrStream = new SolrStream(jetty.url, sParams);
 
+    tuples = getTuples(solrStream);
+
+    assert (tuples.size() == 1);
+
+    // Test Long and Double Sums
+
+    tuple = tuples.get(0);
+
+    count = tuple.getDouble("myCount");
+    sumi = tuple.getDouble("mySum");
+    mini = tuple.getDouble("myMin");
+    maxi = tuple.getDouble("myMax");
+    avgi = tuple.getDouble("myAvg");
+    assertTrue(tuple.get("myAvg") instanceof Long);
+    sumf = tuple.getDouble("EXPR$5"); // sum(a_f)
+    minf = tuple.getDouble("EXPR$6"); // min(a_f)
+    maxf = tuple.getDouble("EXPR$7"); // max(a_f)
+    avgf = tuple.getDouble("EXPR$8"); // avg(a_f)
+
+    assertTrue(count == 10);
+    assertTrue(mini == 0.0D);
+    assertTrue(maxi == 14.0D);
+    assertTrue(sumi == 70);
+    assertTrue(avgi == 7);
+    assertTrue(sumf == 55.0D);
+    assertTrue(minf == 1.0D);
+    assertTrue(maxf == 10.0D);
+    assertTrue(avgf == 5.5D);
 
     // Test where clause hits
-
     sParams = mapParams(CommonParams.QT, "/sql",
-      "stmt", "select count(*), sum(a_i), min(a_i), max(a_i), avg(a_i), sum(a_f), min(a_f), max(a_f), avg(a_f) from collection1 where id = 2");
+        "stmt", "select count(*), sum(a_i), min(a_i), max(a_i), cast(avg(1.0 * a_i) as float), sum(a_f), " +
+            "min(a_f), max(a_f), avg(a_f) from collection1 where id = 2");
 
     solrStream = new SolrStream(jetty.url, sParams);
 
     tuples = getTuples(solrStream);
 
-    assert(tuples.size() == 1);
+    assert (tuples.size() == 1);
 
     tuple = tuples.get(0);
 
-    sumi = tuple.getDouble("sum(a_i)");
-    sumf = tuple.getDouble("sum(a_f)");
-    mini = tuple.getDouble("min(a_i)");
-    minf = tuple.getDouble("min(a_f)");
-    maxi = tuple.getDouble("max(a_i)");
-    maxf = tuple.getDouble("max(a_f)");
-    avgi = tuple.getDouble("avg(a_i)");
-    avgf = tuple.getDouble("avg(a_f)");
-    count = tuple.getDouble("count(*)");
+    count = tuple.getDouble("EXPR$0"); // count(*)
+    sumi = tuple.getDouble("EXPR$1"); // sum(a_i)
+    mini = tuple.getDouble("EXPR$2"); // min(a_i)
+    maxi = tuple.getDouble("EXPR$3"); // max(a_i)
+    avgi = tuple.getDouble("EXPR$4"); // avg(a_i)
+    sumf = tuple.getDouble("EXPR$5"); // sum(a_f)
+    minf = tuple.getDouble("EXPR$6"); // min(a_f)
+    maxf = tuple.getDouble("EXPR$7"); // max(a_f)
+    avgf = tuple.getDouble("EXPR$8"); // avg(a_f)
 
-    assertTrue(sumi.longValue() == 2);
-    assertTrue(sumf.doubleValue() == 2.0D);
+    assertTrue(count == 1);
+    assertTrue(sumi == 2);
     assertTrue(mini == 2);
-    assertTrue(minf == 2);
     assertTrue(maxi == 2);
+    assertTrue(avgi == 2.0D);
+    assertTrue(sumf == 2.0D);
+    assertTrue(minf == 2);
     assertTrue(maxf == 2);
-    assertTrue(avgi.doubleValue() == 2.0D);
-    assertTrue(avgf.doubleValue() == 2.0);
-    assertTrue(count.doubleValue() == 1);
-
+    assertTrue(avgf == 2.0);
 
     // Test zero hits
-
     sParams = mapParams(CommonParams.QT, "/sql",
-      "stmt", "select count(*), sum(a_i), min(a_i), max(a_i), avg(a_i), sum(a_f), min(a_f), max(a_f), avg(a_f) from collection1 where a_s = 'blah'");
+        "stmt", "select count(*), sum(a_i), min(a_i), max(a_i), cast(avg(1.0 * a_i) as float), sum(a_f), " +
+            "min(a_f), max(a_f), avg(a_f) from collection1 where a_s = 'blah'");
 
     solrStream = new SolrStream(jetty.url, sParams);
 
     tuples = getTuples(solrStream);
 
-    assert(tuples.size() == 1);
+    assert (tuples.size() == 1);
 
     tuple = tuples.get(0);
 
-    sumi = tuple.getDouble("sum(a_i)");
-    sumf = tuple.getDouble("sum(a_f)");
-    mini = tuple.getDouble("min(a_i)");
-    minf = tuple.getDouble("min(a_f)");
-    maxi = tuple.getDouble("max(a_i)");
-    maxf = tuple.getDouble("max(a_f)");
-    avgi = tuple.getDouble("avg(a_i)");
-    avgf = tuple.getDouble("avg(a_f)");
-    count = tuple.getDouble("count(*)");
+    count = tuple.getDouble("EXPR$0"); // count(*)
+    sumi = tuple.getDouble("EXPR$1"); // sum(a_i)
+    mini = tuple.getDouble("EXPR$2"); // min(a_i)
+    maxi = tuple.getDouble("EXPR$3"); // max(a_i)
+    avgi = tuple.getDouble("EXPR$4"); // avg(a_i)
+    sumf = tuple.getDouble("EXPR$5"); // sum(a_f)
+    minf = tuple.getDouble("EXPR$6"); // min(a_f)
+    maxf = tuple.getDouble("EXPR$7"); // max(a_f)
+    avgf = tuple.getDouble("EXPR$8"); // avg(a_f)
 
-    assertTrue(sumi.longValue() == 0);
-    assertTrue(sumf.doubleValue() == 0.0D);
+    assertTrue(count == 0);
+    assertTrue(sumi == null);
     assertTrue(mini == null);
-    assertTrue(minf == null);
     assertTrue(maxi == null);
+    assertTrue(avgi == null);
+    assertTrue(sumf == null);
+    assertTrue(minf == null);
     assertTrue(maxf == null);
-    assertTrue(Double.isNaN(avgi));
-    assertTrue(Double.isNaN(avgf));
-    assertTrue(count.doubleValue() == 0);
+    assertTrue(avgf == null);
 
     del("*:*");
     commit();
   }
 
-
-
-
   private void testTimeSeriesGrouping() throws Exception {
-    try {
 
-      CloudJettyRunner jetty = this.cloudJettys.get(0);
+    CloudJettyRunner jetty = this.cloudJettys.get(0);
 
-      del("*:*");
+    del("*:*");
 
-      commit();
+    commit();
 
-      indexr("id", "1", "year_i", "2015", "month_i", "11", "day_i", "7", "item_i", "5");
-      indexr("id", "2", "year_i", "2015", "month_i", "11", "day_i", "7", "item_i", "10");
-      indexr("id", "3", "year_i", "2015", "month_i", "11", "day_i", "8", "item_i", "30");
-      indexr("id", "4", "year_i", "2015", "month_i", "11", "day_i", "8", "item_i", "12");
-      indexr("id", "5", "year_i", "2015", "month_i", "10", "day_i", "1", "item_i", "4");
-      indexr("id", "6", "year_i", "2015", "month_i", "10", "day_i", "3", "item_i", "5");
-      indexr("id", "7", "year_i", "2014", "month_i", "4",  "day_i", "4", "item_i", "6");
-      indexr("id", "8", "year_i", "2014", "month_i", "4",  "day_i", "2", "item_i", "1");
+    indexr("id", "1", "year_i", "2015", "month_i", "11", "day_i", "7", "item_i", "5");
+    indexr("id", "2", "year_i", "2015", "month_i", "11", "day_i", "7", "item_i", "10");
+    indexr("id", "3", "year_i", "2015", "month_i", "11", "day_i", "8", "item_i", "30");
+    indexr("id", "4", "year_i", "2015", "month_i", "11", "day_i", "8", "item_i", "12");
+    indexr("id", "5", "year_i", "2015", "month_i", "10", "day_i", "1", "item_i", "4");
+    indexr("id", "6", "year_i", "2015", "month_i", "10", "day_i", "3", "item_i", "5");
+    indexr("id", "7", "year_i", "2014", "month_i", "4", "day_i", "4", "item_i", "6");
+    indexr("id", "8", "year_i", "2014", "month_i", "4", "day_i", "2", "item_i", "1");
 
-      commit();
-      SolrParams sParams = mapParams(CommonParams.QT, "/sql",
+    commit();
+
+    SolrParams sParams = mapParams(CommonParams.QT, "/sql",
         "stmt", "select year_i, sum(item_i) from collection1 group by year_i order by year_i desc");
 
-      SolrStream solrStream = new SolrStream(jetty.url, sParams);
-      List<Tuple> tuples = getTuples(solrStream);
+    SolrStream solrStream = new SolrStream(jetty.url, sParams);
+    List<Tuple> tuples = getTuples(solrStream);
 
-      //Only two results because of the limit.
-      assert(tuples.size() == 2);
+    assert (tuples.size() == 2);
 
-      Tuple tuple = null;
+    Tuple tuple;
 
-      tuple = tuples.get(0);
-      assert(tuple.getLong("year_i") == 2015);
-      assert(tuple.getDouble("sum(item_i)") == 66);
+    tuple = tuples.get(0);
+    assert (tuple.getLong("year_i") == 2015);
+    assert (tuple.getDouble("EXPR$1") == 66); // sum(item_i)
 
-      tuple = tuples.get(1);
-      assert(tuple.getLong("year_i") == 2014);
-      assert(tuple.getDouble("sum(item_i)") == 7);
+    tuple = tuples.get(1);
+    assert (tuple.getLong("year_i") == 2014);
+    assert (tuple.getDouble("EXPR$1") == 7); // sum(item_i)
 
-      sParams = mapParams(CommonParams.QT, "/sql",
-          "stmt", "select year_i, month_i, sum(item_i) from collection1 group by year_i, month_i order by year_i desc, month_i desc");
+    sParams = mapParams(CommonParams.QT, "/sql",
+        "stmt", "select year_i, month_i, sum(item_i) from collection1 group by year_i, month_i " +
+            "order by year_i desc, month_i desc");
 
-      solrStream = new SolrStream(jetty.url, sParams);
-      tuples = getTuples(solrStream);
+    solrStream = new SolrStream(jetty.url, sParams);
+    tuples = getTuples(solrStream);
 
-      //Only two results because of the limit.
-      assert(tuples.size() == 3);
+    assert (tuples.size() == 3);
 
-      tuple = null;
+    tuple = tuples.get(0);
+    assert (tuple.getLong("year_i") == 2015);
+    assert (tuple.getLong("month_i") == 11);
+    assert (tuple.getDouble("EXPR$2") == 57); // sum(item_i)
 
-      tuple = tuples.get(0);
-      assert(tuple.getLong("year_i") == 2015);
-      assert(tuple.getLong("month_i") == 11);
-      assert(tuple.getDouble("sum(item_i)") == 57);
+    tuple = tuples.get(1);
+    assert (tuple.getLong("year_i") == 2015);
+    assert (tuple.getLong("month_i") == 10);
+    assert (tuple.getDouble("EXPR$2") == 9); // sum(item_i)
 
-      tuple = tuples.get(1);
-      assert(tuple.getLong("year_i") == 2015);
-      assert(tuple.getLong("month_i") == 10);
-      assert(tuple.getDouble("sum(item_i)") == 9);
+    tuple = tuples.get(2);
+    assert (tuple.getLong("year_i") == 2014);
+    assert (tuple.getLong("month_i") == 4);
+    assert (tuple.getDouble("EXPR$2") == 7); // sum(item_i)
 
-      tuple = tuples.get(2);
-      assert(tuple.getLong("year_i") == 2014);
-      assert(tuple.getLong("month_i") == 4);
-      assert(tuple.getDouble("sum(item_i)") == 7);
+    sParams = mapParams(CommonParams.QT, "/sql",
+        "stmt", "select year_i, month_i, day_i, sum(item_i) from collection1 group by year_i, month_i, day_i " +
+            "order by year_i desc, month_i desc, day_i desc");
 
-      sParams = mapParams(CommonParams.QT, "/sql",
-        "stmt", "select year_i, month_i, day_i, sum(item_i) from collection1 group by year_i, month_i, day_i order by year_i desc, month_i desc, day_i desc");
+    solrStream = new SolrStream(jetty.url, sParams);
+    tuples = getTuples(solrStream);
 
-      solrStream = new SolrStream(jetty.url, sParams);
-      tuples = getTuples(solrStream);
+    assert (tuples.size() == 6);
 
-      //Only two results because of the limit.
-      assert(tuples.size() == 6);
+    tuple = tuples.get(0);
+    assert (tuple.getLong("year_i") == 2015);
+    assert (tuple.getLong("month_i") == 11);
+    assert (tuple.getLong("day_i") == 8);
+    assert (tuple.getDouble("EXPR$3") == 42); // sum(item_i)
 
-      tuple = null;
+    tuple = tuples.get(1);
+    assert (tuple.getLong("year_i") == 2015);
+    assert (tuple.getLong("month_i") == 11);
+    assert (tuple.getLong("day_i") == 7);
+    assert (tuple.getDouble("EXPR$3") == 15); // sum(item_i)
 
-      tuple = tuples.get(0);
-      assert(tuple.getLong("year_i") == 2015);
-      assert(tuple.getLong("month_i") == 11);
-      assert(tuple.getLong("day_i") == 8);
-      assert(tuple.getDouble("sum(item_i)") == 42);
+    tuple = tuples.get(2);
+    assert (tuple.getLong("year_i") == 2015);
+    assert (tuple.getLong("month_i") == 10);
+    assert (tuple.getLong("day_i") == 3);
+    assert (tuple.getDouble("EXPR$3") == 5); // sum(item_i)
 
-      tuple = tuples.get(1);
-      assert(tuple.getLong("year_i") == 2015);
-      assert(tuple.getLong("month_i") == 11);
-      assert(tuple.getLong("day_i") == 7);
-      assert(tuple.getDouble("sum(item_i)") == 15);
+    tuple = tuples.get(3);
+    assert (tuple.getLong("year_i") == 2015);
+    assert (tuple.getLong("month_i") == 10);
+    assert (tuple.getLong("day_i") == 1);
+    assert (tuple.getDouble("EXPR$3") == 4); // sum(item_i)
 
-      tuple = tuples.get(2);
-      assert(tuple.getLong("year_i") == 2015);
-      assert(tuple.getLong("month_i") == 10);
-      assert(tuple.getLong("day_i") == 3);
-      assert(tuple.getDouble("sum(item_i)") == 5);
+    tuple = tuples.get(4);
+    assert (tuple.getLong("year_i") == 2014);
+    assert (tuple.getLong("month_i") == 4);
+    assert (tuple.getLong("day_i") == 4);
+    assert (tuple.getDouble("EXPR$3") == 6); // sum(item_i)
 
-      tuple = tuples.get(3);
-      assert(tuple.getLong("year_i") == 2015);
-      assert(tuple.getLong("month_i") == 10);
-      assert(tuple.getLong("day_i") == 1);
-      assert(tuple.getDouble("sum(item_i)") == 4);
+    tuple = tuples.get(5);
+    assert (tuple.getLong("year_i") == 2014);
+    assert (tuple.getLong("month_i") == 4);
+    assert (tuple.getLong("day_i") == 2);
+    assert (tuple.getDouble("EXPR$3") == 1); // sum(item_i)
 
-      tuple = tuples.get(4);
-      assert(tuple.getLong("year_i") == 2014);
-      assert(tuple.getLong("month_i") == 4);
-      assert(tuple.getLong("day_i") == 4);
-      assert(tuple.getDouble("sum(item_i)") == 6);
-
-      tuple = tuples.get(5);
-      assert(tuple.getLong("year_i") == 2014);
-      assert(tuple.getLong("month_i") == 4);
-      assert(tuple.getLong("day_i") == 2);
-      assert(tuple.getDouble("sum(item_i)") == 1);
-
-    } finally {
-      delete();
-    }
   }
 
-
   private void testTimeSeriesGroupingFacet() throws Exception {
-    try {
 
-      CloudJettyRunner jetty = this.cloudJettys.get(0);
+    CloudJettyRunner jetty = this.cloudJettys.get(0);
 
-      del("*:*");
+    del("*:*");
 
-      commit();
+    commit();
 
-      indexr("id", "1", "year_i", "2015", "month_i", "11", "day_i", "7", "item_i", "5");
-      indexr("id", "2", "year_i", "2015", "month_i", "11", "day_i", "7", "item_i", "10");
-      indexr("id", "3", "year_i", "2015", "month_i", "11", "day_i", "8", "item_i", "30");
-      indexr("id", "4", "year_i", "2015", "month_i", "11", "day_i", "8", "item_i", "12");
-      indexr("id", "5", "year_i", "2015", "month_i", "10", "day_i", "1", "item_i", "4");
-      indexr("id", "6", "year_i", "2015", "month_i", "10", "day_i", "3", "item_i", "5");
-      indexr("id", "7", "year_i", "2014", "month_i", "4", "day_i", "4", "item_i", "6");
-      indexr("id", "8", "year_i", "2014", "month_i", "4", "day_i", "2", "item_i", "1");
+    indexr("id", "1", "year_i", "2015", "month_i", "11", "day_i", "7", "item_i", "5");
+    indexr("id", "2", "year_i", "2015", "month_i", "11", "day_i", "7", "item_i", "10");
+    indexr("id", "3", "year_i", "2015", "month_i", "11", "day_i", "8", "item_i", "30");
+    indexr("id", "4", "year_i", "2015", "month_i", "11", "day_i", "8", "item_i", "12");
+    indexr("id", "5", "year_i", "2015", "month_i", "10", "day_i", "1", "item_i", "4");
+    indexr("id", "6", "year_i", "2015", "month_i", "10", "day_i", "3", "item_i", "5");
+    indexr("id", "7", "year_i", "2014", "month_i", "4", "day_i", "4", "item_i", "6");
+    indexr("id", "8", "year_i", "2014", "month_i", "4", "day_i", "2", "item_i", "1");
 
-      commit();
-      SolrParams sParams = mapParams(CommonParams.QT, "/sql", "aggregationMode", "facet",
+    commit();
+    SolrParams sParams = mapParams(CommonParams.QT, "/sql", "aggregationMode", "facet",
         "stmt", "select year_i, sum(item_i) from collection1 group by year_i order by year_i desc");
 
-      SolrStream solrStream = new SolrStream(jetty.url, sParams);
-      List<Tuple> tuples = getTuples(solrStream);
+    SolrStream solrStream = new SolrStream(jetty.url, sParams);
+    List<Tuple> tuples = getTuples(solrStream);
 
-      //Only two results because of the limit.
-      assert(tuples.size() == 2);
+    assert (tuples.size() == 2);
 
-      Tuple tuple = null;
+    Tuple tuple;
 
-      tuple = tuples.get(0);
-      assert(tuple.getLong("year_i") == 2015);
-      assert(tuple.getDouble("sum(item_i)") == 66);
+    tuple = tuples.get(0);
+    assert (tuple.getLong("year_i") == 2015);
+    assert (tuple.getDouble("EXPR$1") == 66); // sum(item_i)
 
-      tuple = tuples.get(1);
-      assert(tuple.getLong("year_i") == 2014);
-      assert(tuple.getDouble("sum(item_i)") == 7);
+    tuple = tuples.get(1);
+    assert (tuple.getLong("year_i") == 2014);
+    assert (tuple.getDouble("EXPR$1") == 7); // sum(item_i)
 
+    sParams = mapParams(CommonParams.QT, "/sql", "aggregationMode", "facet",
+        "stmt", "select year_i, month_i, sum(item_i) from collection1 group by year_i, month_i " +
+            "order by year_i desc, month_i desc");
 
-      sParams = mapParams(CommonParams.QT, "/sql", "aggregationMode", "facet",
-        "stmt", "select year_i, month_i, sum(item_i) from collection1 group by year_i, month_i order by year_i desc, month_i desc");
+    solrStream = new SolrStream(jetty.url, sParams);
+    tuples = getTuples(solrStream);
 
-      solrStream = new SolrStream(jetty.url, sParams);
-      tuples = getTuples(solrStream);
+    assert (tuples.size() == 3);
 
-      //Only two results because of the limit.
-      assert(tuples.size() == 3);
+    tuple = tuples.get(0);
+    assert (tuple.getLong("year_i") == 2015);
+    assert (tuple.getLong("month_i") == 11);
+    assert (tuple.getDouble("EXPR$2") == 57); // sum(item_i)
 
-      tuple = tuples.get(0);
-      assert(tuple.getLong("year_i") == 2015);
-      assert(tuple.getLong("month_i") == 11);
-      assert(tuple.getDouble("sum(item_i)") == 57);
+    tuple = tuples.get(1);
+    assert (tuple.getLong("year_i") == 2015);
+    assert (tuple.getLong("month_i") == 10);
+    assert (tuple.getDouble("EXPR$2") == 9); // sum(item_i)
 
-      tuple = tuples.get(1);
-      assert(tuple.getLong("year_i") == 2015);
-      assert(tuple.getLong("month_i") == 10);
-      assert(tuple.getDouble("sum(item_i)") == 9);
+    tuple = tuples.get(2);
+    assert (tuple.getLong("year_i") == 2014);
+    assert (tuple.getLong("month_i") == 4);
+    assert (tuple.getDouble("EXPR$2") == 7); // sum(item_i)
 
-      tuple = tuples.get(2);
-      assert(tuple.getLong("year_i") == 2014);
-      assert(tuple.getLong("month_i") == 4);
-      assert(tuple.getDouble("sum(item_i)") == 7);
+    sParams = mapParams(CommonParams.QT, "/sql", "aggregationMode", "facet",
+        "stmt", "select year_i, month_i, day_i, sum(item_i) from collection1 group by year_i, month_i, day_i " +
+            "order by year_i desc, month_i desc, day_i desc");
 
+    solrStream = new SolrStream(jetty.url, sParams);
+    tuples = getTuples(solrStream);
 
-      sParams = mapParams(CommonParams.QT, "/sql", "aggregationMode", "facet",
-        "stmt", "select year_i, month_i, day_i, sum(item_i) from collection1 group by year_i, month_i, day_i order by year_i desc, month_i desc, day_i desc");
+    assert (tuples.size() == 6);
 
-      solrStream = new SolrStream(jetty.url, sParams);
-      tuples = getTuples(solrStream);
+    tuple = tuples.get(0);
+    assert (tuple.getLong("year_i") == 2015);
+    assert (tuple.getLong("month_i") == 11);
+    assert (tuple.getLong("day_i") == 8);
+    assert (tuple.getDouble("EXPR$3") == 42); // sum(item_i)
 
-      //Only two results because of the limit.
-      assert(tuples.size() == 6);
+    tuple = tuples.get(1);
+    assert (tuple.getLong("year_i") == 2015);
+    assert (tuple.getLong("month_i") == 11);
+    assert (tuple.getLong("day_i") == 7);
+    assert (tuple.getDouble("EXPR$3") == 15); // sum(item_i)
 
-      tuple = tuples.get(0);
-      assert(tuple.getLong("year_i") == 2015);
-      assert(tuple.getLong("month_i") == 11);
-      assert(tuple.getLong("day_i") == 8);
-      assert(tuple.getDouble("sum(item_i)") == 42);
+    tuple = tuples.get(2);
+    assert (tuple.getLong("year_i") == 2015);
+    assert (tuple.getLong("month_i") == 10);
+    assert (tuple.getLong("day_i") == 3);
+    assert (tuple.getDouble("EXPR$3") == 5); // sum(item_i)
 
-      tuple = tuples.get(1);
-      assert(tuple.getLong("year_i") == 2015);
-      assert(tuple.getLong("month_i") == 11);
-      assert(tuple.getLong("day_i") == 7);
-      assert(tuple.getDouble("sum(item_i)") == 15);
+    tuple = tuples.get(3);
+    assert (tuple.getLong("year_i") == 2015);
+    assert (tuple.getLong("month_i") == 10);
+    assert (tuple.getLong("day_i") == 1);
+    assert (tuple.getDouble("EXPR$3") == 4); // sum(item_i)
 
-      tuple = tuples.get(2);
-      assert(tuple.getLong("year_i") == 2015);
-      assert(tuple.getLong("month_i") == 10);
-      assert(tuple.getLong("day_i") == 3);
-      assert(tuple.getDouble("sum(item_i)") == 5);
+    tuple = tuples.get(4);
+    assert (tuple.getLong("year_i") == 2014);
+    assert (tuple.getLong("month_i") == 4);
+    assert (tuple.getLong("day_i") == 4);
+    assert (tuple.getDouble("EXPR$3") == 6); // sum(item_i)
 
-      tuple = tuples.get(3);
-      assert(tuple.getLong("year_i") == 2015);
-      assert(tuple.getLong("month_i") == 10);
-      assert(tuple.getLong("day_i") == 1);
-      assert(tuple.getDouble("sum(item_i)") == 4);
+    tuple = tuples.get(5);
+    assert (tuple.getLong("year_i") == 2014);
+    assert (tuple.getLong("month_i") == 4);
+    assert (tuple.getLong("day_i") == 2);
+    assert (tuple.getDouble("EXPR$3") == 1); // sum(item_i)
 
-      tuple = tuples.get(4);
-      assert(tuple.getLong("year_i") == 2014);
-      assert(tuple.getLong("month_i") == 4);
-      assert(tuple.getLong("day_i") == 4);
-      assert(tuple.getDouble("sum(item_i)") == 6);
-
-      tuple = tuples.get(5);
-      assert(tuple.getLong("year_i") == 2014);
-      assert(tuple.getLong("month_i") == 4);
-      assert(tuple.getLong("day_i") == 2);
-      assert(tuple.getDouble("sum(item_i)") == 1);
-    } finally {
-      delete();
-    }
   }
 
   private void testParallelTimeSeriesGrouping() throws Exception {
-    try {
 
-      CloudJettyRunner jetty = this.cloudJettys.get(0);
-
-      del("*:*");
-
-      commit();
-
-      indexr("id", "1", "year_i", "2015", "month_i", "11", "day_i", "7", "item_i", "5");
-      indexr("id", "2", "year_i", "2015", "month_i", "11", "day_i", "7", "item_i", "10");
-      indexr("id", "3", "year_i", "2015", "month_i", "11", "day_i", "8", "item_i", "30");
-      indexr("id", "4", "year_i", "2015", "month_i", "11", "day_i", "8", "item_i", "12");
-      indexr("id", "5", "year_i", "2015", "month_i", "10", "day_i", "1", "item_i", "4");
-      indexr("id", "6", "year_i", "2015", "month_i", "10", "day_i", "3", "item_i", "5");
-      indexr("id", "7", "year_i", "2014", "month_i", "4",  "day_i", "4", "item_i", "6");
-      indexr("id", "8", "year_i", "2014", "month_i", "4", "day_i", "2", "item_i", "1");
-
-      commit();
-      SolrParams sParams = mapParams(CommonParams.QT, "/sql", "numWorkers", "2", 
-          "stmt", "select year_i, sum(item_i) from collection1 group by year_i order by year_i desc");
-
-      SolrStream solrStream = new SolrStream(jetty.url, sParams);
-      List<Tuple> tuples = getTuples(solrStream);
-
-      //Only two results because of the limit.
-      assert(tuples.size() == 2);
-
-      Tuple tuple = null;
-
-      tuple = tuples.get(0);
-      assert(tuple.getLong("year_i") == 2015);
-      assert(tuple.get("year_i") instanceof Long);  // SOLR-8601, This tests that the bucket is actually a Long and not parsed from a String.
-      assert(tuple.getDouble("sum(item_i)") == 66);
-
-      tuple = tuples.get(1);
-      assert(tuple.getLong("year_i") == 2014);
-      assert(tuple.getDouble("sum(item_i)") == 7);
-
-      sParams = mapParams(CommonParams.QT, "/sql", "numWorkers", "2",
-        "stmt", "select year_i, month_i, sum(item_i) from collection1 group by year_i, month_i order by year_i desc, month_i desc");
-
-      solrStream = new SolrStream(jetty.url, sParams);
-      tuples = getTuples(solrStream);
-
-      //Only two results because of the limit.
-      assert(tuples.size() == 3);
-
-      tuple = null;
-
-      tuple = tuples.get(0);
-      assert(tuple.getLong("year_i") == 2015);
-      assert(tuple.getLong("month_i") == 11);
-      assert(tuple.get("year_i") instanceof Long);
-      assert(tuple.get("month_i") instanceof Long);
-      assert(tuple.getDouble("sum(item_i)") == 57);
-
-      tuple = tuples.get(1);
-      assert(tuple.getLong("year_i") == 2015);
-      assert(tuple.getLong("month_i") == 10);
-      assert(tuple.getDouble("sum(item_i)") == 9);
-
-      tuple = tuples.get(2);
-      assert(tuple.getLong("year_i") == 2014);
-      assert(tuple.getLong("month_i") == 4);
-      assert(tuple.getDouble("sum(item_i)") == 7);
-
-
-      sParams = mapParams(CommonParams.QT, "/sql", "numWorkers", "2",
-        "stmt", "select year_i, month_i, day_i, sum(item_i) from collection1 group by year_i, month_i, day_i order by year_i desc, month_i desc, day_i desc");
-
-      solrStream = new SolrStream(jetty.url, sParams);
-      tuples = getTuples(solrStream);
-
-      //Only two results because of the limit.
-      assert(tuples.size() == 6);
-
-      tuple = null;
-
-      tuple = tuples.get(0);
-      assert(tuple.getLong("year_i") == 2015);
-      assert(tuple.getLong("month_i") == 11);
-      assert(tuple.getLong("day_i") == 8);
-      assert(tuple.getDouble("sum(item_i)") == 42);
-
-      tuple = tuples.get(1);
-      assert(tuple.getLong("year_i") == 2015);
-      assert(tuple.getLong("month_i") == 11);
-      assert(tuple.getLong("day_i") == 7);
-      assert(tuple.getDouble("sum(item_i)") == 15);
-
-      tuple = tuples.get(2);
-      assert(tuple.getLong("year_i") == 2015);
-      assert(tuple.getLong("month_i") == 10);
-      assert(tuple.getLong("day_i") == 3);
-      assert(tuple.getDouble("sum(item_i)") == 5);
-
-      tuple = tuples.get(3);
-      assert(tuple.getLong("year_i") == 2015);
-      assert(tuple.getLong("month_i") == 10);
-      assert(tuple.getLong("day_i") == 1);
-      assert(tuple.getDouble("sum(item_i)") == 4);
-
-      tuple = tuples.get(4);
-      assert(tuple.getLong("year_i") == 2014);
-      assert(tuple.getLong("month_i") == 4);
-      assert(tuple.getLong("day_i") == 4);
-      assert(tuple.getDouble("sum(item_i)") == 6);
-
-      tuple = tuples.get(5);
-      assert(tuple.getLong("year_i") == 2014);
-      assert(tuple.getLong("month_i") == 4);
-      assert(tuple.getLong("day_i") == 2);
-      assert(tuple.getDouble("sum(item_i)") == 1);
-
-    } finally {
-      delete();
-    }
-  }
-
-  private void testCatalogStream() throws Exception {
     CloudJettyRunner jetty = this.cloudJettys.get(0);
 
-    SolrParams sParams = mapParams(CommonParams.QT, "/sql", "numWorkers", "2",
-      "stmt", "select TABLE_CAT from _CATALOGS_");
+    del("*:*");
+
+    commit();
+
+    indexr("id", "1", "year_i", "2015", "month_i", "11", "day_i", "7", "item_i", "5");
+    indexr("id", "2", "year_i", "2015", "month_i", "11", "day_i", "7", "item_i", "10");
+    indexr("id", "3", "year_i", "2015", "month_i", "11", "day_i", "8", "item_i", "30");
+    indexr("id", "4", "year_i", "2015", "month_i", "11", "day_i", "8", "item_i", "12");
+    indexr("id", "5", "year_i", "2015", "month_i", "10", "day_i", "1", "item_i", "4");
+    indexr("id", "6", "year_i", "2015", "month_i", "10", "day_i", "3", "item_i", "5");
+    indexr("id", "7", "year_i", "2014", "month_i", "4", "day_i", "4", "item_i", "6");
+    indexr("id", "8", "year_i", "2014", "month_i", "4", "day_i", "2", "item_i", "1");
+
+    commit();
+    SolrParams sParams = mapParams(CommonParams.QT, "/sql", "numWorkers", "2", "aggregationMode", "map_reduce",
+        "stmt", "select year_i, sum(item_i) from collection1 group by year_i order by year_i desc");
 
     SolrStream solrStream = new SolrStream(jetty.url, sParams);
     List<Tuple> tuples = getTuples(solrStream);
 
-    assertEquals(tuples.size(), 1);
-    assertEquals(tuples.get(0).getString("TABLE_CAT"), zkServer.getZkAddress());
-  }
+    assert (tuples.size() == 2);
 
-  private void testSchemasStream() throws Exception {
-    CloudJettyRunner jetty = this.cloudJettys.get(0);
+    Tuple tuple;
 
-    SolrParams sParams = mapParams(CommonParams.QT, "/sql", "numWorkers", "2",
-      "stmt", "select TABLE_SCHEM, TABLE_CATALOG from _SCHEMAS_");
+    tuple = tuples.get(0);
+    assert (tuple.getLong("year_i") == 2015);
+    assert (tuple.get("year_i") instanceof Long); // SOLR-8601, This tests that the bucket is actually a Long and not
+                                                  // parsed from a String.
+    assert (tuple.getDouble("EXPR$1") == 66); // sum(item_i)
 
-    SolrStream solrStream = new SolrStream(jetty.url, sParams);
-    List<Tuple> tuples = getTuples(solrStream);
+    tuple = tuples.get(1);
+    assert (tuple.getLong("year_i") == 2014);
+    assert (tuple.getDouble("EXPR$1") == 7); // sum(item_i)
 
-    assertEquals(tuples.size(), 0);
-  }
+    sParams = mapParams(CommonParams.QT, "/sql", "numWorkers", "2", "aggregationMode", "map_reduce",
+        "stmt", "select year_i, month_i, sum(item_i) from collection1 group by year_i, month_i " +
+            "order by year_i desc, month_i desc");
 
-  private void testTablesStream() throws Exception {
-    CloudJettyRunner jetty = this.cloudJettys.get(0);
-
-    SolrParams sParams = mapParams(CommonParams.QT, "/sql", "numWorkers", "2",
-      "stmt", "select TABLE_CAT, TABLE_SCHEM, TABLE_NAME, TABLE_TYPE, REMARKS from _TABLES_");
-
-    SolrStream solrStream = new SolrStream(jetty.url, sParams);
-    List<Tuple> tuples = getTuples(solrStream);
-
-    assertEquals(2, tuples.size());
-
-    List<String> collections = new ArrayList<>();
-    collections.addAll(cloudClient.getZkStateReader().getClusterState().getCollectionsMap().keySet());
-    Collections.sort(collections);
-    for (Tuple tuple : tuples) {
-      assertEquals(zkServer.getZkAddress(), tuple.getString("TABLE_CAT"));
-      assertNull(tuple.get("TABLE_SCHEM"));
-      assertTrue(collections.contains(tuple.getString("TABLE_NAME")));
-      assertEquals("TABLE", tuple.getString("TABLE_TYPE"));
-      assertNull(tuple.get("REMARKS"));
-    }
-
+    solrStream = new SolrStream(jetty.url, sParams);
     tuples = getTuples(solrStream);
-    assertEquals(2, tuples.size());
 
-    collections = new ArrayList<>();
-    collections.addAll(cloudClient.getZkStateReader().getClusterState().getCollectionsMap().keySet());
-    Collections.sort(collections);
-    for (Tuple tuple : tuples) {
-      assertEquals(zkServer.getZkAddress(), tuple.getString("TABLE_CAT"));
-      assertNull(tuple.get("TABLE_SCHEM"));
-      assertTrue(collections.contains(tuple.getString("TABLE_NAME")));
-      assertEquals("TABLE", tuple.getString("TABLE_TYPE"));
-      assertNull(tuple.get("REMARKS"));
-    }
+    assert (tuples.size() == 3);
+
+    tuple = tuples.get(0);
+    assert (tuple.getLong("year_i") == 2015);
+    assert (tuple.getLong("month_i") == 11);
+    assert (tuple.get("year_i") instanceof Long);
+    assert (tuple.get("month_i") instanceof Long);
+    assert (tuple.getDouble("EXPR$2") == 57); // sum(item_i)
+
+    tuple = tuples.get(1);
+    assert (tuple.getLong("year_i") == 2015);
+    assert (tuple.getLong("month_i") == 10);
+    assert (tuple.getDouble("EXPR$2") == 9); // sum(item_i)
+
+    tuple = tuples.get(2);
+    assert (tuple.getLong("year_i") == 2014);
+    assert (tuple.getLong("month_i") == 4);
+    assert (tuple.getDouble("EXPR$2") == 7); // sum(item_i)
+
+    sParams = mapParams(CommonParams.QT, "/sql", "numWorkers", "2", "aggregationMode", "map_reduce",
+        "stmt", "select year_i, month_i, day_i, sum(item_i) from collection1 group by year_i, month_i, day_i " +
+            "order by year_i desc, month_i desc, day_i desc");
+
+    solrStream = new SolrStream(jetty.url, sParams);
+    tuples = getTuples(solrStream);
+
+    assert (tuples.size() == 6);
+
+    tuple = tuples.get(0);
+    assert (tuple.getLong("year_i") == 2015);
+    assert (tuple.getLong("month_i") == 11);
+    assert (tuple.getLong("day_i") == 8);
+    assert (tuple.getDouble("EXPR$3") == 42); // sum(item_i)
+
+    tuple = tuples.get(1);
+    assert (tuple.getLong("year_i") == 2015);
+    assert (tuple.getLong("month_i") == 11);
+    assert (tuple.getLong("day_i") == 7);
+    assert (tuple.getDouble("EXPR$3") == 15); // sum(item_i)
+
+    tuple = tuples.get(2);
+    assert (tuple.getLong("year_i") == 2015);
+    assert (tuple.getLong("month_i") == 10);
+    assert (tuple.getLong("day_i") == 3);
+    assert (tuple.getDouble("EXPR$3") == 5); // sum(item_i)
+
+    tuple = tuples.get(3);
+    assert (tuple.getLong("year_i") == 2015);
+    assert (tuple.getLong("month_i") == 10);
+    assert (tuple.getLong("day_i") == 1);
+    assert (tuple.getDouble("EXPR$3") == 4); // sum(item_i)
+
+    tuple = tuples.get(4);
+    assert (tuple.getLong("year_i") == 2014);
+    assert (tuple.getLong("month_i") == 4);
+    assert (tuple.getLong("day_i") == 4);
+    assert (tuple.getDouble("EXPR$3") == 6); // sum(item_i)
+
+    tuple = tuples.get(5);
+    assert (tuple.getLong("year_i") == 2014);
+    assert (tuple.getLong("month_i") == 4);
+    assert (tuple.getLong("day_i") == 2);
+    assert (tuple.getDouble("EXPR$3") == 1); // sum(item_i)
+
   }
 
   protected List<Tuple> getTuples(TupleStream tupleStream) throws IOException {
     tupleStream.open();
-    List<Tuple> tuples = new ArrayList();
-    for(;;) {
+    List<Tuple> tuples = new ArrayList<>();
+    for (;;) {
       Tuple t = tupleStream.read();
-      if(t.EOF) {
+      if (t.EOF) {
         break;
       } else {
         tuples.add(t);
@@ -2443,6 +2640,27 @@ public class TestSQLHandler extends AbstractFullDistribZkTestBase {
     }
 
     return params;
+  }
+
+  public void assertResponseContains(SolrClient server, SolrParams requestParams, String json)
+      throws IOException, SolrServerException {
+    String p = requestParams.get("qt");
+    ModifiableSolrParams modifiableSolrParams = (ModifiableSolrParams) requestParams;
+    modifiableSolrParams.set("indent", modifiableSolrParams.get("indent", "off"));
+    if (p != null) {
+      modifiableSolrParams.remove("qt");
+    }
+
+    QueryRequest query = new QueryRequest(modifiableSolrParams);
+    query.setPath(p);
+    query.setResponseParser(new InputStreamResponseParser("json"));
+    query.setMethod(SolrRequest.METHOD.POST);
+    NamedList<Object> genericResponse = server.request(query);
+    InputStream stream = (InputStream) genericResponse.get("stream");
+    InputStreamReader reader = new InputStreamReader(stream, "UTF-8");
+    BufferedReader bufferedReader = new BufferedReader(reader);
+    String response = bufferedReader.readLine();
+    assertTrue(response.contains(json));
   }
 
 }

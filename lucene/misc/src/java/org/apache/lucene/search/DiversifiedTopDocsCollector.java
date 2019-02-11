@@ -82,8 +82,8 @@ public abstract class DiversifiedTopDocsCollector extends
   protected abstract NumericDocValues getKeys(LeafReaderContext context);
 
   @Override
-  public boolean needsScores() {
-    return true;
+  public ScoreMode scoreMode() {
+    return ScoreMode.COMPLETE;
   }
 
   @Override
@@ -92,25 +92,11 @@ public abstract class DiversifiedTopDocsCollector extends
       return EMPTY_TOPDOCS;
     }
 
-    // We need to compute maxScore in order to set it in TopDocs. If start == 0,
-    // it means the largest element is already in results, use its score as
-    // maxScore. Otherwise pop everything else, until the largest element is
-    // extracted and use its score as maxScore.
-    float maxScore = Float.NaN;
-    if (start == 0) {
-      maxScore = results[0].score;
-    } else {
-      for (int i = globalQueue.size(); i > 1; i--) {
-        globalQueue.pop();
-      }
-      maxScore = globalQueue.pop().score;
-    }
-
-    return new TopDocs(totalHits, results, maxScore);
+    return new TopDocs(new TotalHits(totalHits, TotalHits.Relation.EQUAL_TO), results);
   }
 
   protected ScoreDocKey insert(ScoreDocKey addition, int docBase,
-      NumericDocValues keys) {
+      NumericDocValues keys) throws IOException {
     if ((globalQueue.size() >= numHits)
         && (globalQueue.lessThan(addition, globalQueue.top()))) {
       // Queue is full and proposed addition is not a globally
@@ -122,7 +108,14 @@ public abstract class DiversifiedTopDocsCollector extends
     // We delay fetching the key until we are certain the score is globally
     // competitive. We need to adjust the ScoreDoc's global doc value to be
     // a leaf reader value when looking up keys
-    addition.key = keys.get(addition.doc - docBase);
+    int leafDocID = addition.doc - docBase;
+    long value;
+    if (keys.advanceExact(leafDocID)) {
+      value = keys.longValue();
+    } else {
+      value = 0;
+    }
+    addition.key = value;
 
     // For this to work the choice of key class needs to implement
     // hashcode and equals.
@@ -182,10 +175,10 @@ public abstract class DiversifiedTopDocsCollector extends
     final NumericDocValues keySource = getKeys(context);
 
     return new LeafCollector() {
-      Scorer scorer;
+      Scorable scorer;
 
       @Override
-      public void setScorer(Scorer scorer) throws IOException {
+      public void setScorer(Scorable scorer) throws IOException {
         this.scorer = scorer;
       }
 

@@ -36,23 +36,23 @@ import org.apache.lucene.index.IndexWriter;
 import org.apache.lucene.index.IndexWriterConfig;
 import org.apache.lucene.index.LeafReader;
 import org.apache.lucene.index.LeafReaderContext;
-import org.apache.lucene.index.MultiFields;
+import org.apache.lucene.index.MultiTerms;
 import org.apache.lucene.index.NumericDocValues;
 import org.apache.lucene.index.RandomIndexWriter;
 import org.apache.lucene.index.SortedSetDocValues;
 import org.apache.lucene.index.Term;
 import org.apache.lucene.index.Terms;
-import org.apache.lucene.index.TermsEnum.SeekStatus;
-import org.apache.lucene.legacy.LegacyIntField;
-import org.apache.lucene.legacy.LegacyLongField;
-import org.apache.lucene.legacy.LegacyNumericUtils;
 import org.apache.lucene.index.TermsEnum;
+import org.apache.lucene.index.TermsEnum.SeekStatus;
 import org.apache.lucene.store.Directory;
 import org.apache.lucene.util.BytesRef;
 import org.apache.lucene.util.LuceneTestCase;
 import org.apache.lucene.util.StringHelper;
 import org.apache.lucene.util.TestUtil;
 import org.apache.solr.index.SlowCompositeReaderWrapper;
+import org.apache.solr.legacy.LegacyIntField;
+import org.apache.solr.legacy.LegacyLongField;
+import org.apache.solr.legacy.LegacyNumericUtils;
 
 // TODO:
 //   - test w/ del docs
@@ -115,19 +115,19 @@ public class TestDocTermOrds extends LuceneTestCase {
     final DocTermOrds dto = new DocTermOrds(ar, ar.getLiveDocs(), "field");
     SortedSetDocValues iter = dto.iterator(ar);
     
-    iter.setDocument(0);
+    assertEquals(0, iter.nextDoc());
     assertEquals(0, iter.nextOrd());
     assertEquals(1, iter.nextOrd());
     assertEquals(2, iter.nextOrd());
     assertEquals(SortedSetDocValues.NO_MORE_ORDS, iter.nextOrd());
     
-    iter.setDocument(1);
+    assertEquals(1, iter.nextDoc());
     assertEquals(3, iter.nextOrd());
     assertEquals(4, iter.nextOrd());
     assertEquals(5, iter.nextOrd());
     assertEquals(SortedSetDocValues.NO_MORE_ORDS, iter.nextOrd());
 
-    iter.setDocument(2);
+    assertEquals(2, iter.nextDoc());
     assertEquals(0, iter.nextOrd());
     assertEquals(5, iter.nextOrd());
     assertEquals(SortedSetDocValues.NO_MORE_ORDS, iter.nextOrd());
@@ -218,7 +218,7 @@ public class TestDocTermOrds extends LuceneTestCase {
     TestUtil.checkReader(slowR);
     verify(slowR, idToOrds, termsArray, null);
 
-    FieldCache.DEFAULT.purgeByCacheKey(slowR.getCoreCacheKey());
+    FieldCache.DEFAULT.purgeByCacheKey(slowR.getCoreCacheHelper().getKey());
 
     r.close();
     dir.close();
@@ -338,7 +338,7 @@ public class TestDocTermOrds extends LuceneTestCase {
       verify(slowR, idToOrdsPrefix, termsArray, prefixRef);
     }
 
-    FieldCache.DEFAULT.purgeByCacheKey(slowR.getCoreCacheKey());
+    FieldCache.DEFAULT.purgeByCacheKey(slowR.getCoreCacheHelper().getKey());
 
     r.close();
     dir.close();
@@ -353,7 +353,7 @@ public class TestDocTermOrds extends LuceneTestCase {
                                             TestUtil.nextInt(random(), 2, 10));
                                             
 
-    final NumericDocValues docIDToID = FieldCache.DEFAULT.getNumerics(r, "id", FieldCache.LEGACY_INT_PARSER, false);
+    final NumericDocValues docIDToID = FieldCache.DEFAULT.getNumerics(r, "id", FieldCache.LEGACY_INT_PARSER);
     /*
       for(int docID=0;docID<subR.maxDoc();docID++) {
       System.out.println("  docID=" + docID + " id=" + docIDToID[docID]);
@@ -363,7 +363,7 @@ public class TestDocTermOrds extends LuceneTestCase {
     if (VERBOSE) {
       System.out.println("TEST: verify prefix=" + (prefixRef==null ? "null" : prefixRef.utf8ToString()));
       System.out.println("TEST: all TERMS:");
-      TermsEnum allTE = MultiFields.getTerms(r, "field").iterator();
+      TermsEnum allTE = MultiTerms.getTerms(r, "field").iterator();
       int ord = 0;
       while(allTE.next() != null) {
         System.out.println("  ord=" + (ord++) + " term=" + allTE.term().utf8ToString());
@@ -374,9 +374,9 @@ public class TestDocTermOrds extends LuceneTestCase {
     final TermsEnum te = dto.getOrdTermsEnum(r);
     if (dto.numTerms() == 0) {
       if (prefixRef == null) {
-        assertNull(MultiFields.getTerms(r, "field"));
+        assertNull(MultiTerms.getTerms(r, "field"));
       } else {
-        Terms terms = MultiFields.getTerms(r, "field");
+        Terms terms = MultiTerms.getTerms(r, "field");
         if (terms != null) {
           TermsEnum termsEnum = terms.iterator();
           TermsEnum.SeekStatus result = termsEnum.seekCeil(prefixRef);
@@ -405,11 +405,20 @@ public class TestDocTermOrds extends LuceneTestCase {
 
     SortedSetDocValues iter = dto.iterator(r);
     for(int docID=0;docID<r.maxDoc();docID++) {
-      if (VERBOSE) {
-        System.out.println("TEST: docID=" + docID + " of " + r.maxDoc() + " (id=" + docIDToID.get(docID) + ")");
+      assertEquals(docID, docIDToID.nextDoc());
+      if (docID > iter.docID()) {
+        iter.nextDoc();
       }
-      iter.setDocument(docID);
-      final int[] answers = idToOrds[(int) docIDToID.get(docID)];
+      if (docID < iter.docID()) {
+        int[] answers = idToOrds[(int) docIDToID.longValue()];
+        assertEquals(0, answers.length);
+        continue;
+      }
+      
+      if (VERBOSE) {
+        System.out.println("TEST: docID=" + docID + " of " + r.maxDoc() + " (id=" + docIDToID.longValue() + ")");
+      }
+      final int[] answers = idToOrds[(int) docIDToID.longValue()];
       int upto = 0;
       long ord;
       while ((ord = iter.nextOrd()) != SortedSetDocValues.NO_MORE_ORDS) {
@@ -447,7 +456,7 @@ public class TestDocTermOrds extends LuceneTestCase {
     
     SortedSetDocValues v = FieldCache.DEFAULT.getDocTermOrds(getOnlyLeafReader(r1), "foo", null);
     assertEquals(3, v.getValueCount());
-    v.setDocument(1);
+    assertEquals(1, v.advance(1));
     assertEquals(1, v.nextOrd());
     
     iw.close();
@@ -477,12 +486,12 @@ public class TestDocTermOrds extends LuceneTestCase {
     
     SortedSetDocValues v = FieldCache.DEFAULT.getDocTermOrds(ar, "foo", FieldCache.INT32_TERM_PREFIX);
     assertEquals(2, v.getValueCount());
-    
-    v.setDocument(0);
+
+    assertEquals(0, v.nextDoc());
     assertEquals(1, v.nextOrd());
     assertEquals(SortedSetDocValues.NO_MORE_ORDS, v.nextOrd());
     
-    v.setDocument(1);
+    assertEquals(1, v.nextDoc());
     assertEquals(0, v.nextOrd());
     assertEquals(1, v.nextOrd());
     assertEquals(SortedSetDocValues.NO_MORE_ORDS, v.nextOrd());
@@ -519,11 +528,11 @@ public class TestDocTermOrds extends LuceneTestCase {
     SortedSetDocValues v = FieldCache.DEFAULT.getDocTermOrds(ar, "foo", FieldCache.INT64_TERM_PREFIX);
     assertEquals(2, v.getValueCount());
     
-    v.setDocument(0);
+    assertEquals(0, v.nextDoc());
     assertEquals(1, v.nextOrd());
     assertEquals(SortedSetDocValues.NO_MORE_ORDS, v.nextOrd());
     
-    v.setDocument(1);
+    assertEquals(1, v.nextDoc());
     assertEquals(0, v.nextOrd());
     assertEquals(1, v.nextOrd());
     assertEquals(SortedSetDocValues.NO_MORE_ORDS, v.nextOrd());
@@ -654,18 +663,15 @@ public class TestDocTermOrds extends LuceneTestCase {
     assertNotNull(DocValues.unwrapSingleton(v)); // actually a single-valued field
     assertEquals(2, v.getValueCount());
     
-    v.setDocument(0);
+    assertEquals(0, v.nextDoc());
     assertEquals(0, v.nextOrd());
     assertEquals(SortedSetDocValues.NO_MORE_ORDS, v.nextOrd());
     
-    v.setDocument(1);
+    assertEquals(1, v.nextDoc());
     assertEquals(1, v.nextOrd());
     assertEquals(SortedSetDocValues.NO_MORE_ORDS, v.nextOrd());
     
-    v.setDocument(2);
-    assertEquals(SortedSetDocValues.NO_MORE_ORDS, v.nextOrd());
-    
-    v.setDocument(3);
+    assertEquals(3, v.nextDoc());
     assertEquals(1, v.nextOrd());
     assertEquals(SortedSetDocValues.NO_MORE_ORDS, v.nextOrd());
     

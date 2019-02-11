@@ -33,6 +33,7 @@ import org.apache.lucene.search.DocIdSetIterator;
 import org.apache.lucene.search.Explanation;
 import org.apache.lucene.search.IndexSearcher;
 import org.apache.lucene.search.Query;
+import org.apache.lucene.search.ScoreMode;
 import org.apache.lucene.search.Scorer;
 import org.apache.lucene.search.Weight;
 
@@ -79,11 +80,11 @@ class DrillSidewaysQuery extends Query {
   }
   
   @Override
-  public Weight createWeight(IndexSearcher searcher, boolean needsScores, float boost) throws IOException {
-    final Weight baseWeight = baseQuery.createWeight(searcher, needsScores, boost);
+  public Weight createWeight(IndexSearcher searcher, ScoreMode scoreMode, float boost) throws IOException {
+    final Weight baseWeight = baseQuery.createWeight(searcher, scoreMode, boost);
     final Weight[] drillDowns = new Weight[drillDownQueries.length];
     for(int dim=0;dim<drillDownQueries.length;dim++) {
-      drillDowns[dim] = searcher.createNormalizedWeight(drillDownQueries[dim], false);
+      drillDowns[dim] = searcher.createWeight(searcher.rewrite(drillDownQueries[dim]), ScoreMode.COMPLETE_NO_SCORES, 1);
     }
 
     return new Weight(DrillSidewaysQuery.this) {
@@ -102,6 +103,17 @@ class DrillSidewaysQuery extends Query {
       }
 
       @Override
+      public boolean isCacheable(LeafReaderContext ctx) {
+        if (baseWeight.isCacheable(ctx) == false)
+          return false;
+        for (Weight w : drillDowns) {
+          if (w.isCacheable(ctx) == false)
+            return false;
+        }
+        return true;
+      }
+
+      @Override
       public BulkScorer bulkScorer(LeafReaderContext context) throws IOException {
         Scorer baseScorer = baseWeight.scorer(context);
 
@@ -111,7 +123,7 @@ class DrillSidewaysQuery extends Query {
           Scorer scorer = drillDowns[dim].scorer(context);
           if (scorer == null) {
             nullCount++;
-            scorer = new ConstantScoreScorer(drillDowns[dim], 0f, DocIdSetIterator.empty());
+            scorer = new ConstantScoreScorer(drillDowns[dim], 0f, scoreMode, DocIdSetIterator.empty());
           }
 
           dims[dim] = new DrillSidewaysScorer.DocsAndCost(scorer, drillSidewaysCollectors[dim]);

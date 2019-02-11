@@ -17,6 +17,8 @@
 package org.apache.lucene.index;
 
 
+import java.io.IOException;
+
 import org.apache.lucene.document.BinaryDocValuesField;
 import org.apache.lucene.document.Document;
 import org.apache.lucene.document.Field;
@@ -27,11 +29,12 @@ import org.apache.lucene.document.SortedSetDocValuesField;
 import org.apache.lucene.document.StringField;
 import org.apache.lucene.store.Directory;
 import org.apache.lucene.util.BytesRef;
+import org.apache.lucene.util.IOUtils;
 import org.apache.lucene.util.LuceneTestCase;
 
 /** Tests helper methods in DocValues */
 public class TestDocValues extends LuceneTestCase {
-  
+
   /** 
    * If the field doesn't exist, we return empty instances:
    * it can easily happen that a segment just doesn't have any docs with the field.
@@ -49,7 +52,6 @@ public class TestDocValues extends LuceneTestCase {
     assertNotNull(DocValues.getSorted(r, "bogus"));
     assertNotNull(DocValues.getSortedSet(r, "bogus"));
     assertNotNull(DocValues.getSortedNumeric(r, "bogus"));
-    assertNotNull(DocValues.getDocsWithField(r, "bogus"));
     
     dr.close();
     iw.close();
@@ -84,9 +86,6 @@ public class TestDocValues extends LuceneTestCase {
     expectThrows(IllegalStateException.class, () -> {
       DocValues.getSortedNumeric(r, "foo");
     });
-    expectThrows(IllegalStateException.class, () -> {
-      DocValues.getDocsWithField(r, "foo");
-    });
     
     dr.close();
     iw.close();
@@ -108,7 +107,6 @@ public class TestDocValues extends LuceneTestCase {
     // ok
     assertNotNull(DocValues.getNumeric(r, "foo"));
     assertNotNull(DocValues.getSortedNumeric(r, "foo"));
-    assertNotNull(DocValues.getDocsWithField(r, "foo"));
     
     // errors
     expectThrows(IllegalStateException.class, () -> {
@@ -125,8 +123,8 @@ public class TestDocValues extends LuceneTestCase {
     iw.close();
     dir.close();
   }
-  
-  /** 
+
+  /**
    * field with binary docvalues
    */
   public void testBinaryField() throws Exception {
@@ -140,7 +138,6 @@ public class TestDocValues extends LuceneTestCase {
     
     // ok
     assertNotNull(DocValues.getBinary(r, "foo"));
-    assertNotNull(DocValues.getDocsWithField(r, "foo"));
     
     // errors
     expectThrows(IllegalStateException.class, () -> {
@@ -177,7 +174,6 @@ public class TestDocValues extends LuceneTestCase {
     assertNotNull(DocValues.getBinary(r, "foo"));
     assertNotNull(DocValues.getSorted(r, "foo"));
     assertNotNull(DocValues.getSortedSet(r, "foo"));
-    assertNotNull(DocValues.getDocsWithField(r, "foo"));
     
     // errors
     expectThrows(IllegalStateException.class, () -> {
@@ -206,7 +202,6 @@ public class TestDocValues extends LuceneTestCase {
     
     // ok
     assertNotNull(DocValues.getSortedSet(r, "foo"));
-    assertNotNull(DocValues.getDocsWithField(r, "foo"));
     
     // errors
     expectThrows(IllegalStateException.class, () -> {
@@ -241,11 +236,10 @@ public class TestDocValues extends LuceneTestCase {
     
     // ok
     assertNotNull(DocValues.getSortedNumeric(r, "foo"));
-    assertNotNull(DocValues.getDocsWithField(r, "foo"));
     
     // errors
     expectThrows(IllegalStateException.class, () -> {
-      DocValues.getBinary(r, "foo");
+        DocValues.getBinary(r, "foo");
     });
     expectThrows(IllegalStateException.class, () -> {
       DocValues.getNumeric(r, "foo");
@@ -260,5 +254,19 @@ public class TestDocValues extends LuceneTestCase {
     dr.close();
     iw.close();
     dir.close();
+  }
+
+  public void testAddNullNumericDocValues() throws IOException {
+    Directory dir = newDirectory();
+    IndexWriter iw = new IndexWriter(dir, newIndexWriterConfig(null));
+    Document doc = new Document();
+    if (random().nextBoolean()) {
+      doc.add(new NumericDocValuesField("foo", null));
+    } else {
+      doc.add(new BinaryDocValuesField("foo", null));
+    }
+    IllegalArgumentException iae = expectThrows(IllegalArgumentException.class, () -> iw.addDocument(doc));
+    assertEquals("field=\"foo\": null value not allowed", iae.getMessage());
+    IOUtils.close(iw, dir);
   }
 }

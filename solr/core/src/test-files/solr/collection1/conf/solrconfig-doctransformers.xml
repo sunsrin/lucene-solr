@@ -21,7 +21,7 @@
  It is *not* a good example to work from.
 -->
 <config>
-  <luceneMatchVersion>${tests.luceneMatchVersion:LUCENE_CURRENT}</luceneMatchVersion>
+  <luceneMatchVersion>${tests.luceneMatchVersion:LATEST}</luceneMatchVersion>
   <indexConfig>
     <useCompoundFile>${useCompoundFile:false}</useCompoundFile>
   </indexConfig>
@@ -37,10 +37,10 @@
 
   <transformer name="custom" class="org.apache.solr.response.TestCustomDocTransformer$CustomTransformerFactory" />
 
-  <requestHandler name="/select" class="solr.StandardRequestHandler"/>
+  <requestHandler name="/select" class="solr.SearchHandler"/>
 
-  <requestDispatcher handleSelect="true" >
-    <requestParsers enableRemoteStreaming="false" multipartUploadLimitInKB="2048" />
+  <requestDispatcher>
+    <requestParsers enableRemoteStreaming="false" multipartUploadLimitInKB="-1" />
   </requestDispatcher>
 
   <!-- config for the admin interface -->

@@ -20,6 +20,8 @@ import org.apache.solr.common.SolrInputField;
 import org.apache.solr.request.SolrQueryRequest;
 import org.apache.solr.response.SolrQueryResponse;
 
+import static org.apache.solr.update.processor.FieldMutatingUpdateProcessor.mutator;
+
 /**
  * <p>
  * Replaces any list of values for a field matching the specified 
@@ -61,6 +63,7 @@ import org.apache.solr.response.SolrQueryResponse;
  * document that had no values for the <code>category</code> field, would also 
  * have no value in the <code>category_count</code> field.
  * </p>
+ * @since 4.0.0
  */
 public final class CountFieldValuesUpdateProcessorFactory extends FieldMutatingUpdateProcessorFactory {
 
@@ -68,15 +71,11 @@ public final class CountFieldValuesUpdateProcessorFactory extends FieldMutatingU
   public UpdateRequestProcessor getInstance(SolrQueryRequest req,
                                             SolrQueryResponse rsp,
                                             UpdateRequestProcessor next) {
-    return new FieldMutatingUpdateProcessor(getSelector(), next) {
-      @Override
-      protected SolrInputField mutate(final SolrInputField src) {
-        SolrInputField result = new SolrInputField(src.getName());
-        result.setValue(src.getValueCount(),
-                        src.getBoost());
-        return result;
-      }
-    };
+    return mutator(getSelector(), next, src -> {
+      SolrInputField result = new SolrInputField(src.getName());
+      result.setValue(src.getValueCount());
+      return result;
+    });
   }
 }
 

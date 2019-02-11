@@ -17,31 +17,33 @@
 package org.apache.solr.cloud;
 
 import java.lang.invoke.MethodHandles;
+import java.net.URL;
 import java.nio.file.Path;
 import java.nio.file.Paths;
-import java.util.concurrent.atomic.AtomicLong;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.List;
+import java.util.Map;
+import java.util.Random;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Future;
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.Collections;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.Random;
+import java.util.concurrent.atomic.AtomicLong;
 
+import org.apache.lucene.util.LuceneTestCase.Slow;
+import org.apache.lucene.util.TestUtil;
 import org.apache.solr.SolrTestCaseJ4.SuppressSSL;
-import org.apache.solr.cloud.SolrCloudTestCase;
 import org.apache.solr.client.solrj.SolrClient;
 import org.apache.solr.client.solrj.embedded.JettySolrRunner;
-import org.apache.solr.client.solrj.impl.HttpSolrClient;
 import org.apache.solr.client.solrj.impl.CloudSolrClient;
+import org.apache.solr.client.solrj.impl.HttpSolrClient;
+import org.apache.solr.client.solrj.request.CollectionAdminRequest;
 import org.apache.solr.client.solrj.request.UpdateRequest;
-import org.apache.solr.client.solrj.response.UpdateResponse;
 import org.apache.solr.client.solrj.request.schema.SchemaRequest.Field;
 import org.apache.solr.client.solrj.request.schema.SchemaRequest.FieldType;
+import org.apache.solr.client.solrj.response.UpdateResponse;
 import org.apache.solr.client.solrj.response.schema.SchemaResponse.FieldResponse;
 import org.apache.solr.client.solrj.response.schema.SchemaResponse.FieldTypeResponse;
 import org.apache.solr.common.SolrDocument;
@@ -50,15 +52,13 @@ import org.apache.solr.common.SolrInputField;
 import org.apache.solr.common.params.ModifiableSolrParams;
 import org.apache.solr.common.params.SolrParams;
 import org.apache.solr.common.util.ExecutorUtil;
+import org.apache.solr.common.util.IOUtils;
 import org.apache.solr.util.DefaultSolrThreadFactory;
 import org.apache.solr.util.TestInjection;
-import org.apache.lucene.util.LuceneTestCase.Slow;
-import org.apache.lucene.util.TestUtil;
-
 import org.junit.AfterClass;
 import org.junit.Before;
 import org.junit.BeforeClass;
-
+import org.junit.Test;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -125,26 +125,29 @@ public class TestStressCloudBlindAtomicUpdates extends SolrCloudTestCase {
     final Path configDir = Paths.get(TEST_HOME(), "collection1", "conf");
     
     configureCluster(numNodes).addConfig(configName, configDir).configure();
-    
-    Map<String, String> collectionProperties = new HashMap<>();
-    collectionProperties.put("config", "solrconfig-tlog.xml");
-    collectionProperties.put("schema", "schema-minimal-atomic-stress.xml");
 
-    assertNotNull(cluster.createCollection(COLLECTION_NAME, numShards, repFactor,
-                                           configName, null, null, collectionProperties));
-    
     CLOUD_CLIENT = cluster.getSolrClient();
     CLOUD_CLIENT.setDefaultCollection(COLLECTION_NAME);
+
+    CollectionAdminRequest.createCollection(COLLECTION_NAME, configName, numShards, repFactor)
+        .withProperty("config", "solrconfig-tlog.xml")
+        .withProperty("schema", "schema-minimal-atomic-stress.xml")
+        .process(CLOUD_CLIENT);
 
     waitForRecoveriesToFinish(CLOUD_CLIENT);
 
     for (JettySolrRunner jetty : cluster.getJettySolrRunners()) {
-      CLIENTS.add(getHttpSolrClient(jetty.getBaseUrl() + "/" + COLLECTION_NAME + "/"));
+      assertNotNull("Cluster contains null jetty?", jetty);
+      final URL baseUrl = jetty.getBaseUrl();
+      assertNotNull("Jetty has null baseUrl: " + jetty.toString(), baseUrl);
+      CLIENTS.add(getHttpSolrClient(baseUrl + "/" + COLLECTION_NAME + "/"));
     }
+
+    final boolean usingPoints = Boolean.getBoolean(NUMERIC_POINTS_SYSPROP);
 
     // sanity check no one broke the assumptions we make about our schema
     checkExpectedSchemaType( map("name","long",
-                                 "class","solr.TrieLongField",
+                                 "class", RANDOMIZED_NUMERIC_FIELDTYPES.get(Long.class),
                                  "multiValued",Boolean.FALSE,
                                  "indexed",Boolean.FALSE,
                                  "stored",Boolean.FALSE,
@@ -156,20 +159,28 @@ public class TestStressCloudBlindAtomicUpdates extends SolrCloudTestCase {
     TestInjection.reset();
     ExecutorUtil.shutdownAndAwaitTermination(EXEC_SERVICE);
     EXEC_SERVICE = null;
-    CLOUD_CLIENT.close(); CLOUD_CLIENT = null;
+    IOUtils.closeQuietly(CLOUD_CLIENT);
+    CLOUD_CLIENT = null;
     for (HttpSolrClient client : CLIENTS) {
-      client.close();
+      if (null == client) {
+        log.error("CLIENTS contains a null SolrClient???");
+      }
+      IOUtils.closeQuietly(client);
     }
     CLIENTS = null;
   }
   
   @Before
   private void clearCloudCollection() throws Exception {
+    TestInjection.reset();
+    waitForRecoveriesToFinish(CLOUD_CLIENT);
+    
     assertEquals(0, CLOUD_CLIENT.deleteByQuery("*:*").getStatus());
     assertEquals(0, CLOUD_CLIENT.optimize().getStatus());
-
-    TestInjection.reset();
     
+    assertEquals("Collection should be empty!",
+                 0, CLOUD_CLIENT.query(params("q", "*:*")).getResults().getNumFound());
+
     final int injectionPercentage = (int)Math.ceil(atLeast(1) / 2);
     testInjection = usually() ? "false:0" : ("true:" + injectionPercentage);
   }
@@ -178,15 +189,19 @@ public class TestStressCloudBlindAtomicUpdates extends SolrCloudTestCase {
    * Assigns {@link #testInjection} to various TestInjection variables.  Calling this 
    * method multiple times in the same method should always result in the same setting being applied 
    * (even if {@link TestInjection#reset} was called in between.
+   *
+   * NOTE: method is currently a No-Op pending SOLR-13189
    */
   private void startTestInjection() {
-    log.info("TestInjection: fail replica, update pause, tlog pauses: " + testInjection);
-    TestInjection.failReplicaRequests = testInjection;
-    TestInjection.updateLogReplayRandomPause = testInjection;
-    TestInjection.updateRandomPause = testInjection;
+    log.info("TODO: TestInjection disabled pending solution to SOLR-13189");
+    //log.info("TestInjection: fail replica, update pause, tlog pauses: " + testInjection);
+    //TestInjection.failReplicaRequests = testInjection;
+    //TestInjection.updateLogReplayRandomPause = testInjection;
+    //TestInjection.updateRandomPause = testInjection;
   }
 
 
+  @Test
   public void test_dv() throws Exception {
     String field = "long_dv";
     checkExpectedSchemaField(map("name", field,
@@ -197,6 +212,8 @@ public class TestStressCloudBlindAtomicUpdates extends SolrCloudTestCase {
     
     checkField(field);
   }
+  
+  @Test
   public void test_dv_stored() throws Exception {
     String field = "long_dv_stored";
     checkExpectedSchemaField(map("name", field,
@@ -218,6 +235,7 @@ public class TestStressCloudBlindAtomicUpdates extends SolrCloudTestCase {
     
     checkField(field);
   }
+
   public void test_dv_idx() throws Exception {
     String field = "long_dv_idx";
     checkExpectedSchemaField(map("name", field,
@@ -442,13 +460,13 @@ public class TestStressCloudBlindAtomicUpdates extends SolrCloudTestCase {
   
   public static SolrInputField f(String fieldName, Object... values) {
     SolrInputField f = new SolrInputField(fieldName);
-    f.setValue(values, 1.0F);
+    f.setValue(values);
     // TODO: soooooooooo stupid (but currently neccessary because atomic updates freak out
     // if the Map with the "inc" operation is inside of a collection - even if it's the only "value") ...
     if (1 == values.length) {
-      f.setValue(values[0], 1.0F);
+      f.setValue(values[0]);
     } else {
-      f.setValue(values, 1.0F);
+      f.setValue(values);
     }
     return f;
   }
@@ -461,6 +479,7 @@ public class TestStressCloudBlindAtomicUpdates extends SolrCloudTestCase {
 
   public static void waitForRecoveriesToFinish(CloudSolrClient client) throws Exception {
     assert null != client.getDefaultCollection();
+    client.getZkStateReader().forceUpdateCollection(client.getDefaultCollection());
     AbstractDistribZkTestBase.waitForRecoveriesToFinish(client.getDefaultCollection(),
                                                         client.getZkStateReader(),
                                                         true, true, 330);

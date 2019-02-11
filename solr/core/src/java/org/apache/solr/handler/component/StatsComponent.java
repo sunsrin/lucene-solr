@@ -45,6 +45,12 @@ public class StatsComponent extends SearchComponent {
       rb.setNeedDocSet( true );
       rb.doStats = true;
       rb._statsInfo = new StatsInfo(rb);
+      for (StatsField statsField : rb._statsInfo.getStatsFields()) {
+        if (statsField.getSchemaField() != null && statsField.getSchemaField().getType().isPointField() && !statsField.getSchemaField().hasDocValues()) {
+          throw new SolrException(SolrException.ErrorCode.BAD_REQUEST, 
+              "Can't calculate stats on a PointField without docValues");
+        }
+      }
     }
   }
 
@@ -93,7 +99,7 @@ public class StatsComponent extends SearchComponent {
         stats = (NamedList<NamedList<NamedList<?>>>) 
           srsp.getSolrResponse().getResponse().get("stats");
       } catch (Exception e) {
-        if (rb.req.getParams().getBool(ShardParams.SHARDS_TOLERANT, false)) {
+        if (ShardParams.getShardsTolerantAsBool(rb.req.getParams())) {
           continue; // looks like a shard did not return anything
         }
         throw new SolrException(SolrException.ErrorCode.SERVER_ERROR,
@@ -154,7 +160,7 @@ public class StatsComponent extends SearchComponent {
   }
 
   /////////////////////////////////////////////
-  ///  SolrInfoMBean
+  ///  SolrInfoBean
   ////////////////////////////////////////////
 
   @Override

@@ -19,26 +19,30 @@ package org.apache.lucene.search.similarities;
 
 import java.io.IOException;
 import java.util.Arrays;
+import java.util.Random;
 
 import org.apache.lucene.document.Document;
-import org.apache.lucene.document.StringField;
 import org.apache.lucene.document.Field.Store;
+import org.apache.lucene.document.StringField;
 import org.apache.lucene.index.DirectoryReader;
+import org.apache.lucene.index.FieldInvertState;
+import org.apache.lucene.index.IndexOptions;
 import org.apache.lucene.index.IndexReader;
 import org.apache.lucene.index.IndexWriter;
 import org.apache.lucene.index.Term;
+import org.apache.lucene.search.BooleanClause.Occur;
 import org.apache.lucene.search.BooleanQuery;
 import org.apache.lucene.search.DisjunctionMaxQuery;
 import org.apache.lucene.search.IndexSearcher;
 import org.apache.lucene.search.Query;
 import org.apache.lucene.search.TermQuery;
 import org.apache.lucene.search.TopDocs;
-import org.apache.lucene.search.BooleanClause.Occur;
 import org.apache.lucene.store.Directory;
 import org.apache.lucene.util.IOUtils;
-import org.apache.lucene.util.LuceneTestCase;
+import org.apache.lucene.util.TestUtil;
+import org.apache.lucene.util.Version;
 
-public class TestClassicSimilarity extends LuceneTestCase {
+public class TestClassicSimilarity extends BaseSimilarityTestCase {
   private Directory directory;
   private IndexReader indexReader;
   private IndexSearcher indexSearcher;
@@ -63,19 +67,11 @@ public class TestClassicSimilarity extends LuceneTestCase {
     IOUtils.close(indexReader, directory);
     super.tearDown();
   }
-  
-  // Javadocs give this as an example so we test to make sure it's correct:
-  public void testPrecisionLoss() throws Exception {
-    ClassicSimilarity sim = new ClassicSimilarity();
-    float v = sim.decodeNormValue(sim.encodeNormValue(.89f));
-    assertEquals(0.875f, v, 0.0001f);
-  }
-
 
   public void testHit() throws IOException {
     Query query = new TermQuery(new Term("test", "hit"));
     TopDocs topDocs = indexSearcher.search(query, 1);
-    assertEquals(1, topDocs.totalHits);
+    assertEquals(1, topDocs.totalHits.value);
     assertEquals(1, topDocs.scoreDocs.length);
     assertTrue(topDocs.scoreDocs[0].score != 0);
   }
@@ -83,13 +79,13 @@ public class TestClassicSimilarity extends LuceneTestCase {
   public void testMiss() throws IOException {
     Query query = new TermQuery(new Term("test", "miss"));
     TopDocs topDocs = indexSearcher.search(query, 1);
-    assertEquals(0, topDocs.totalHits);
+    assertEquals(0, topDocs.totalHits.value);
   }
 
   public void testEmpty() throws IOException {
     Query query = new TermQuery(new Term("empty", "miss"));
     TopDocs topDocs = indexSearcher.search(query, 1);
-    assertEquals(0, topDocs.totalHits);
+    assertEquals(0, topDocs.totalHits.value);
   }
 
   public void testBQHit() throws IOException {
@@ -97,7 +93,7 @@ public class TestClassicSimilarity extends LuceneTestCase {
       .add(new TermQuery(new Term("test", "hit")), Occur.SHOULD)
       .build();
     TopDocs topDocs = indexSearcher.search(query, 1);
-    assertEquals(1, topDocs.totalHits);
+    assertEquals(1, topDocs.totalHits.value);
     assertEquals(1, topDocs.scoreDocs.length);
     assertTrue(topDocs.scoreDocs[0].score != 0);
   }
@@ -108,7 +104,7 @@ public class TestClassicSimilarity extends LuceneTestCase {
       .add(new TermQuery(new Term("test", "miss")), Occur.SHOULD)
       .build();
     TopDocs topDocs = indexSearcher.search(query, 1);
-    assertEquals(1, topDocs.totalHits);
+    assertEquals(1, topDocs.totalHits.value);
     assertEquals(1, topDocs.scoreDocs.length);
     assertTrue(topDocs.scoreDocs[0].score != 0);
   }
@@ -119,7 +115,7 @@ public class TestClassicSimilarity extends LuceneTestCase {
       .add(new TermQuery(new Term("empty", "miss")), Occur.SHOULD)
       .build();
     TopDocs topDocs = indexSearcher.search(query, 1);
-    assertEquals(1, topDocs.totalHits);
+    assertEquals(1, topDocs.totalHits.value);
     assertEquals(1, topDocs.scoreDocs.length);
     assertTrue(topDocs.scoreDocs[0].score != 0);
   }
@@ -130,7 +126,7 @@ public class TestClassicSimilarity extends LuceneTestCase {
         new TermQuery(new Term("test", "hit"))),
       0);
     TopDocs topDocs = indexSearcher.search(query, 1);
-    assertEquals(1, topDocs.totalHits);
+    assertEquals(1, topDocs.totalHits.value);
     assertEquals(1, topDocs.scoreDocs.length);
     assertTrue(topDocs.scoreDocs[0].score != 0);
   }
@@ -142,7 +138,7 @@ public class TestClassicSimilarity extends LuceneTestCase {
         new TermQuery(new Term("test", "miss"))),
       0);
     TopDocs topDocs = indexSearcher.search(query, 1);
-    assertEquals(1, topDocs.totalHits);
+    assertEquals(1, topDocs.totalHits.value);
     assertEquals(1, topDocs.scoreDocs.length);
     assertTrue(topDocs.scoreDocs[0].score != 0);
   }
@@ -154,21 +150,45 @@ public class TestClassicSimilarity extends LuceneTestCase {
         new TermQuery(new Term("empty", "miss"))),
       0);
     TopDocs topDocs = indexSearcher.search(query, 1);
-    assertEquals(1, topDocs.totalHits);
+    assertEquals(1, topDocs.totalHits.value);
     assertEquals(1, topDocs.scoreDocs.length);
     assertTrue(topDocs.scoreDocs[0].score != 0);
   }
   
-  public void testSaneNormValues() {
+  public void testSaneNormValues() throws IOException {
     ClassicSimilarity sim = new ClassicSimilarity();
+    TFIDFSimilarity.TFIDFScorer stats = (TFIDFSimilarity.TFIDFScorer) sim.scorer(1f, indexSearcher.collectionStatistics("test"));
     for (int i = 0; i < 256; i++) {
-      float boost = sim.decodeNormValue((byte) i);
+      float boost = stats.normTable[i];
       assertFalse("negative boost: " + boost + ", byte=" + i, boost < 0.0f);
       assertFalse("inf bost: " + boost + ", byte=" + i, Float.isInfinite(boost));
       assertFalse("nan boost for byte=" + i, Float.isNaN(boost));
       if (i > 0) {
-        assertTrue("boost is not increasing: " + boost + ",byte=" + i, boost > sim.decodeNormValue((byte)(i-1)));
+        assertTrue("boost is not decreasing: " + boost + ",byte=" + i, boost < stats.normTable[i-1]);
       }
     }
+  }
+
+  public void testSameNormsAsBM25() {
+    ClassicSimilarity sim1 = new ClassicSimilarity();
+    BM25Similarity sim2 = new BM25Similarity();
+    sim2.setDiscountOverlaps(true);
+    for (int iter = 0; iter < 100; ++iter) {
+      final int length = TestUtil.nextInt(random(), 1, 1000);
+      final int position = random().nextInt(length);
+      final int numOverlaps = random().nextInt(length);
+      final int maxTermFrequency = 1;
+      final int uniqueTermCount = 1;
+      FieldInvertState state = new FieldInvertState(Version.LATEST.major, "foo", IndexOptions.DOCS_AND_FREQS, position, length, numOverlaps, 100, maxTermFrequency, uniqueTermCount);
+      assertEquals(
+          sim2.computeNorm(state),
+          sim1.computeNorm(state),
+          0f);
+    }
+  }
+
+  @Override
+  protected Similarity getSimilarity(Random random) {
+    return new ClassicSimilarity();
   }
 }

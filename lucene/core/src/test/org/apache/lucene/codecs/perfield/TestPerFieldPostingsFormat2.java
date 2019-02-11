@@ -18,25 +18,39 @@ package org.apache.lucene.codecs.perfield;
 
 
 import java.io.IOException;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.HashSet;
+import java.util.List;
 
 import org.apache.lucene.analysis.MockAnalyzer;
 import org.apache.lucene.codecs.Codec;
+import org.apache.lucene.codecs.FieldsConsumer;
+import org.apache.lucene.codecs.FieldsProducer;
+import org.apache.lucene.codecs.NormsProducer;
 import org.apache.lucene.codecs.PostingsFormat;
 import org.apache.lucene.codecs.asserting.AssertingCodec;
 import org.apache.lucene.codecs.blockterms.LuceneVarGapFixedInterval;
 import org.apache.lucene.codecs.memory.DirectPostingsFormat;
-import org.apache.lucene.codecs.memory.MemoryPostingsFormat;
 import org.apache.lucene.document.Document;
 import org.apache.lucene.document.Field;
 import org.apache.lucene.document.FieldType;
+import org.apache.lucene.document.IntPoint;
+import org.apache.lucene.document.StringField;
 import org.apache.lucene.document.TextField;
 import org.apache.lucene.index.DirectoryReader;
+import org.apache.lucene.index.FieldInfo;
+import org.apache.lucene.index.Fields;
 import org.apache.lucene.index.IndexReader;
 import org.apache.lucene.index.IndexWriter;
 import org.apache.lucene.index.IndexWriterConfig.OpenMode;
 import org.apache.lucene.index.IndexWriterConfig;
 import org.apache.lucene.index.LogDocMergePolicy;
+import org.apache.lucene.index.MergeState;
 import org.apache.lucene.index.RandomIndexWriter;
+import org.apache.lucene.index.SegmentReadState;
+import org.apache.lucene.index.SegmentWriteState;
 import org.apache.lucene.index.Term;
 import org.apache.lucene.search.IndexSearcher;
 import org.apache.lucene.search.TermQuery;
@@ -106,10 +120,10 @@ public class TestPerFieldPostingsFormat2 extends LuceneTestCase {
     writer.commit();
     addDocs2(writer, 10);
     writer.commit();
-    assertEquals(30, writer.maxDoc());
+    assertEquals(30, writer.getDocStats().maxDoc);
     TestUtil.checkIndex(dir);
     writer.forceMerge(1);
-    assertEquals(30, writer.maxDoc());
+    assertEquals(30, writer.getDocStats().maxDoc);
     writer.close();
     dir.close();
   }
@@ -150,7 +164,7 @@ public class TestPerFieldPostingsFormat2 extends LuceneTestCase {
     //((LogMergePolicy) iwconf.getMergePolicy()).setMergeFactor(10);
     iwconf.setMaxBufferedDocs(IndexWriterConfig.DISABLE_AUTO_FLUSH);
 
-    iwconf.setCodec(new MockCodec2()); // uses standard for field content
+    iwconf.setCodec(new MockCodec()); // uses standard for field content
     writer = newWriter(dir, iwconf);
     // swap in new codec for currently written segments
     if (VERBOSE) {
@@ -159,7 +173,7 @@ public class TestPerFieldPostingsFormat2 extends LuceneTestCase {
     addDocs2(writer, 10);
     writer.commit();
     codec = iwconf.getCodec();
-    assertEquals(30, writer.maxDoc());
+    assertEquals(30, writer.getDocStats().maxDoc);
     assertQuery(new Term("content", "bbb"), dir, 10);
     assertQuery(new Term("content", "ccc"), dir, 10);   ////
     assertQuery(new Term("content", "aaa"), dir, 10);
@@ -172,13 +186,13 @@ public class TestPerFieldPostingsFormat2 extends LuceneTestCase {
     assertQuery(new Term("content", "ccc"), dir, 10);
     assertQuery(new Term("content", "bbb"), dir, 20);
     assertQuery(new Term("content", "aaa"), dir, 10);
-    assertEquals(40, writer.maxDoc());
+    assertEquals(40, writer.getDocStats().maxDoc);
 
     if (VERBOSE) {
       System.out.println("TEST: now optimize");
     }
     writer.forceMerge(1);
-    assertEquals(40, writer.maxDoc());
+    assertEquals(40, writer.getDocStats().maxDoc);
     writer.close();
     assertQuery(new Term("content", "ccc"), dir, 10);
     assertQuery(new Term("content", "bbb"), dir, 20);
@@ -195,7 +209,7 @@ public class TestPerFieldPostingsFormat2 extends LuceneTestCase {
     IndexReader reader = DirectoryReader.open(dir);
     IndexSearcher searcher = newSearcher(reader);
     TopDocs search = searcher.search(new TermQuery(t), num + 10);
-    assertEquals(num, search.totalHits);
+    assertEquals(num, search.totalHits.value);
     reader.close();
 
   }
@@ -203,24 +217,7 @@ public class TestPerFieldPostingsFormat2 extends LuceneTestCase {
   public static class MockCodec extends AssertingCodec {
     final PostingsFormat luceneDefault = TestUtil.getDefaultPostingsFormat();
     final PostingsFormat direct = new DirectPostingsFormat();
-    final PostingsFormat memory = new MemoryPostingsFormat();
-    
-    @Override
-    public PostingsFormat getPostingsFormatForField(String field) {
-      if (field.equals("id")) {
-        return direct;
-      } else if (field.equals("content")) {
-        return memory;
-      } else {
-        return luceneDefault;
-      }
-    }
-  }
 
-  public static class MockCodec2 extends AssertingCodec {
-    final PostingsFormat luceneDefault = TestUtil.getDefaultPostingsFormat();
-    final PostingsFormat direct = new DirectPostingsFormat();
-    
     @Override
     public PostingsFormat getPostingsFormatForField(String field) {
       if (field.equals("id")) {
@@ -261,7 +258,7 @@ public class TestPerFieldPostingsFormat2 extends LuceneTestCase {
         writer.forceMerge(1);
       }
       writer.commit();
-      assertEquals((i + 1) * docsPerRound, writer.maxDoc());
+      assertEquals((i + 1) * docsPerRound, writer.getDocStats().maxDoc);
       writer.close();
     }
     dir.close();
@@ -272,9 +269,9 @@ public class TestPerFieldPostingsFormat2 extends LuceneTestCase {
       @Override
       public PostingsFormat getPostingsFormatForField(String field) {
         if ("id".equals(field)) {
-          return new MemoryPostingsFormat();
+          return new DirectPostingsFormat();
         } else if ("date".equals(field)) {
-          return new MemoryPostingsFormat();
+          return new DirectPostingsFormat();
         } else {
           return super.getPostingsFormatForField(field);
         }
@@ -321,5 +318,101 @@ public class TestPerFieldPostingsFormat2 extends LuceneTestCase {
     }
     iw.close();
     dir.close(); // checkindex
+  }
+
+  @SuppressWarnings("deprecation")
+  public void testMergeCalledOnTwoFormats() throws IOException {
+    MergeRecordingPostingsFormatWrapper pf1 = new MergeRecordingPostingsFormatWrapper(TestUtil.getDefaultPostingsFormat());
+    MergeRecordingPostingsFormatWrapper pf2 = new MergeRecordingPostingsFormatWrapper(TestUtil.getDefaultPostingsFormat());
+
+    IndexWriterConfig iwc = new IndexWriterConfig();
+    iwc.setCodec(new AssertingCodec() {
+      @Override
+      public PostingsFormat getPostingsFormatForField(String field) {
+        switch (field) {
+          case "f1":
+          case "f2":
+            return pf1;
+
+          case "f3":
+          case "f4":
+            return pf2;
+
+          default:
+            return super.getPostingsFormatForField(field);
+        }
+      }
+    });
+
+    Directory directory = newDirectory();
+
+    IndexWriter iwriter = new IndexWriter(directory, iwc);
+
+    Document doc = new Document();
+    doc.add(new StringField("f1", "val1", Field.Store.NO));
+    doc.add(new StringField("f2", "val2", Field.Store.YES));
+    doc.add(new IntPoint("f3", 3)); // Points are not indexed as postings and should not appear in the merge fields
+    doc.add(new StringField("f4", "val4", Field.Store.NO));
+    iwriter.addDocument(doc);
+    iwriter.commit();
+
+    doc = new Document();
+    doc.add(new StringField("f1", "val5", Field.Store.NO));
+    doc.add(new StringField("f2", "val6", Field.Store.YES));
+    doc.add(new IntPoint("f3", 7));
+    doc.add(new StringField("f4", "val8", Field.Store.NO));
+    iwriter.addDocument(doc);
+    iwriter.commit();
+
+    iwriter.forceMerge(1, true);
+    iwriter.close();
+
+    assertEquals(1, pf1.nbMergeCalls);
+    assertEquals(new HashSet<>(Arrays.asList("f1", "f2")), new HashSet<>(pf1.fieldNames));
+    assertEquals(1, pf2.nbMergeCalls);
+    assertEquals(Collections.singletonList("f4"), pf2.fieldNames);
+
+    directory.close();
+  }
+
+  private static final class MergeRecordingPostingsFormatWrapper extends PostingsFormat {
+    private final PostingsFormat delegate;
+    final List<String> fieldNames = new ArrayList<>();
+    int nbMergeCalls = 0;
+
+    MergeRecordingPostingsFormatWrapper(PostingsFormat delegate) {
+      super(delegate.getName());
+      this.delegate = delegate;
+    }
+
+    @Override
+    public FieldsConsumer fieldsConsumer(SegmentWriteState state) throws IOException {
+      final FieldsConsumer consumer = delegate.fieldsConsumer(state);
+      return new FieldsConsumer() {
+        @Override
+        public void write(Fields fields, NormsProducer norms) throws IOException {
+          consumer.write(fields, norms);
+        }
+
+        @Override
+        public void merge(MergeState mergeState, NormsProducer norms) throws IOException {
+          nbMergeCalls++;
+          for (FieldInfo fi : mergeState.mergeFieldInfos) {
+            fieldNames.add(fi.name);
+          }
+          consumer.merge(mergeState, norms);
+        }
+
+        @Override
+        public void close() throws IOException {
+          consumer.close();
+        }
+      };
+    }
+
+    @Override
+    public FieldsProducer fieldsProducer(SegmentReadState state) throws IOException {
+      return delegate.fieldsProducer(state);
+    }
   }
 }

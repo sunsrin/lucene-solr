@@ -32,6 +32,7 @@ import org.apache.lucene.analysis.Token;
 import org.apache.lucene.codecs.FieldsConsumer;
 import org.apache.lucene.codecs.FieldsProducer;
 import org.apache.lucene.codecs.FilterCodec;
+import org.apache.lucene.codecs.NormsProducer;
 import org.apache.lucene.codecs.PostingsFormat;
 import org.apache.lucene.document.Document;
 import org.apache.lucene.document.Field;
@@ -40,6 +41,8 @@ import org.apache.lucene.document.StringField;
 import org.apache.lucene.document.TextField;
 import org.apache.lucene.index.TermsEnum.SeekStatus;
 import org.apache.lucene.search.DocIdSetIterator;
+import org.apache.lucene.search.IndexSearcher;
+import org.apache.lucene.search.TermQuery;
 import org.apache.lucene.store.Directory;
 import org.apache.lucene.store.IOContext;
 import org.apache.lucene.util.BytesRef;
@@ -191,10 +194,7 @@ public abstract class BasePostingsFormatTestCase extends BaseIndexFileFormatTest
     iw.addDocument(doc);
     DirectoryReader ir = iw.getReader();
     LeafReader ar = getOnlyLeafReader(ir);
-    Fields fields = ar.fields();
-    int fieldCount = fields.size();
-    // -1 is allowed, if the codec doesn't implement fields.size():
-    assertTrue(fieldCount == 1 || fieldCount == -1);
+    assertEquals(1, ar.getFieldInfos().size());
     Terms terms = ar.terms("");
     assertNotNull(terms);
     TermsEnum termsEnum = terms.iterator();
@@ -216,10 +216,7 @@ public abstract class BasePostingsFormatTestCase extends BaseIndexFileFormatTest
     iw.addDocument(doc);
     DirectoryReader ir = iw.getReader();
     LeafReader ar = getOnlyLeafReader(ir);
-    Fields fields = ar.fields();
-    int fieldCount = fields.size();
-    // -1 is allowed, if the codec doesn't implement fields.size():
-    assertTrue(fieldCount == 1 || fieldCount == -1);
+    assertEquals(1, ar.getFieldInfos().size());
     Terms terms = ar.terms("");
     assertNotNull(terms);
     TermsEnum termsEnum = terms.iterator();
@@ -294,11 +291,10 @@ public abstract class BasePostingsFormatTestCase extends BaseIndexFileFormatTest
     iw.forceMerge(1);
     DirectoryReader ir = iw.getReader();
     LeafReader ar = getOnlyLeafReader(ir);
-    Fields fields = ar.fields();
     // Ghost busting terms dict impls will have
     // fields.size() == 0; all others must be == 1:
-    assertTrue(fields.size() <= 1);
-    Terms terms = fields.terms("ghostField");
+    assertTrue(ar.getFieldInfos().size() <= 1);
+    Terms terms = ar.terms("ghostField");
     if (terms != null) {
       TermsEnum termsEnum = terms.iterator();
       BytesRef term = termsEnum.next();
@@ -308,6 +304,49 @@ public abstract class BasePostingsFormatTestCase extends BaseIndexFileFormatTest
       }
     }
     ir.close();
+    iw.close();
+    dir.close();
+  }
+
+  // tests that level 2 ghost fields still work
+  public void testLevel2Ghosts() throws Exception {
+    Directory dir = newDirectory();
+
+    Analyzer analyzer = new MockAnalyzer(random());
+    IndexWriterConfig iwc = newIndexWriterConfig(null);
+    iwc.setCodec(getCodec());
+    iwc.setMergePolicy(newLogMergePolicy());
+    IndexWriter iw = new IndexWriter(dir, iwc);
+
+    Document document = new Document();
+    document.add(new StringField("id", "0", Field.Store.NO));
+    document.add(new StringField("suggest_field", "apples", Field.Store.NO));
+    iw.addDocument(document);
+    // need another document so whole segment isn't deleted
+    iw.addDocument(new Document());
+    iw.commit();
+
+    document = new Document();
+    document.add(new StringField("id", "1", Field.Store.NO));
+    document.add(new StringField("suggest_field2", "apples", Field.Store.NO));
+    iw.addDocument(document);
+    iw.commit();
+
+    iw.deleteDocuments(new Term("id", "0"));
+    // first force merge creates a level 1 ghost field
+    iw.forceMerge(1);
+    
+    // second force merge creates a level 2 ghost field, causing MultiFields to include "suggest_field" in its iteration, yet a null Terms is returned (no documents have
+    // this field anymore)
+    iw.addDocument(new Document());
+    iw.forceMerge(1);
+
+    DirectoryReader reader = DirectoryReader.open(iw);
+    IndexSearcher indexSearcher = new IndexSearcher(reader);
+
+    assertEquals(1, indexSearcher.count(new TermQuery(new Term("id", "1"))));
+
+    reader.close();
     iw.close();
     dir.close();
   }
@@ -360,8 +399,8 @@ public abstract class BasePostingsFormatTestCase extends BaseIndexFileFormatTest
 
               return new FieldsConsumer() {
                 @Override
-                public void write(Fields fields) throws IOException {
-                  fieldsConsumer.write(fields);
+                public void write(Fields fields, NormsProducer norms) throws IOException {
+                  fieldsConsumer.write(fields, norms);
 
                   boolean isMerge = state.context.context == IOContext.Context.MERGE;
 
@@ -512,7 +551,7 @@ public abstract class BasePostingsFormatTestCase extends BaseIndexFileFormatTest
     IndexReader r = w.getReader();
     w.close();
 
-    Terms terms = MultiFields.getTerms(r, "body");
+    Terms terms = MultiTerms.getTerms(r, "body");
     assertEquals(sumDocFreq.get(), terms.getSumDocFreq());
     assertEquals(sumTotalTermFreq.get(), terms.getSumTotalTermFreq());
 

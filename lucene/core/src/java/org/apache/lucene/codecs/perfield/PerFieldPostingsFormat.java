@@ -20,6 +20,7 @@ package org.apache.lucene.codecs.perfield;
 import java.io.Closeable;
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
@@ -27,24 +28,27 @@ import java.util.IdentityHashMap;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
-import java.util.ServiceLoader; // javadocs
+import java.util.ServiceLoader;
 import java.util.Set;
 import java.util.TreeMap;
 import java.util.TreeSet;
 
 import org.apache.lucene.codecs.FieldsConsumer;
 import org.apache.lucene.codecs.FieldsProducer;
+import org.apache.lucene.codecs.NormsProducer;
 import org.apache.lucene.codecs.PostingsFormat;
 import org.apache.lucene.index.FieldInfo;
 import org.apache.lucene.index.Fields;
 import org.apache.lucene.index.FilterLeafReader.FilterFields;
 import org.apache.lucene.index.IndexOptions;
+import org.apache.lucene.index.MergeState;
 import org.apache.lucene.index.SegmentReadState;
 import org.apache.lucene.index.SegmentWriteState;
 import org.apache.lucene.index.Terms;
 import org.apache.lucene.util.Accountable;
 import org.apache.lucene.util.Accountables;
 import org.apache.lucene.util.IOUtils;
+import org.apache.lucene.util.MergedIterator;
 import org.apache.lucene.util.RamUsageEstimator;
 
 /**
@@ -115,8 +119,65 @@ public abstract class PerFieldPostingsFormat extends PostingsFormat {
     }
 
     @Override
-    public void write(Fields fields) throws IOException {
+    public void write(Fields fields, NormsProducer norms) throws IOException {
+      Map<PostingsFormat, FieldsGroup> formatToGroups = buildFieldsGroupMapping(fields);
 
+      // Write postings
+      boolean success = false;
+      try {
+        for (Map.Entry<PostingsFormat, FieldsGroup> ent : formatToGroups.entrySet()) {
+          PostingsFormat format = ent.getKey();
+          final FieldsGroup group = ent.getValue();
+
+          // Exposes only the fields from this group:
+          Fields maskedFields = new FilterFields(fields) {
+            @Override
+            public Iterator<String> iterator() {
+              return group.fields.iterator();
+            }
+          };
+
+          FieldsConsumer consumer = format.fieldsConsumer(group.state);
+          toClose.add(consumer);
+          consumer.write(maskedFields, norms);
+        }
+        success = true;
+      } finally {
+        if (!success) {
+          IOUtils.closeWhileHandlingException(toClose);
+        }
+      }
+    }
+
+    @Override
+    public void merge(MergeState mergeState, NormsProducer norms) throws IOException {
+      @SuppressWarnings("unchecked") Iterable<String> indexedFieldNames = () ->
+          new MergedIterator<>(true,
+              Arrays.stream(mergeState.fieldsProducers).map(FieldsProducer::iterator).toArray(Iterator[]::new));
+      Map<PostingsFormat, FieldsGroup> formatToGroups = buildFieldsGroupMapping(indexedFieldNames);
+
+      // Merge postings
+      PerFieldMergeState pfMergeState = new PerFieldMergeState(mergeState);
+      boolean success = false;
+      try {
+        for (Map.Entry<PostingsFormat, FieldsGroup> ent : formatToGroups.entrySet()) {
+          PostingsFormat format = ent.getKey();
+          final FieldsGroup group = ent.getValue();
+
+          FieldsConsumer consumer = format.fieldsConsumer(group.state);
+          toClose.add(consumer);
+          consumer.merge(pfMergeState.apply(group.fields), norms);
+        }
+        success = true;
+      } finally {
+        pfMergeState.reset();
+        if (!success) {
+          IOUtils.closeWhileHandlingException(toClose);
+        }
+      }
+    }
+
+    private Map<PostingsFormat, FieldsGroup> buildFieldsGroupMapping(Iterable<String> indexedFieldNames) {
       // Maps a PostingsFormat instance to the suffix it
       // should use
       Map<PostingsFormat,FieldsGroup> formatToGroups = new HashMap<>();
@@ -124,17 +185,17 @@ public abstract class PerFieldPostingsFormat extends PostingsFormat {
       // Holds last suffix of each PostingFormat name
       Map<String,Integer> suffixes = new HashMap<>();
 
-      // First pass: assign field -> PostingsFormat
-      for(String field : fields) {
+      // Assign field -> PostingsFormat
+      for(String field : indexedFieldNames) {
         FieldInfo fieldInfo = writeState.fieldInfos.fieldInfo(field);
-
+        // TODO: This should check current format from the field attribute?
         final PostingsFormat format = getPostingsFormatForField(field);
-  
+
         if (format == null) {
           throw new IllegalStateException("invalid null PostingsFormat for field=\"" + field + "\"");
         }
         String formatName = format.getName();
-      
+
         FieldsGroup group = formatToGroups.get(format);
         if (group == null) {
           // First time we are seeing this format; create a
@@ -165,44 +226,10 @@ public abstract class PerFieldPostingsFormat extends PostingsFormat {
 
         group.fields.add(field);
 
-        String previousValue = fieldInfo.putAttribute(PER_FIELD_FORMAT_KEY, formatName);
-        if (previousValue != null) {
-          throw new IllegalStateException("found existing value for " + PER_FIELD_FORMAT_KEY + 
-                                          ", field=" + fieldInfo.name + ", old=" + previousValue + ", new=" + formatName);
-        }
-
-        previousValue = fieldInfo.putAttribute(PER_FIELD_SUFFIX_KEY, Integer.toString(group.suffix));
-        if (previousValue != null) {
-          throw new IllegalStateException("found existing value for " + PER_FIELD_SUFFIX_KEY + 
-                                          ", field=" + fieldInfo.name + ", old=" + previousValue + ", new=" + group.suffix);
-        }
+        fieldInfo.putAttribute(PER_FIELD_FORMAT_KEY, formatName);
+        fieldInfo.putAttribute(PER_FIELD_SUFFIX_KEY, Integer.toString(group.suffix));
       }
-
-      // Second pass: write postings
-      boolean success = false;
-      try {
-        for(Map.Entry<PostingsFormat,FieldsGroup> ent : formatToGroups.entrySet()) {
-          PostingsFormat format = ent.getKey();
-          final FieldsGroup group = ent.getValue();
-
-          // Exposes only the fields from this group:
-          Fields maskedFields = new FilterFields(fields) {
-              @Override
-              public Iterator<String> iterator() {
-                return group.fields.iterator();
-              }
-            };
-
-          FieldsConsumer consumer = format.fieldsConsumer(group.state);
-          toClose.add(consumer);
-          consumer.write(maskedFields);
-        }
-        success = true;
-      } finally {
-        if (success == false) {
-          IOUtils.closeWhileHandlingException(toClose);
-        }
-      }
+      return formatToGroups;
     }
 
     @Override

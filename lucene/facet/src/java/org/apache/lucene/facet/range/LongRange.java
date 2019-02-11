@@ -17,18 +17,18 @@
 package org.apache.lucene.facet.range;
 
 import java.io.IOException;
-import java.util.Collections;
 import java.util.Objects;
 
 import org.apache.lucene.index.IndexReader;
 import org.apache.lucene.index.LeafReaderContext;
-import org.apache.lucene.queries.function.FunctionValues;
-import org.apache.lucene.queries.function.ValueSource;
 import org.apache.lucene.search.ConstantScoreScorer;
 import org.apache.lucene.search.ConstantScoreWeight;
 import org.apache.lucene.search.DocIdSetIterator;
 import org.apache.lucene.search.IndexSearcher;
+import org.apache.lucene.search.LongValues;
+import org.apache.lucene.search.LongValuesSource;
 import org.apache.lucene.search.Query;
+import org.apache.lucene.search.ScoreMode;
 import org.apache.lucene.search.Scorer;
 import org.apache.lucene.search.TwoPhaseIterator;
 import org.apache.lucene.search.Weight;
@@ -81,15 +81,31 @@ public final class LongRange extends Range {
 
   @Override
   public String toString() {
-    return "LongRange(" + min + " to " + max + ")";
+    return "LongRange(" + label + ": " + min + " to " + max + ")";
+  }
+
+  @Override
+  public boolean equals(Object _that) {
+    if (_that instanceof LongRange == false) {
+      return false;
+    }
+    LongRange that = (LongRange) _that;
+    return that.label.equals(this.label) &&
+        that.min == this.min &&
+        that.max == this.max;
+  }
+
+  @Override
+  public int hashCode() {
+    return Objects.hash(label, min, max);
   }
 
   private static class ValueSourceQuery extends Query {
     private final LongRange range;
     private final Query fastMatchQuery;
-    private final ValueSource valueSource;
+    private final LongValuesSource valueSource;
 
-    ValueSourceQuery(LongRange range, Query fastMatchQuery, ValueSource valueSource) {
+    ValueSourceQuery(LongRange range, Query fastMatchQuery, LongValuesSource valueSource) {
       this.range = range;
       this.fastMatchQuery = fastMatchQuery;
       this.valueSource = valueSource;
@@ -129,10 +145,10 @@ public final class LongRange extends Range {
     }
 
     @Override
-    public Weight createWeight(IndexSearcher searcher, boolean needsScores, float boost) throws IOException {
+    public Weight createWeight(IndexSearcher searcher, ScoreMode scoreMode, float boost) throws IOException {
       final Weight fastMatchWeight = fastMatchQuery == null
           ? null
-          : searcher.createWeight(fastMatchQuery, false, 1f);
+          : searcher.createWeight(fastMatchQuery, ScoreMode.COMPLETE_NO_SCORES, 1f);
 
       return new ConstantScoreWeight(this, boost) {
         @Override
@@ -150,11 +166,11 @@ public final class LongRange extends Range {
             approximation = s.iterator();
           }
 
-          final FunctionValues values = valueSource.getValues(Collections.emptyMap(), context);
+          final LongValues values = valueSource.getValues(context, null);
           final TwoPhaseIterator twoPhase = new TwoPhaseIterator(approximation) {
             @Override
             public boolean matches() throws IOException {
-              return range.accept(values.longVal(approximation.docID()));
+              return values.advanceExact(approximation.docID()) && range.accept(values.longValue());
             }
 
             @Override
@@ -162,15 +178,32 @@ public final class LongRange extends Range {
               return 100; // TODO: use cost of range.accept()
             }
           };
-          return new ConstantScoreScorer(this, score(), twoPhase);
+          return new ConstantScoreScorer(this, score(), scoreMode, twoPhase);
         }
+
+        @Override
+        public boolean isCacheable(LeafReaderContext ctx) {
+          return valueSource.isCacheable(ctx);
+        }
+
       };
     }
 
   }
 
-  @Override
-  public Query getQuery(final Query fastMatchQuery, final ValueSource valueSource) {
+  /**
+   * Create a Query that matches documents in this range
+   *
+   * The query will check all documents that match the provided match query,
+   * or every document in the index if the match query is null.
+   *
+   * If the value source is static, eg an indexed numeric field, it may be
+   * faster to use {@link org.apache.lucene.search.PointRangeQuery}
+   *
+   * @param fastMatchQuery a query to use as a filter
+   * @param valueSource    the source of values for the range check
+   */
+  public Query getQuery(Query fastMatchQuery, LongValuesSource valueSource) {
     return new ValueSourceQuery(this, fastMatchQuery, valueSource);
   }
 }

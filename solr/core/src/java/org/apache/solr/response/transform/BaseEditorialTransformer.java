@@ -17,11 +17,13 @@
 package org.apache.solr.response.transform;
 
 
-import org.apache.lucene.document.Field;
+import java.util.Set;
+
+import org.apache.lucene.index.IndexableField;
+import org.apache.lucene.util.BytesRef;
+import org.apache.lucene.util.BytesRefBuilder;
 import org.apache.solr.common.SolrDocument;
 import org.apache.solr.schema.FieldType;
-
-import java.util.Set;
 
 /**
  *
@@ -40,17 +42,16 @@ public abstract class BaseEditorialTransformer extends DocTransformer {
   }
 
   @Override
-  public String getName()
-  {
+  public String getName() {
     return name;
   }
 
   @Override
-  public void transform(SolrDocument doc, int docid, float score) {
+  public void transform(SolrDocument doc, int docid) {
     //this only gets added if QueryElevationParams.MARK_EXCLUDED is true
-    Set<String> ids = getIdSet();
+    Set<BytesRef> ids = getIdSet();
     if (ids != null && ids.isEmpty() == false) {
-      String key = getKey(doc);
+      BytesRef key = getKey(doc);
       doc.setField(name, ids.contains(key));
     } else {
       //if we have no ids, that means we weren't marking, but the user still asked for the field to be added, so just mark everything as false
@@ -58,25 +59,23 @@ public abstract class BaseEditorialTransformer extends DocTransformer {
     }
   }
 
-  protected abstract Set<String> getIdSet();
+  protected abstract Set<BytesRef> getIdSet();
 
-  protected String getKey(SolrDocument doc) {
-    String key;
-    Object field = doc.get(idFieldName);
-    final Number n;
-    if (field instanceof Field) {
-      n = ((Field) field).numericValue();
-    } else {
-      n = null;
+  protected BytesRef getKey(SolrDocument doc) {
+    Object obj = doc.get(idFieldName);
+    if (obj instanceof IndexableField) {
+      IndexableField f = (IndexableField) obj;
+      BytesRefBuilder bytesRefBuilder = new BytesRefBuilder();
+      Number n = f.numericValue();
+      if (n != null) {
+        ft.readableToIndexed(n.toString(), bytesRefBuilder);
+      } else {
+        ft.readableToIndexed(f.stringValue(), bytesRefBuilder);
+      }
+      return bytesRefBuilder.get();
+    } else if (obj instanceof String) { // Allows the idField to be stored=false, docValues=true
+      return new BytesRef(((String)obj));
     }
-    if (n != null) {
-      key = n.toString();
-      key = ft.readableToIndexed(key);
-    } else if (field instanceof Field){
-      key = ((Field)field).stringValue();
-    } else {
-      key = field.toString();
-    }
-    return key;
+    throw new AssertionError("Expected an IndexableField but got: " + obj.getClass());
   }
 }

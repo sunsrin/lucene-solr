@@ -29,6 +29,7 @@ import org.apache.lucene.store.IOContext;
 import org.apache.lucene.util.BytesRef;
 import org.apache.lucene.util.LuceneTestCase;
 import org.apache.lucene.util.TestUtil;
+import org.apache.lucene.util.Version;
 
 public class TestSegmentReader extends LuceneTestCase {
   private Directory dir;
@@ -42,7 +43,7 @@ public class TestSegmentReader extends LuceneTestCase {
     dir = newDirectory();
     DocHelper.setupDoc(testDoc);
     SegmentCommitInfo info = DocHelper.writeDoc(random(), dir, testDoc);
-    reader = new SegmentReader(info, IOContext.READ);
+    reader = new SegmentReader(info, Version.LATEST.major, IOContext.READ);
   }
   
   @Override
@@ -114,9 +115,9 @@ public class TestSegmentReader extends LuceneTestCase {
   } 
   
   public void testTerms() throws IOException {
-    Fields fields = MultiFields.getFields(reader);
+    final Collection<String> fields = FieldInfos.getIndexedFields(reader);
     for (String field : fields) {
-      Terms terms = fields.terms(field);
+      Terms terms = MultiTerms.getTerms(reader, field);
       assertNotNull(terms);
       TermsEnum termsEnum = terms.iterator();
       while(termsEnum.next() != null) {
@@ -143,7 +144,7 @@ public class TestSegmentReader extends LuceneTestCase {
     assertTrue(termDocs.nextDoc() != DocIdSetIterator.NO_MORE_DOCS);
 
     
-    PostingsEnum positions = MultiFields.getTermPositionsEnum(reader,
+    PostingsEnum positions = MultiTerms.getTermPostingsEnum(reader,
                                                                       DocHelper.TEXT_FIELD_1_KEY,
                                                                       new BytesRef("field"));
     // NOTE: prior rev of this test was failing to first

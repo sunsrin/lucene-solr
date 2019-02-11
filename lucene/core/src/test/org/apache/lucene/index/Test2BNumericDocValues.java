@@ -31,7 +31,7 @@ import org.apache.lucene.util.LuceneTestCase.SuppressSysoutChecks;
 
 import com.carrotsearch.randomizedtesting.annotations.TimeoutSuite;
 
-@SuppressCodecs({"SimpleText", "Memory", "Direct"})
+@SuppressCodecs({"SimpleText", "Direct"})
 @TimeoutSuite(millis = 8 * TimeUnits.HOUR)
 // The two hour time was achieved on a Linux 3.13 system with these specs:
 // 3-core AMD at 2.5Ghz, 12 GB RAM, 5GB test heap, 2 test JVMs, 2TB SATA.
@@ -80,7 +80,8 @@ public class Test2BNumericDocValues extends LuceneTestCase {
       LeafReader reader = context.reader();
       NumericDocValues dv = reader.getNumericDocValues("dv");
       for (int i = 0; i < reader.maxDoc(); i++) {
-        assertEquals(expectedValue, dv.get(i));
+        assertEquals(i, dv.nextDoc());
+        assertEquals(expectedValue, dv.longValue());
         expectedValue++;
       }
     }

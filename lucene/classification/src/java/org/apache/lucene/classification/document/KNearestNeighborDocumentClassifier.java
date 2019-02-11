@@ -49,14 +49,14 @@ public class KNearestNeighborDocumentClassifier extends KNearestNeighborClassifi
   /**
    * map of per field analyzers
    */
-  protected Map<String, Analyzer> field2analyzer;
+  protected final Map<String, Analyzer> field2analyzer;
 
   /**
    * Creates a {@link KNearestNeighborClassifier}.
    *
    * @param indexReader     the reader on the index to be used for classification
    * @param similarity     the {@link Similarity} to be used by the underlying {@link IndexSearcher} or {@code null}
-   *                       (defaults to {@link org.apache.lucene.search.similarities.ClassicSimilarity})
+   *                       (defaults to {@link org.apache.lucene.search.similarities.BM25Similarity})
    * @param query          a {@link org.apache.lucene.search.Query} to eventually filter the docs used for training the classifier, or {@code null}
    *                       if all the indexed docs should be used
    * @param k              the no. of docs to select in the MLT results to find the nearest neighbor
@@ -72,27 +72,11 @@ public class KNearestNeighborDocumentClassifier extends KNearestNeighborClassifi
     this.field2analyzer = field2analyzer;
   }
 
-  /**
-   * {@inheritDoc}
-   */
   @Override
   public ClassificationResult<BytesRef> assignClass(Document document) throws IOException {
-    TopDocs knnResults = knnSearch(document);
-    List<ClassificationResult<BytesRef>> assignedClasses = buildListFromTopDocs(knnResults);
-    ClassificationResult<BytesRef> assignedClass = null;
-    double maxscore = -Double.MAX_VALUE;
-    for (ClassificationResult<BytesRef> cl : assignedClasses) {
-      if (cl.getScore() > maxscore) {
-        assignedClass = cl;
-        maxscore = cl.getScore();
-      }
-    }
-    return assignedClass;
+    return classifyFromTopDocs(knnSearch(document));
   }
 
-  /**
-   * {@inheritDoc}
-   */
   @Override
   public List<ClassificationResult<BytesRef>> getClasses(Document document) throws IOException {
     TopDocs knnResults = knnSearch(document);
@@ -101,14 +85,12 @@ public class KNearestNeighborDocumentClassifier extends KNearestNeighborClassifi
     return assignedClasses;
   }
 
-  /**
-   * {@inheritDoc}
-   */
   @Override
   public List<ClassificationResult<BytesRef>> getClasses(Document document, int max) throws IOException {
     TopDocs knnResults = knnSearch(document);
     List<ClassificationResult<BytesRef>> assignedClasses = buildListFromTopDocs(knnResults);
     Collections.sort(assignedClasses);
+    max = Math.min(max, assignedClasses.size());
     return assignedClasses.subList(0, max);
   }
 
@@ -130,15 +112,15 @@ public class KNearestNeighborDocumentClassifier extends KNearestNeighborClassifi
         boost = field2boost[1];
       }
       String[] fieldValues = document.getValues(fieldName);
+      mlt.setBoost(true); // we want always to use the boost coming from TF * IDF of the term
       if (boost != null) {
-        mlt.setBoost(true);
-        mlt.setBoostFactor(Float.parseFloat(boost));
+        mlt.setBoostFactor(Float.parseFloat(boost)); // this is an additional multiplicative boost coming from the field boost
       }
       mlt.setAnalyzer(field2analyzer.get(fieldName));
       for (String fieldContent : fieldValues) {
         mltQuery.add(new BooleanClause(mlt.like(fieldName, new StringReader(fieldContent)), BooleanClause.Occur.SHOULD));
       }
-      mlt.setBoost(false);
+      mlt.setBoostFactor(1);// restore neutral boost for next field
     }
     Query classFieldQuery = new WildcardQuery(new Term(classFieldName, "*"));
     mltQuery.add(new BooleanClause(classFieldQuery, BooleanClause.Occur.MUST));

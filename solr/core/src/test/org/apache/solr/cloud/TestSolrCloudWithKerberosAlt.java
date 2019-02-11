@@ -19,84 +19,49 @@ package org.apache.solr.cloud;
 import java.io.File;
 import java.lang.invoke.MethodHandles;
 import java.nio.charset.StandardCharsets;
-import java.util.List;
-import java.util.Properties;
+
+import com.carrotsearch.randomizedtesting.annotations.ThreadLeakFilters;
+import com.carrotsearch.randomizedtesting.annotations.ThreadLeakLingering;
 
 import org.apache.commons.io.FileUtils;
-import org.apache.lucene.index.TieredMergePolicy;
-import org.apache.lucene.util.Constants;
 import org.apache.lucene.util.LuceneTestCase;
-import org.apache.solr.SolrTestCaseJ4;
 import org.apache.solr.client.solrj.SolrQuery;
-import org.apache.solr.client.solrj.embedded.JettyConfig;
-import org.apache.solr.client.solrj.embedded.JettySolrRunner;
 import org.apache.solr.client.solrj.impl.CloudSolrClient;
 import org.apache.solr.client.solrj.request.CollectionAdminRequest;
+import org.apache.solr.client.solrj.request.UpdateRequest;
 import org.apache.solr.client.solrj.response.QueryResponse;
-import org.apache.solr.common.SolrInputDocument;
-import org.apache.solr.common.cloud.SolrZkClient;
-import org.apache.solr.common.cloud.ZkStateReader;
-import org.apache.solr.core.CoreDescriptor;
-import org.apache.solr.index.TieredMergePolicyFactory;
 import org.apache.solr.util.BadZookeeperThreadsFilter;
-import org.apache.solr.util.RevertDefaultThreadHandlerRule;
-import org.junit.BeforeClass;
-import org.junit.ClassRule;
-import org.junit.Rule;
 import org.junit.Test;
-import org.junit.rules.RuleChain;
-import org.junit.rules.TestRule;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import com.carrotsearch.randomizedtesting.annotations.ThreadLeakFilters;
-import com.carrotsearch.randomizedtesting.rules.SystemPropertiesRestoreRule;
-
 /**
  * Test 5 nodes Solr cluster with Kerberos plugin enabled.
- * This test is Ignored right now as Mini KDC has a known bug that
- * doesn't allow us to run multiple nodes on the same host.
- * https://issues.apache.org/jira/browse/HADOOP-9893
  */
 @ThreadLeakFilters(defaultFilters = true, filters = {
     BadZookeeperThreadsFilter.class // Zookeeper login leaks TGT renewal threads
 })
 
 @LuceneTestCase.Slow
-@LuceneTestCase.SuppressSysoutChecks(bugUrl = "Solr logs to JUL")
-public class TestSolrCloudWithKerberosAlt extends LuceneTestCase {
+@ThreadLeakLingering(linger = 10000) // minikdc has some lingering threads
+public class TestSolrCloudWithKerberosAlt extends SolrCloudTestCase {
 
   private static final Logger log = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
-  protected final int NUM_SERVERS;
-  protected final int NUM_SHARDS;
-  protected final int REPLICATION_FACTOR;
 
-  public TestSolrCloudWithKerberosAlt () {
-    NUM_SERVERS = 1;
-    NUM_SHARDS = 1;
-    REPLICATION_FACTOR = 1;
-  }
-
+  private static final int numShards = 1;
+  private static final int numReplicas = 1;
+  private static final int maxShardsPerNode = 1;
+  private static final int nodeCount = (numShards*numReplicas + (maxShardsPerNode-1))/maxShardsPerNode;
+  private static final String configName = "solrCloudCollectionConfig";
+  private static final String collectionName = "testkerberoscollection";
+  
   private KerberosTestServices kerberosTestServices;
-
-  @Rule
-  public TestRule solrTestRules = RuleChain
-      .outerRule(new SystemPropertiesRestoreRule());
-
-  @ClassRule
-  public static TestRule solrClassRules = RuleChain.outerRule(
-      new SystemPropertiesRestoreRule()).around(
-      new RevertDefaultThreadHandlerRule());
-
-  @BeforeClass
-  public static void betterNotBeJava9() {
-    assumeFalse("FIXME: SOLR-8182: This test fails under Java 9", Constants.JRE_IS_MINIMUM_JAVA9);
-  }
 
   @Override
   public void setUp() throws Exception {
     super.setUp();
     setupMiniKdc();
+    configureCluster(nodeCount).addConfig(configName, configset("cloud-minimal")).configure();
   }
 
   private void setupMiniKdc() throws Exception {
@@ -133,7 +98,7 @@ public class TestSolrCloudWithKerberosAlt extends LuceneTestCase {
     System.setProperty("authenticationPlugin", "org.apache.solr.security.KerberosPlugin");
     boolean enableDt = random().nextBoolean();
     log.info("Enable delegation token: " + enableDt);
-    System.setProperty("solr.kerberos.delegation.token.enabled", new Boolean(enableDt).toString());
+    System.setProperty("solr.kerberos.delegation.token.enabled", Boolean.toString(enableDt));
     // Extracts 127.0.0.1 from HTTP/127.0.0.1@EXAMPLE.COM
     System.setProperty("solr.kerberos.name.rules", "RULE:[1:$1@$0](.*EXAMPLE.COM)s/@.*//"
         + "\nRULE:[2:$2@$0](.*EXAMPLE.COM)s/@.*//"
@@ -141,10 +106,10 @@ public class TestSolrCloudWithKerberosAlt extends LuceneTestCase {
         );
 
     // more debugging, if needed
-    /*System.setProperty("sun.security.jgss.debug", "true");
-    System.setProperty("sun.security.krb5.debug", "true");
-    System.setProperty("sun.security.jgss.debug", "true");
-    System.setProperty("java.security.debug", "logincontext,policy,scl,gssloginconfig");*/
+    // System.setProperty("sun.security.jgss.debug", "true");
+    // System.setProperty("sun.security.krb5.debug", "true");
+    // System.setProperty("sun.security.jgss.debug", "true");
+    // System.setProperty("java.security.debug", "logincontext,policy,scl,gssloginconfig");
   }
   
   @Test
@@ -154,91 +119,44 @@ public class TestSolrCloudWithKerberosAlt extends LuceneTestCase {
     if (random().nextBoolean()) testCollectionCreateSearchDelete();
   }
 
-  protected void testCollectionCreateSearchDelete() throws Exception {
-    String collectionName = "testkerberoscollection";
+  private void testCollectionCreateSearchDelete() throws Exception {
+    CloudSolrClient client = cluster.getSolrClient();
+    CollectionAdminRequest.createCollection(collectionName, configName, numShards, numReplicas)
+        .setMaxShardsPerNode(maxShardsPerNode)
+        .process(client);
 
-    MiniSolrCloudCluster miniCluster
-        = new MiniSolrCloudCluster(NUM_SERVERS, createTempDir(), JettyConfig.builder().setContext("/solr").build());
-    CloudSolrClient cloudSolrClient = miniCluster.getSolrClient();
-    cloudSolrClient.setDefaultCollection(collectionName);
-    
-    try {
-      assertNotNull(miniCluster.getZkServer());
-      List<JettySolrRunner> jettys = miniCluster.getJettySolrRunners();
-      assertEquals(NUM_SERVERS, jettys.size());
-      for (JettySolrRunner jetty : jettys) {
-        assertTrue(jetty.isRunning());
-      }
+    cluster.waitForActiveCollection(collectionName, numShards, numShards * numReplicas);
 
-      // create collection
-      String configName = "solrCloudCollectionConfig";
-      File configDir = new File(SolrTestCaseJ4.TEST_HOME() + File.separator + "collection1" + File.separator + "conf");
-      miniCluster.uploadConfigDir(configDir, configName);
-
-      CollectionAdminRequest.Create createRequest = new CollectionAdminRequest.Create();
-      createRequest.setCollectionName(collectionName);
-      createRequest.setNumShards(NUM_SHARDS);
-      createRequest.setReplicationFactor(REPLICATION_FACTOR);
-      Properties properties = new Properties();
-      properties.put(CoreDescriptor.CORE_CONFIG, "solrconfig-tlog.xml");
-      properties.put("solr.tests.maxBufferedDocs", "100000");
-      properties.put("solr.tests.ramBufferSizeMB", "100");
-      // use non-test classes so RandomizedRunner isn't necessary
-      if (random().nextBoolean()) {
-        properties.put(SolrTestCaseJ4.SYSTEM_PROPERTY_SOLR_TESTS_MERGEPOLICY, TieredMergePolicy.class.getName());
-        properties.put(SolrTestCaseJ4.SYSTEM_PROPERTY_SOLR_TESTS_USEMERGEPOLICY, "true");
-        properties.put(SolrTestCaseJ4.SYSTEM_PROPERTY_SOLR_TESTS_USEMERGEPOLICYFACTORY, "false");
-      } else {
-        properties.put(SolrTestCaseJ4.SYSTEM_PROPERTY_SOLR_TESTS_MERGEPOLICYFACTORY, TieredMergePolicyFactory.class.getName());
-        properties.put(SolrTestCaseJ4.SYSTEM_PROPERTY_SOLR_TESTS_USEMERGEPOLICYFACTORY, "true");
-        properties.put(SolrTestCaseJ4.SYSTEM_PROPERTY_SOLR_TESTS_USEMERGEPOLICY, "false");
-      }
-      properties.put("solr.tests.mergeScheduler", "org.apache.lucene.index.ConcurrentMergeScheduler");
-      properties.put("solr.directoryFactory", "solr.RAMDirectoryFactory");
-      createRequest.setProperties(properties);
-      
-      createRequest.process(cloudSolrClient);
-      
-      try (SolrZkClient zkClient = new SolrZkClient
-          (miniCluster.getZkServer().getZkAddress(), AbstractZkTestCase.TIMEOUT, AbstractZkTestCase.TIMEOUT, null);
-           ZkStateReader zkStateReader = new ZkStateReader(zkClient)) {
-        zkStateReader.createClusterStateWatchersAndUpdate();
-        AbstractDistribZkTestBase.waitForRecoveriesToFinish(collectionName, zkStateReader, true, true, 330);
-
-        // modify/query collection
+    // modify/query collection
+    new UpdateRequest().add("id", "1").commit(client, collectionName);
+    QueryResponse rsp = client.query(collectionName, new SolrQuery("*:*"));
+    assertEquals(1, rsp.getResults().getNumFound());
         
-        SolrInputDocument doc = new SolrInputDocument();
-        doc.setField("id", "1");
-        cloudSolrClient.add(doc);
-        cloudSolrClient.commit();
-        SolrQuery query = new SolrQuery();
-        query.setQuery("*:*");
-        QueryResponse rsp = cloudSolrClient.query(query);
-        assertEquals(1, rsp.getResults().getNumFound());
+    // delete the collection we created earlier
+    CollectionAdminRequest.deleteCollection(collectionName).process(client);
         
-        // delete the collection we created earlier
-        CollectionAdminRequest.Delete deleteRequest = new CollectionAdminRequest.Delete();
-        deleteRequest.setCollectionName(collectionName);
-        deleteRequest.process(cloudSolrClient);
-        
-        AbstractDistribZkTestBase.waitForCollectionToDisappear(collectionName, zkStateReader, true, true, 330);
-      }
-    }
-    finally {
-      cloudSolrClient.close();
-      miniCluster.shutdown();
-    }
+    AbstractDistribZkTestBase.waitForCollectionToDisappear
+        (collectionName, client.getZkStateReader(), true, true, 330);
   }
 
   @Override
   public void tearDown() throws Exception {
-    System.clearProperty("java.security.auth.login.config");
-    System.clearProperty("cookie.domain");
-    System.clearProperty("kerberos.principal");
-    System.clearProperty("kerberos.keytab");
-    System.clearProperty("authenticationPlugin");
-    System.clearProperty("solr.kerberos.name.rules");
     System.clearProperty("solr.jaas.debug");
+    System.clearProperty("java.security.auth.login.config");
+    System.clearProperty("solr.kerberos.jaas.appname");
+    System.clearProperty("solr.kerberos.cookie.domain");
+    System.clearProperty("solr.kerberos.principal");
+    System.clearProperty("solr.kerberos.keytab");
+    System.clearProperty("authenticationPlugin");
+    System.clearProperty("solr.kerberos.delegation.token.enabled");
+    System.clearProperty("solr.kerberos.name.rules");
+    
+    // more debugging, if needed
+    // System.clearProperty("sun.security.jgss.debug");
+    // System.clearProperty("sun.security.krb5.debug");
+    // System.clearProperty("sun.security.jgss.debug");
+    // System.clearProperty("java.security.debug");
+
     kerberosTestServices.stop();
     super.tearDown();
   }

@@ -28,6 +28,7 @@ import java.util.Map;
 
 import com.google.common.collect.ImmutableMap;
 import org.apache.solr.cloud.ZkSolrResourceLoader;
+import org.apache.solr.common.MapSerializable;
 import org.apache.solr.common.SolrException;
 import org.apache.solr.common.cloud.SolrZkClient;
 import org.apache.solr.common.params.MapSolrParams;
@@ -124,7 +125,7 @@ public class RequestParams implements MapSerializable {
   }
 
   @Override
-  public Map<String, Object> toMap() {
+  public Map<String, Object> toMap(Map<String, Object> map) {
     return getMapWithVersion(data, znodeVersion);
   }
 
@@ -140,7 +141,7 @@ public class RequestParams implements MapSerializable {
     Map p = (Map) deepCopy.get(NAME);
     if (p == null) deepCopy.put(NAME, p = new LinkedHashMap());
     if (paramSet == null) p.remove(name);
-    else p.put(name, paramSet.toMap());
+    else p.put(name, paramSet.toMap(new LinkedHashMap<>()));
     return new RequestParams(deepCopy, znodeVersion);
   }
 
@@ -221,12 +222,11 @@ public class RequestParams implements MapSerializable {
     }
 
     public Long getVersion() {
-      return meta == null ? 0l : (Long) meta.get("v");
+      return meta == null ? Long.valueOf(0l) : (Long) meta.get("v");
     }
 
     @Override
-    public Map<String, Object> toMap() {
-      LinkedHashMap result = new LinkedHashMap();
+    public Map<String, Object> toMap(Map<String, Object> result) {
       result.putAll(defaults);
       if (appends != null) result.put(APPENDS, appends);
       if (invariants != null) result.put(INVARIANTS, invariants);

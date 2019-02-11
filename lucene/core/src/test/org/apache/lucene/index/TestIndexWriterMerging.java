@@ -164,10 +164,10 @@ public class TestIndexWriterMerging extends LuceneTestCase {
 
     writer = new IndexWriter(dir, newIndexWriterConfig(new MockAnalyzer(random()))
                                     .setMergePolicy(newLogMergePolicy()));
-    assertEquals(8, writer.numDocs());
-    assertEquals(10, writer.maxDoc());
+    assertEquals(8, writer.getDocStats().numDocs);
+    assertEquals(10, writer.getDocStats().maxDoc);
     writer.forceMergeDeletes();
-    assertEquals(8, writer.numDocs());
+    assertEquals(8, writer.getDocStats().numDocs);
     writer.close();
     ir = DirectoryReader.open(dir);
     assertEquals(8, ir.maxDoc());
@@ -232,7 +232,7 @@ public class TestIndexWriterMerging extends LuceneTestCase {
         newIndexWriterConfig(new MockAnalyzer(random()))
           .setMergePolicy(newLogMergePolicy(3))
     );
-    assertEquals(49, writer.numDocs());
+    assertEquals(49, writer.getDocStats().numDocs);
     writer.forceMergeDeletes();
     writer.close();
     ir = DirectoryReader.open(dir);
@@ -308,7 +308,7 @@ public class TestIndexWriterMerging extends LuceneTestCase {
   
   // Just intercepts all merges & verifies that we are never
   // merging a segment with >= 20 (maxMergeDocs) docs
-  private class MyMergeScheduler extends MergeScheduler {
+  private static class MyMergeScheduler extends MergeScheduler {
     @Override
     synchronized public void merge(IndexWriter writer, MergeTrigger trigger, boolean newMergesFound) throws IOException {
 

@@ -18,9 +18,9 @@ package org.apache.solr.cloud;
 
 import org.apache.lucene.util.LuceneTestCase.Slow;
 import org.apache.solr.SolrTestCaseJ4.SuppressSSL;
+import org.apache.solr.client.solrj.cloud.SocketProxy;
 import org.apache.solr.client.solrj.embedded.JettySolrRunner;
 import org.apache.solr.client.solrj.impl.HttpSolrClient;
-import org.apache.solr.client.solrj.request.CollectionAdminRequest;
 import org.apache.solr.common.SolrInputDocument;
 import org.apache.solr.common.cloud.Replica;
 import org.junit.Test;
@@ -50,6 +50,7 @@ public class LeaderFailoverAfterPartitionTest extends HttpPartitionTest {
 
 
   @Test
+  //28-June-2018 @BadApple(bugUrl="https://issues.apache.org/jira/browse/SOLR-12028")
   public void test() throws Exception {
     waitForThingsToLevelOut(30000);
 
@@ -62,7 +63,7 @@ public class LeaderFailoverAfterPartitionTest extends HttpPartitionTest {
     // kill the leader ... see what happens
     // create a collection that has 1 shard but 3 replicas
     String testCollectionName = "c8n_1x3_lf"; // _lf is leader fails
-    createCollection(testCollectionName, 1, 3, 1);
+    createCollection(testCollectionName, "conf1", 1, 3, 1);
     cloudClient.setDefaultCollection(testCollectionName);
     
     sendDoc(1);
@@ -159,7 +160,7 @@ public class LeaderFailoverAfterPartitionTest extends HttpPartitionTest {
     
     proxy0.reopen();
     
-    long timeout = System.nanoTime() + TimeUnit.NANOSECONDS.convert(60, TimeUnit.SECONDS);
+    long timeout = System.nanoTime() + TimeUnit.NANOSECONDS.convert(90, TimeUnit.SECONDS);
     while (System.nanoTime() < timeout) {
       List<Replica> activeReps = getActiveOrRecoveringReplicas(testCollectionName, "shard1");
       if (activeReps.size() >= 2) break;
@@ -184,13 +185,6 @@ public class LeaderFailoverAfterPartitionTest extends HttpPartitionTest {
     assertDocsExistInAllReplicas(participatingReplicas, testCollectionName, 1, 6);
 
     // try to clean up
-    try {
-      CollectionAdminRequest.Delete req = new CollectionAdminRequest.Delete();
-      req.setCollectionName(testCollectionName);
-      req.process(cloudClient);
-    } catch (Exception e) {
-      // don't fail the test
-      log.warn("Could not delete collection {} after test completed", testCollectionName);
-    }
+    attemptCollectionDelete(cloudClient, testCollectionName);
   }
 }

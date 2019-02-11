@@ -18,7 +18,6 @@ package org.apache.lucene.spatial;
 
 import java.io.IOException;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.List;
 
 import com.carrotsearch.randomizedtesting.annotations.ParametersFactory;
@@ -31,6 +30,7 @@ import org.apache.lucene.spatial.prefix.tree.QuadPrefixTree;
 import org.apache.lucene.spatial.prefix.tree.SpatialPrefixTree;
 import org.apache.lucene.spatial.serialized.SerializedDVStrategy;
 import org.apache.lucene.spatial.vector.PointVectorStrategy;
+import org.apache.lucene.util.ArrayUtil;
 import org.junit.Test;
 import org.locationtech.spatial4j.context.SpatialContext;
 import org.locationtech.spatial4j.shape.Point;
@@ -68,9 +68,6 @@ public class DistanceStrategyTest extends StrategyTestCase {
     strategy = BBoxStrategy.newInstance(ctx, "bbox");
     ctorArgs.add(new Object[]{strategy.getFieldName(), strategy});
 
-    strategy = BBoxStrategy.newLegacyInstance(ctx, "bbox_legacy");
-    ctorArgs.add(new Object[]{strategy.getFieldName(), strategy});
-
     strategy = new SerializedDVStrategy(ctx, "serialized");
     ctorArgs.add(new Object[]{strategy.getFieldName(), strategy});
 
@@ -87,9 +84,6 @@ public class DistanceStrategyTest extends StrategyTestCase {
     adoc("100", ctx.makePoint(2, 1));
     adoc("101", ctx.makePoint(-1, 4));
     adoc("103", (Shape)null);//test score for nothing
-    adoc("999", ctx.makePoint(2, 1));//test deleted
-    commit();
-    deleteDoc("999");
     commit();
     //FYI distances are in docid order
     checkDistValueSource(ctx.makePoint(4, 3), 2.8274937f, 5.0898066f, 180f);
@@ -103,9 +97,6 @@ public class DistanceStrategyTest extends StrategyTestCase {
     Point p101 = ctx.makePoint(-1.001, 4.001);
     adoc("101", p101);
     adoc("103", (Shape)null);//test score for nothing
-    adoc("999", ctx.makePoint(2, 1));//test deleted
-    commit();
-    deleteDoc("999");
     commit();
 
     double dist = ctx.getDistCalc().distance(p100, p101);
@@ -116,7 +107,7 @@ public class DistanceStrategyTest extends StrategyTestCase {
 
   void checkDistValueSource(Point pt, float... distances) throws IOException {
     float multiplier = random().nextFloat() * 100f;
-    float[] dists2 = Arrays.copyOf(distances, distances.length);
+    float[] dists2 = ArrayUtil.copyOfSubArray(distances, 0, distances.length);
     for (int i = 0; i < dists2.length; i++) {
       dists2[i] *= multiplier;
     }

@@ -126,7 +126,7 @@ public class TestParallelCompositeReader extends LuceneTestCase {
     dir2.close();    
   }
   
-  private void testReaderClosedListener(boolean closeSubReaders, int wrapMultiReaderType) throws IOException {
+  private void testReaderClosedListener1(boolean closeSubReaders, int wrapMultiReaderType) throws IOException {
     final Directory dir1 = getDir1(random());
     final CompositeReader ir2, ir1 = DirectoryReader.open(dir1);
     switch (wrapMultiReaderType) {
@@ -147,18 +147,19 @@ public class TestParallelCompositeReader extends LuceneTestCase {
      new CompositeReader[] {ir2},
      new CompositeReader[] {ir2});
 
-    final int[] listenerClosedCount = new int[1];
-
     assertEquals(3, pr.leaves().size());
+    assertEquals(ir1.getReaderCacheHelper(), pr.getReaderCacheHelper());
 
+    int i = 0;
     for(LeafReaderContext cxt : pr.leaves()) {
-      cxt.reader().addReaderClosedListener(reader -> listenerClosedCount[0]++);
+      LeafReader originalLeaf = ir1.leaves().get(i++).reader();
+      assertEquals(originalLeaf.getCoreCacheHelper(), cxt.reader().getCoreCacheHelper());
+      assertEquals(originalLeaf.getReaderCacheHelper(), cxt.reader().getReaderCacheHelper());
     }
     pr.close();
     if (!closeSubReaders) {
       ir1.close();
     }
-    assertEquals(3, listenerClosedCount[0]);
     
     // We have to close the extra MultiReader, because it will not close its own subreaders:
     if (wrapMultiReaderType == 2) {
@@ -168,23 +169,11 @@ public class TestParallelCompositeReader extends LuceneTestCase {
   }
 
   public void testReaderClosedListener1() throws Exception {
-    testReaderClosedListener(false, 0);
-  }
-
-  public void testReaderClosedListener2() throws Exception {
-    testReaderClosedListener(true, 0);
-  }
-
-  public void testReaderClosedListener3() throws Exception {
-    testReaderClosedListener(false, 1);
-  }
-
-  public void testReaderClosedListener4() throws Exception {
-    testReaderClosedListener(true, 1);
-  }
-
-  public void testReaderClosedListener5() throws Exception {
-    testReaderClosedListener(false, 2);
+    testReaderClosedListener1(false, 0);
+    testReaderClosedListener1(true, 0);
+    testReaderClosedListener1(false, 1);
+    testReaderClosedListener1(true, 1);
+    testReaderClosedListener1(false, 2);
   }
 
   public void testCloseInnerReader() throws Exception {
@@ -291,11 +280,10 @@ public class TestParallelCompositeReader extends LuceneTestCase {
     assertNull(pr.document(0).get("f3"));
     assertNull(pr.document(0).get("f4"));
     // check that fields are there
-    Fields slow = MultiFields.getFields(pr);
-    assertNotNull(slow.terms("f1"));
-    assertNotNull(slow.terms("f2"));
-    assertNotNull(slow.terms("f3"));
-    assertNotNull(slow.terms("f4"));
+    assertNotNull(MultiTerms.getTerms(pr, "f1"));
+    assertNotNull(MultiTerms.getTerms(pr, "f2"));
+    assertNotNull(MultiTerms.getTerms(pr, "f3"));
+    assertNotNull(MultiTerms.getTerms(pr, "f4"));
     pr.close();
     
     // no stored fields at all
@@ -307,11 +295,10 @@ public class TestParallelCompositeReader extends LuceneTestCase {
     assertNull(pr.document(0).get("f3"));
     assertNull(pr.document(0).get("f4"));
     // check that fields are there
-    slow = MultiFields.getFields(pr);
-    assertNull(slow.terms("f1"));
-    assertNull(slow.terms("f2"));
-    assertNotNull(slow.terms("f3"));
-    assertNotNull(slow.terms("f4"));
+    assertNull(MultiTerms.getTerms(pr, "f1"));
+    assertNull(MultiTerms.getTerms(pr, "f2"));
+    assertNotNull(MultiTerms.getTerms(pr, "f3"));
+    assertNotNull(MultiTerms.getTerms(pr, "f4"));
     pr.close();
     
     // without overlapping
@@ -323,11 +310,10 @@ public class TestParallelCompositeReader extends LuceneTestCase {
     assertNull(pr.document(0).get("f3"));
     assertNull(pr.document(0).get("f4"));
     // check that fields are there
-    slow = MultiFields.getFields(pr);
-    assertNull(slow.terms("f1"));
-    assertNull(slow.terms("f2"));
-    assertNotNull(slow.terms("f3"));
-    assertNotNull(slow.terms("f4"));
+    assertNull(MultiTerms.getTerms(pr, "f1"));
+    assertNull(MultiTerms.getTerms(pr, "f2"));
+    assertNotNull(MultiTerms.getTerms(pr, "f3"));
+    assertNotNull(MultiTerms.getTerms(pr, "f4"));
     pr.close();
     
     // no main readers

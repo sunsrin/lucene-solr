@@ -27,6 +27,7 @@ import org.junit.Ignore;
 /**
  * Tests MMapDirectory
  */
+// See: https://issues.apache.org/jira/browse/SOLR-12028 Tests cannot remove files on Windows machines occasionally
 public class TestMmapDirectory extends BaseDirectoryTestCase {
 
   @Override
@@ -39,8 +40,7 @@ public class TestMmapDirectory extends BaseDirectoryTestCase {
   @Override
   public void setUp() throws Exception {
     super.setUp();
-    assumeTrue("test requires a jre that supports unmapping: " + MMapDirectory.UNMAP_NOT_SUPPORTED_REASON,
-        MMapDirectory.UNMAP_SUPPORTED);
+    assumeTrue(MMapDirectory.UNMAP_NOT_SUPPORTED_REASON, MMapDirectory.UNMAP_SUPPORTED);
   }
   
   @Ignore("This test is for JVM testing purposes. There are no guarantees that it may not fail with SIGSEGV!")

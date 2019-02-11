@@ -21,6 +21,7 @@ import java.io.IOException;
 import java.io.OutputStreamWriter;
 import java.io.Writer;
 import java.lang.invoke.MethodHandles;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.Collection;
@@ -34,7 +35,6 @@ import java.util.Properties;
 import java.util.Random;
 import java.util.Set;
 
-import com.google.common.base.Charsets;
 import org.apache.commons.io.FileUtils;
 import org.apache.lucene.util.IOUtils;
 import org.apache.solr.client.solrj.SolrClient;
@@ -64,6 +64,8 @@ import org.slf4j.LoggerFactory;
 //@LuceneTestCase.SuppressCodecs({"Lucene3x","Lucene40","Lucene41","Lucene42","Lucene45","Appending","Asserting"})
 public class SolrTestCaseHS extends SolrTestCaseJ4 {
   
+  public static final String SOLR_TESTS_SHARDS_WHITELIST = "solr.tests.shardsWhitelist";
+
   private static final Logger log = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
   @SafeVarargs
   public static <T> Set<T> set(T... a) {
@@ -285,6 +287,7 @@ public class SolrTestCaseHS extends SolrTestCaseJ4 {
     public boolean local() {
       return provider == null;
     }
+    public ClientProvider getClientProvider() { return provider; }
 
     public void testJQ(SolrParams args, String... tests) throws Exception {
       if (queryDefaults != null) {
@@ -363,6 +366,10 @@ public class SolrTestCaseHS extends SolrTestCaseJ4 {
     public List<SolrClient> all() {
       return clients;
     }
+
+    public int getSeed() {
+      return hashSeed;
+    }
   }
 
 
@@ -433,7 +440,7 @@ public class SolrTestCaseHS extends SolrTestCaseJ4 {
       copyConfFile(baseDir, collection, schemaFile);
 
       File collDir = new File(baseDir, collection);
-      try (Writer w = new OutputStreamWriter(Files.newOutputStream(collDir.toPath().resolve("core.properties")), Charsets.UTF_8)) {
+      try (Writer w = new OutputStreamWriter(Files.newOutputStream(collDir.toPath().resolve("core.properties")), StandardCharsets.UTF_8)) {
         Properties coreProps = new Properties();
         coreProps.put("name", "collection1");
         coreProps.put("config", solrconfigFile);
@@ -453,7 +460,7 @@ public class SolrTestCaseHS extends SolrTestCaseJ4 {
             .stopAtShutdown(true)
             .setContext("/solr")
             .setPort(port)
-            .withSSLConfig(sslConfig)
+            .withSSLConfig(sslConfig.buildServerSSLConfig())
             .build();
         Properties nodeProperties = new Properties();
         nodeProperties.setProperty("solrconfig", solrconfigFile);
@@ -463,6 +470,12 @@ public class SolrTestCaseHS extends SolrTestCaseJ4 {
 
       // silly stuff included from solrconfig.snippet.randomindexconfig.xml
       System.setProperty("solr.tests.maxBufferedDocs", String.valueOf(100000));
+      
+      // If we want to run with whitelist list, this must be explicitly set to true for the test
+      // otherwise we disable the check
+      if (System.getProperty(SYSTEM_PROPERTY_SOLR_DISABLE_SHARDS_WHITELIST) == null) {
+        systemSetPropertySolrDisableShardsWhitelist("true");
+      }
 
       jetty.start();
       port = jetty.getLocalPort();
@@ -528,6 +541,20 @@ public class SolrTestCaseHS extends SolrTestCaseJ4 {
     // For params.set("shards", getShards())
     public String getShards() {
       return getShardsParam(slist);
+    }
+    
+    public String getWhitelistString() {
+      StringBuilder sb = new StringBuilder();
+      boolean first = true;
+      for (SolrInstance instance : slist) {
+        if (first) {
+          first = false;
+        } else {
+          sb.append(',');
+        }
+        sb.append( instance.getBaseURL().replace("/solr", ""));
+      }
+      return sb.toString();
     }
 
     public List<SolrClient> getSolrJs() {

@@ -18,7 +18,6 @@ package org.apache.solr.handler.component;
 
 import java.io.IOException;
 import java.lang.invoke.MethodHandles;
-import java.net.URL;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -33,7 +32,9 @@ import java.util.Map.Entry;
 
 import org.apache.commons.lang.ArrayUtils;
 import org.apache.commons.lang.StringUtils;
+import org.apache.lucene.util.BytesRef;
 import org.apache.lucene.util.FixedBitSet;
+import org.apache.solr.client.solrj.util.ClientUtils;
 import org.apache.solr.common.SolrException;
 import org.apache.solr.common.SolrException.ErrorCode;
 import org.apache.solr.common.params.CommonParams;
@@ -47,7 +48,9 @@ import org.apache.solr.common.util.StrUtils;
 import org.apache.solr.request.SimpleFacets;
 import org.apache.solr.request.SolrQueryRequest;
 import org.apache.solr.schema.FieldType;
+import org.apache.solr.schema.PointField;
 import org.apache.solr.search.QueryParsing;
+import org.apache.solr.search.DocSet;
 import org.apache.solr.search.SyntaxError;
 import org.apache.solr.search.facet.FacetDebugInfo;
 import org.apache.solr.util.RTimer;
@@ -99,6 +102,11 @@ public class FacetComponent extends SearchComponent {
       // Initialize context
       FacetContext.initContext(rb);
     }
+  }
+
+  /* Custom facet components can return a custom SimpleFacets object */
+  protected SimpleFacets newSimpleFacets(SolrQueryRequest req, DocSet docSet, SolrParams params, ResponseBuilder rb) {
+    return new SimpleFacets(req, docSet, params, rb);
   }
 
   /**
@@ -251,7 +259,7 @@ public class FacetComponent extends SearchComponent {
 
     if (rb.doFacets) {
       SolrParams params = rb.req.getParams();
-      SimpleFacets f = new SimpleFacets(rb.req, rb.getResults().docSet, params, rb);
+      SimpleFacets f = newSimpleFacets(rb.req, rb.getResults().docSet, params, rb);
 
       RTimer timer = null;
       FacetDebugInfo fdebug = null;
@@ -367,7 +375,7 @@ public class FacetComponent extends SearchComponent {
         // add terms into the original facet.field command
         // do it via parameter reference to avoid another layer of encoding.
 
-        String termsKeyEncoded = QueryParsing.encodeLocalParamVal(termsKey);
+        String termsKeyEncoded = ClientUtils.encodeLocalParamVal(termsKey);
         if (dff.localParams != null) {
           facetCommand = commandPrefix + termsKeyEncoded + " "
               + dff.facetStr.substring(2);
@@ -563,21 +571,8 @@ public class FacetComponent extends SearchComponent {
           // set the initial limit higher to increase accuracy
           dff.initialLimit = doOverRequestMath(dff.initialLimit, dff.overrequestRatio, 
                                                dff.overrequestCount);
-          
-          // If option FACET_DISTRIB_MCO is turned on then we will use 1 as the initial 
-          // minCount (unless the user explicitly set it to something less than 1). If 
-          // option FACET_DISTRIB_MCO is turned off then we will use 0 as the initial 
-          // minCount regardless of what the user might have provided (prior to the
-          // addition of the FACET_DISTRIB_MCO option the default logic was to use 0).
-          // As described in issues SOLR-8559 and SOLR-8988 the use of 1 provides a 
-          // significant performance boost.
-          dff.initialMincount = dff.mco ? Math.min(dff.minCount, 1) : 0;
-                                   
-        } else {
-          // if limit==-1, then no need to artificially lower mincount to 0 if
-          // it's 1
-          dff.initialMincount = Math.min(dff.minCount, 1);
         }
+        dff.initialMincount = Math.min(dff.minCount, 1);
       } else {
         // we're sorting by index order.
         // if minCount==0, we should always be able to get accurate results w/o
@@ -655,7 +650,7 @@ public class FacetComponent extends SearchComponent {
       (fieldToOverRequest, FacetParams.FACET_SORT, defaultSort);
 
     int shardLimit = requestedLimit + offset;
-    int shardMinCount = requestedMinCount;
+    int shardMinCount = Math.min(requestedMinCount, 1);
 
     // per-shard mincount & overrequest
     if ( FacetParams.FACET_SORT_INDEX.equals(sort) && 
@@ -674,9 +669,6 @@ public class FacetComponent extends SearchComponent {
     } else if ( FacetParams.FACET_SORT_COUNT.equals(sort) ) {
       if ( 0 < requestedLimit ) {
         shardLimit = doOverRequestMath(shardLimit, overRequestRatio, overRequestCount);
-        shardMinCount = 0; 
-      } else {
-        shardMinCount = Math.min(requestedMinCount, 1);
       }
     } 
     sreq.params.set(paramStart + FacetParams.FACET_LIMIT, shardLimit);
@@ -720,7 +712,7 @@ public class FacetComponent extends SearchComponent {
       try {
         facet_counts = (NamedList) srsp.getSolrResponse().getResponse().get("facet_counts");
       } catch (Exception ex) {
-        if (rb.req.getParams().getBool(ShardParams.SHARDS_TOLERANT, false)) {
+        if (ShardParams.getShardsTolerantAsBool(rb.req.getParams())) {
           continue; // looks like a shard did not return anything
         }
         throw new SolrException(ErrorCode.SERVER_ERROR,
@@ -1204,7 +1196,7 @@ public class FacetComponent extends SearchComponent {
 
 
   /////////////////////////////////////////////
-  ///  SolrInfoMBean
+  ///  SolrInfoBean
   ////////////////////////////////////////////
 
   @Override
@@ -1213,8 +1205,8 @@ public class FacetComponent extends SearchComponent {
   }
 
   @Override
-  public URL[] getDocs() {
-    return null;
+  public Category getCategory() {
+    return Category.QUERY;
   }
 
   /**
@@ -1265,7 +1257,14 @@ public class FacetComponent extends SearchComponent {
       if (facetFs != null) {
         
         for (String field : facetFs) {
-          DistribFieldFacet ff = new DistribFieldFacet(rb, field);
+          final DistribFieldFacet ff;
+          
+          if (params.getFieldBool(field, FacetParams.FACET_EXISTS, false)) {
+            // cap facet count by 1 with this method
+            ff = new DistribFacetExistsField(rb, field);
+          } else {
+            ff = new DistribFieldFacet(rb, field);
+          }
           facets.put(ff.getKey(), ff);
         }
       }
@@ -1422,7 +1421,6 @@ public class FacetComponent extends SearchComponent {
     
     public int initialLimit; // how many terms requested in first phase
     public int initialMincount; // mincount param sent to each shard
-    public boolean mco;
     public double overrequestRatio;
     public int overrequestCount;
     public boolean needRefinements;
@@ -1441,9 +1439,6 @@ public class FacetComponent extends SearchComponent {
         = params.getFieldDouble(field, FacetParams.FACET_OVERREQUEST_RATIO, 1.5);
       this.overrequestCount 
         = params.getFieldInt(field, FacetParams.FACET_OVERREQUEST_COUNT, 10);
-      
-      this.mco 
-      = params.getFieldBool(field, FacetParams.FACET_DISTRIB_MCO, false);
     }
     
     void add(int shardNum, NamedList shardCounts, int numRequested) {
@@ -1465,25 +1460,35 @@ public class FacetComponent extends SearchComponent {
           if (sfc == null) {
             sfc = new ShardFacetCount();
             sfc.name = name;
-            sfc.indexed = ftype == null ? sfc.name : ftype.toInternal(sfc.name);
+            if (ftype == null) {
+              sfc.indexed = null;
+            } else if (ftype.isPointField()) {
+              sfc.indexed = ((PointField)ftype).toInternalByteRef(sfc.name);
+            } else {
+              sfc.indexed = new BytesRef(ftype.toInternal(sfc.name));
+            }
             sfc.termNum = termNum++;
             counts.put(name, sfc);
           }
-          sfc.count += count;
+          incCount(sfc, count);
           terms.set(sfc.termNum);
           last = count;
         }
       }
       
-      // the largest possible missing term is initialMincount if we received
+      // the largest possible missing term is (initialMincount - 1) if we received
       // less than the number requested.
       if (numRequested < 0 || numRequested != 0 && numReceived < numRequested) {
-        last = initialMincount;
+        last = Math.max(0, initialMincount - 1);
       }
       
       missingMaxPossible += last;
       missingMax[shardNum] = last;
       counted[shardNum] = terms;
+    }
+
+    protected void incCount(ShardFacetCount sfc, long count) {
+      sfc.count += count;
     }
     
     public ShardFacetCount[] getLexSorted() {
@@ -1530,14 +1535,14 @@ public class FacetComponent extends SearchComponent {
       }
     }
   }
-  
+
   /**
    * <b>This API is experimental and subject to change</b>
    */
   public static class ShardFacetCount {
     public String name;
     // the indexed form of the name... used for comparisons
-    public String indexed; 
+    public BytesRef indexed; 
     public long count;
     public int termNum; // term number starting at 0 (used in bit arrays)
     
@@ -1547,4 +1552,18 @@ public class FacetComponent extends SearchComponent {
     }
   }
 
+  
+  private static final class DistribFacetExistsField extends DistribFieldFacet {
+    private DistribFacetExistsField(ResponseBuilder rb, String facetStr) {
+      super(rb, facetStr);
+      SimpleFacets.checkMincountOnExists(field, minCount); 
+    }
+
+    @Override
+    protected void incCount(ShardFacetCount sfc, long count) {
+      if (count>0) {
+        sfc.count = 1;
+      }
+    }
+  }
 }

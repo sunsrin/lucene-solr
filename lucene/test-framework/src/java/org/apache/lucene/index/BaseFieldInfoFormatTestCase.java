@@ -53,7 +53,7 @@ public abstract class BaseFieldInfoFormatTestCase extends BaseIndexFileFormatTes
     Directory dir = newDirectory();
     Codec codec = getCodec();
     SegmentInfo segmentInfo = newSegmentInfo(dir, "_123");
-    FieldInfos.Builder builder = new FieldInfos.Builder();
+    FieldInfos.Builder builder = new FieldInfos.Builder(new FieldInfos.FieldNumbers(null));
     FieldInfo fi = builder.getOrAdd("field");
     fi.setIndexOptions(TextField.TYPE_STORED.indexOptions());
     addAttributes(fi);
@@ -75,7 +75,7 @@ public abstract class BaseFieldInfoFormatTestCase extends BaseIndexFileFormatTes
     Directory dir = newDirectory();
     Codec codec = getCodec();
     SegmentInfo segmentInfo = newSegmentInfo(dir, "_123");
-    FieldInfos.Builder builder = new FieldInfos.Builder();
+    FieldInfos.Builder builder = new FieldInfos.Builder(new FieldInfos.FieldNumbers(null));
     FieldInfo fi = builder.getOrAdd("field");
     fi.setIndexOptions(TextField.TYPE_STORED.indexOptions());
     addAttributes(fi);
@@ -115,7 +115,7 @@ public abstract class BaseFieldInfoFormatTestCase extends BaseIndexFileFormatTes
     dir.failOn(fail);
     Codec codec = getCodec();
     SegmentInfo segmentInfo = newSegmentInfo(dir, "_123");
-    FieldInfos.Builder builder = new FieldInfos.Builder();
+    FieldInfos.Builder builder = new FieldInfos.Builder(new FieldInfos.FieldNumbers(null));
     FieldInfo fi = builder.getOrAdd("field");
     fi.setIndexOptions(TextField.TYPE_STORED.indexOptions());
     addAttributes(fi);
@@ -150,7 +150,7 @@ public abstract class BaseFieldInfoFormatTestCase extends BaseIndexFileFormatTes
     dir.failOn(fail);
     Codec codec = getCodec();
     SegmentInfo segmentInfo = newSegmentInfo(dir, "_123");
-    FieldInfos.Builder builder = new FieldInfos.Builder();
+    FieldInfos.Builder builder = new FieldInfos.Builder(new FieldInfos.FieldNumbers(null));
     FieldInfo fi = builder.getOrAdd("field");
     fi.setIndexOptions(TextField.TYPE_STORED.indexOptions());
     addAttributes(fi);
@@ -185,7 +185,7 @@ public abstract class BaseFieldInfoFormatTestCase extends BaseIndexFileFormatTes
     dir.failOn(fail);
     Codec codec = getCodec();
     SegmentInfo segmentInfo = newSegmentInfo(dir, "_123");
-    FieldInfos.Builder builder = new FieldInfos.Builder();
+    FieldInfos.Builder builder = new FieldInfos.Builder(new FieldInfos.FieldNumbers(null));
     FieldInfo fi = builder.getOrAdd("field");
     fi.setIndexOptions(TextField.TYPE_STORED.indexOptions());
     addAttributes(fi);
@@ -221,7 +221,7 @@ public abstract class BaseFieldInfoFormatTestCase extends BaseIndexFileFormatTes
     dir.failOn(fail);
     Codec codec = getCodec();
     SegmentInfo segmentInfo = newSegmentInfo(dir, "_123");
-    FieldInfos.Builder builder = new FieldInfos.Builder();
+    FieldInfos.Builder builder = new FieldInfos.Builder(new FieldInfos.FieldNumbers(null));
     FieldInfo fi = builder.getOrAdd("field");
     fi.setIndexOptions(TextField.TYPE_STORED.indexOptions());
     addAttributes(fi);
@@ -251,7 +251,7 @@ public abstract class BaseFieldInfoFormatTestCase extends BaseIndexFileFormatTes
     for (int i = 0; i < numFields; i++) {
       fieldNames.add(TestUtil.randomUnicodeString(random()));
     }
-    FieldInfos.Builder builder = new FieldInfos.Builder();
+    FieldInfos.Builder builder = new FieldInfos.Builder(new FieldInfos.FieldNumbers(null));
     for (String field : fieldNames) {
       IndexableFieldType fieldType = randomFieldType(random());
       FieldInfo fi = builder.getOrAdd(field);
@@ -347,7 +347,8 @@ public abstract class BaseFieldInfoFormatTestCase extends BaseIndexFileFormatTes
   
   /** Returns a new fake segment */
   protected static SegmentInfo newSegmentInfo(Directory dir, String name) {
-    return new SegmentInfo(dir, Version.LATEST, name, 10000, false, Codec.getDefault(), Collections.emptyMap(), StringHelper.randomId(), new HashMap<>(), null);
+    Version minVersion = random().nextBoolean() ? null : Version.LATEST;
+    return new SegmentInfo(dir, Version.LATEST, minVersion, name, 10000, false, Codec.getDefault(), Collections.emptyMap(), StringHelper.randomId(), new HashMap<>(), null);
   }
   
   @Override

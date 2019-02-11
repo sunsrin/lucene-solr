@@ -25,7 +25,7 @@ import org.apache.lucene.search.DocIdSetIterator;
  * Base implementation for a bit set.
  * @lucene.internal
  */
-public abstract class BitSet implements MutableBits, Accountable {
+public abstract class BitSet implements Bits, Accountable {
 
   /** Build a {@link BitSet} from the content of the provided {@link DocIdSetIterator}.
    *  NOTE: this will fully consume the {@link DocIdSetIterator}. */
@@ -44,6 +44,9 @@ public abstract class BitSet implements MutableBits, Accountable {
 
   /** Set the bit at <code>i</code>. */
   public abstract void set(int i);
+
+  /** Clear the bit at <code>i</code>. */
+  public abstract void clear(int i);
 
   /** Clears a range of bits.
    *
@@ -79,7 +82,7 @@ public abstract class BitSet implements MutableBits, Accountable {
   public abstract int nextSetBit(int index);
 
   /** Assert that the current doc is -1. */
-  protected final void assertUnpositioned(DocIdSetIterator iter) {
+  protected final void checkUnpositioned(DocIdSetIterator iter) {
     if (iter.docID() != -1) {
       throw new IllegalStateException("This operation only works with an unpositioned iterator, got current position = " + iter.docID());
     }
@@ -88,7 +91,7 @@ public abstract class BitSet implements MutableBits, Accountable {
   /** Does in-place OR of the bits provided by the iterator. The state of the
    *  iterator after this operation terminates is undefined. */
   public void or(DocIdSetIterator iter) throws IOException {
-    assertUnpositioned(iter);
+    checkUnpositioned(iter);
     for (int doc = iter.nextDoc(); doc != DocIdSetIterator.NO_MORE_DOCS; doc = iter.nextDoc()) {
       set(doc);
     }

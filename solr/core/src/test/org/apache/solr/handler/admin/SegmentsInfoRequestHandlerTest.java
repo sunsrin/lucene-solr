@@ -16,27 +16,41 @@
  */
 package org.apache.solr.handler.admin;
 
-import org.apache.solr.util.AbstractSolrTestCase;
-import org.junit.Before;
+import java.io.IOException;
+import org.apache.lucene.index.SegmentCommitInfo;
+import org.apache.lucene.index.SegmentInfos;
+import org.apache.lucene.util.Version;
+import org.apache.solr.SolrTestCaseJ4;
+import org.apache.solr.index.NoMergePolicyFactory;
+import org.junit.AfterClass;
 import org.junit.BeforeClass;
 import org.junit.Test;
 
 /**
  * Tests for SegmentsInfoRequestHandler. Plugin entry, returning data of created segment.
  */
-public class SegmentsInfoRequestHandlerTest extends AbstractSolrTestCase {
+public class SegmentsInfoRequestHandlerTest extends SolrTestCaseJ4 {
   private static final int DOC_COUNT = 5;
   
   private static final int DEL_COUNT = 1;
   
+  private static final int NUM_SEGMENTS = 2;
+  
   @BeforeClass
   public static void beforeClass() throws Exception {
-    System.setProperty("enable.update.log", "false");
-    initCore("solrconfig.xml", "schema12.xml");
-  }
 
-  @Before
-  public void before() throws Exception {
+    // we need a consistent segmentation to ensure we don't get a random
+    // merge that reduces the total num docs in all segments, or the number of deletes
+    //
+    systemSetPropertySolrTestsMergePolicyFactory(NoMergePolicyFactory.class.getName());
+    // Also prevent flushes
+    System.setProperty("solr.tests.maxBufferedDocs", "1000");
+    System.setProperty("solr.tests.ramBufferSizeMB", "5000");
+    
+    System.setProperty("enable.update.log", "false"); // no _version_ in our schema
+    initCore("solrconfig.xml", "schema12.xml"); // segments API shouldn't depend on _version_ or ulog
+    
+    // build up an index with at least 2 segments and some deletes
     for (int i = 0; i < DOC_COUNT; i++) {
       assertU(adoc("id","SOLR100" + i, "name","Apache Solr:" + i));
     }
@@ -44,22 +58,66 @@ public class SegmentsInfoRequestHandlerTest extends AbstractSolrTestCase {
       assertU(delI("SOLR100" + i));
     }
     assertU(commit());
+    for (int i = 0; i < DOC_COUNT; i++) {
+      assertU(adoc("id","SOLR200" + i, "name","Apache Solr:" + i));
+    }
+    assertU(commit());
+    h.getCore().withSearcher((searcher) -> {
+      int numSegments = SegmentInfos.readLatestCommit(searcher.getIndexReader().directory()).size();
+      // if this is not NUM_SEGMENTS, there was some unexpected flush or merge
+      assertEquals("Unexpected number of segment in the index: " + numSegments, 
+          NUM_SEGMENTS, numSegments);
+      return null;
+    });
+    
+  }
+  
+  @AfterClass
+  public static void afterClass() {
+    systemClearPropertySolrTestsMergePolicyFactory();
+    System.clearProperty("solr.tests.maxBufferedDocs");
+    System.clearProperty("solr.tests.ramBufferSizeMB");
   }
 
   @Test
   public void testSegmentInfos() {   
-    assertQ("No segments mentioned in result",
+    assertQ("Unexpected number of segments returned",
         req("qt","/admin/segments"),
-          "0<count(//lst[@name='segments']/lst)");
+        NUM_SEGMENTS + "=count(//lst[@name='segments']/lst)");
+  }
+
+  @Test
+  public void testSegmentInfosVersion() {
+    assertQ("Unexpected number of segments returned",
+        req("qt","/admin/segments"),
+        NUM_SEGMENTS + "=count(//lst[@name='segments']/lst/str[@name='version'][.='" + Version.LATEST + "'])");
   }
   
   @Test
-  public void testSegmentInfosData() {   
-    assertQ("No segments mentioned in result",
+  public void testSegmentNames() throws IOException {
+    String[] segmentNamePatterns = new String[NUM_SEGMENTS];
+    h.getCore().withSearcher((searcher) -> {
+      int i = 0;
+      for (SegmentCommitInfo sInfo : SegmentInfos.readLatestCommit(searcher.getIndexReader().directory())) {
+        assertTrue("Unexpected number of segment in the index: " + i, i < NUM_SEGMENTS);
+        segmentNamePatterns[i] = "//lst[@name='segments']/lst/str[@name='name'][.='" + sInfo.info.name + "']";
+        i++;
+      }
+      
+      return null;
+    });
+    assertQ("Unexpected segment names returned",
+        req("qt","/admin/segments"),
+        segmentNamePatterns);
+  }
+  
+  @Test
+  public void testSegmentInfosData() {
+    assertQ("Unexpected document counts in result",
         req("qt","/admin/segments"),
           //#Document
-          DOC_COUNT+"=sum(//lst[@name='segments']/lst[*]/int[@name='size'])",
+          (DOC_COUNT*2)+"=sum(//lst[@name='segments']/lst/int[@name='size'])",
           //#Deletes
-          DEL_COUNT+"=sum(//lst[@name='segments']/lst[*]/int[@name='delCount'])");
+          DEL_COUNT+"=sum(//lst[@name='segments']/lst/int[@name='delCount'])");
   }
 }

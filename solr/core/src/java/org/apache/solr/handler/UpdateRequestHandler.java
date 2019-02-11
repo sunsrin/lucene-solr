@@ -136,13 +136,13 @@ public class UpdateRequestHandler extends ContentStreamHandlerBase implements Pe
   protected Map<String,ContentStreamLoader> createDefaultLoaders(NamedList args) {
     SolrParams p = null;
     if(args!=null) {
-      p = SolrParams.toSolrParams(args);
+      p = args.toSolrParams();
     }
     Map<String,ContentStreamLoader> registry = new HashMap<>();
     registry.put("application/xml", new XMLLoader().init(p) );
     registry.put("application/json", new JsonLoader().init(p) );
     registry.put("application/csv", new CSVLoader().init(p) );
-    registry.put("application/javabin", new JavabinLoader().init(p) );
+    registry.put("application/javabin", new JavabinLoader(instance).init(p) );
     registry.put("text/csv", registry.get("application/csv") );
     registry.put("text/xml", registry.get("application/xml") );
     registry.put("text/json", registry.get("application/json"));
@@ -150,6 +150,7 @@ public class UpdateRequestHandler extends ContentStreamHandlerBase implements Pe
     pathVsLoaders.put(JSON_PATH,registry.get("application/json"));
     pathVsLoaders.put(DOC_PATH,registry.get("application/json"));
     pathVsLoaders.put(CSV_PATH,registry.get("application/csv"));
+    pathVsLoaders.put(BIN_PATH,registry.get("application/javabin"));
     return registry;
   }
 
@@ -170,9 +171,15 @@ public class UpdateRequestHandler extends ContentStreamHandlerBase implements Pe
     return "Add documents using XML (with XSLT), CSV, JSON, or javabin";
   }
 
+  @Override
+  public Category getCategory() {
+    return Category.UPDATE;
+  }
+
   public static final String DOC_PATH = "/update/json/docs";
   public static final String JSON_PATH = "/update/json";
   public static final String CSV_PATH = "/update/csv";
+  public static final String BIN_PATH = "/update/bin";
 
 }
 

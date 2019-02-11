@@ -21,6 +21,7 @@ import java.io.IOException;
 
 import org.apache.lucene.analysis.Analyzer;
 import org.apache.lucene.analysis.TokenStream;
+import org.apache.lucene.analysis.miscellaneous.ConcatenateGraphFilter;
 import org.apache.lucene.document.Field;
 import org.apache.lucene.document.FieldType;
 import org.apache.lucene.index.IndexOptions;
@@ -38,7 +39,7 @@ import org.apache.lucene.util.BytesRef;
  * Besides the usual {@link org.apache.lucene.analysis.Analyzer}s,
  * {@link CompletionAnalyzer}
  * can be used to tune suggest field only parameters
- * (e.g. preserving token seperators, preserving position increments
+ * (e.g. preserving token separators, preserving position increments
  * when converting the token stream to an automaton)
  * </p>
  * <p>
@@ -47,7 +48,7 @@ import org.apache.lucene.util.BytesRef;
  * document.add(new SuggestField(name, "suggestion", 4));
  * </pre>
  * To perform document suggestions based on the this field, use
- * {@link SuggestIndexSearcher#suggest(CompletionQuery, int)}
+ * {@link SuggestIndexSearcher#suggest(CompletionQuery, int, boolean)}
  *
  * @lucene.experimental
  */
@@ -140,7 +141,7 @@ public class SuggestField extends Field {
 
   private boolean isReserved(char c) {
     switch (c) {
-      case CompletionAnalyzer.SEP_LABEL:
+      case ConcatenateGraphFilter.SEP_LABEL:
       case CompletionAnalyzer.HOLE_CHARACTER:
       case NRTSuggesterBuilder.END_BYTE:
         return true;

@@ -26,22 +26,12 @@ import java.util.Map.Entry;
 
 import org.apache.solr.client.solrj.io.Tuple;
 import org.apache.solr.client.solrj.io.comp.StreamComparator;
-import org.apache.solr.client.solrj.io.graph.GatherNodesStream;
-import org.apache.solr.client.solrj.io.graph.ShortestPathStream;
 import org.apache.solr.client.solrj.io.graph.Traversal;
-import org.apache.solr.client.solrj.io.ops.ConcatOperation;
-import org.apache.solr.client.solrj.io.ops.DistinctOperation;
-import org.apache.solr.client.solrj.io.ops.GroupOperation;
-import org.apache.solr.client.solrj.io.ops.ReplaceOperation;
 import org.apache.solr.client.solrj.io.stream.*;
+import org.apache.solr.client.solrj.io.stream.expr.DefaultStreamFactory;
 import org.apache.solr.client.solrj.io.stream.expr.Explanation;
 import org.apache.solr.client.solrj.io.stream.expr.Expressible;
 import org.apache.solr.client.solrj.io.stream.expr.StreamFactory;
-import org.apache.solr.client.solrj.io.stream.metrics.CountMetric;
-import org.apache.solr.client.solrj.io.stream.metrics.MaxMetric;
-import org.apache.solr.client.solrj.io.stream.metrics.MeanMetric;
-import org.apache.solr.client.solrj.io.stream.metrics.MinMetric;
-import org.apache.solr.client.solrj.io.stream.metrics.SumMetric;
 import org.apache.solr.common.SolrException;
 import org.apache.solr.common.params.CommonParams;
 import org.apache.solr.common.params.ModifiableSolrParams;
@@ -57,10 +47,14 @@ import org.apache.solr.util.plugin.SolrCoreAware;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+
+/**
+ * @since 6.1.0
+ */
 public class GraphHandler extends RequestHandlerBase implements SolrCoreAware, PermissionNameProvider {
 
-  private StreamFactory streamFactory = new StreamFactory();
-  private static final Logger logger = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
+  private StreamFactory streamFactory = new DefaultStreamFactory();
+  private static final Logger log = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
   private String coreName;
 
   @Override
@@ -80,67 +74,25 @@ public class GraphHandler extends RequestHandlerBase implements SolrCoreAware, P
      *  </lst>
      * */
 
-    String defaultCollection = null;
-    String defaultZkhost     = null;
-    CoreContainer coreContainer = core.getCoreDescriptor().getCoreContainer();
+    String defaultCollection;
+    String defaultZkhost;
+    CoreContainer coreContainer = core.getCoreContainer();
     this.coreName = core.getName();
 
     if(coreContainer.isZooKeeperAware()) {
       defaultCollection = core.getCoreDescriptor().getCollectionName();
-      defaultZkhost = core.getCoreDescriptor().getCoreContainer().getZkController().getZkServerAddress();
+      defaultZkhost = core.getCoreContainer().getZkController().getZkServerAddress();
       streamFactory.withCollectionZkHost(defaultCollection, defaultZkhost);
       streamFactory.withDefaultZkHost(defaultZkhost);
     }
-
-    streamFactory
-        // streams
-        .withFunctionName("search", CloudSolrStream.class)
-        .withFunctionName("merge", MergeStream.class)
-        .withFunctionName("unique", UniqueStream.class)
-        .withFunctionName("top", RankStream.class)
-        .withFunctionName("group", GroupOperation.class)
-        .withFunctionName("reduce", ReducerStream.class)
-        .withFunctionName("parallel", ParallelStream.class)
-        .withFunctionName("rollup", RollupStream.class)
-        .withFunctionName("stats", StatsStream.class)
-        .withFunctionName("innerJoin", InnerJoinStream.class)
-        .withFunctionName("leftOuterJoin", LeftOuterJoinStream.class)
-        .withFunctionName("hashJoin", HashJoinStream.class)
-        .withFunctionName("outerHashJoin", OuterHashJoinStream.class)
-        .withFunctionName("facet", FacetStream.class)
-        .withFunctionName("update", UpdateStream.class)
-        .withFunctionName("jdbc", JDBCStream.class)
-        .withFunctionName("intersect", IntersectStream.class)
-        .withFunctionName("select", SelectStream.class)
-        .withFunctionName("complement", ComplementStream.class)
-        .withFunctionName("daemon", DaemonStream.class)
-        .withFunctionName("topic", TopicStream.class)
-        .withFunctionName("shortestPath", ShortestPathStream.class)
-        .withFunctionName("gatherNodes", GatherNodesStream.class)
-        .withFunctionName("sort", SortStream.class)
-            .withFunctionName("scoreNodes", ScoreNodesStream.class)
-
-        // metrics
-        .withFunctionName("min", MinMetric.class)
-        .withFunctionName("max", MaxMetric.class)
-        .withFunctionName("avg", MeanMetric.class)
-        .withFunctionName("sum", SumMetric.class)
-        .withFunctionName("count", CountMetric.class)
-
-            // tuple manipulation operations
-        .withFunctionName("replace", ReplaceOperation.class)
-        .withFunctionName("concat", ConcatOperation.class)
-
-            // stream reduction operations
-        .withFunctionName("group", GroupOperation.class)
-        .withFunctionName("distinct", DistinctOperation.class);
 
     // This pulls all the overrides and additions from the config
     Object functionMappingsObj = initArgs.get("streamFunctions");
     if(null != functionMappingsObj){
       NamedList<?> functionMappings = (NamedList<?>)functionMappingsObj;
       for(Entry<String,?> functionMapping : functionMappings){
-        Class<?> clazz = core.getResourceLoader().findClass((String)functionMapping.getValue(), Expressible.class);
+        Class<? extends Expressible> clazz = core.getResourceLoader().findClass((String)functionMapping.getValue(),
+            Expressible.class);
         streamFactory.withFunctionName(functionMapping.getKey(), clazz);
       }
     }
@@ -158,7 +110,7 @@ public class GraphHandler extends RequestHandlerBase implements SolrCoreAware, P
       tupleStream = this.streamFactory.constructStream(params.get("expr"));
     } catch (Exception e) {
       //Catch exceptions that occur while the stream is being created. This will include streaming expression parse rules.
-      SolrException.log(logger, e);
+      SolrException.log(log, e);
       Map requestContext = req.getContext();
       requestContext.put("stream", new DummyErrorStream(e));
       return;

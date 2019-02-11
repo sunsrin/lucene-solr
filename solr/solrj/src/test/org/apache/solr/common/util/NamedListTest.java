@@ -18,9 +18,11 @@ package org.apache.solr.common.util;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 
 import org.apache.lucene.util.LuceneTestCase;
 import org.apache.solr.common.SolrException;
+import org.junit.Test;
 
 public class NamedListTest extends LuceneTestCase {
   public void testRemove() {
@@ -61,7 +63,9 @@ public class NamedListTest extends LuceneTestCase {
     assertEquals(5, values.size());
     assertEquals(0, nl.size());
   }
-  
+
+  @Test
+  // commented out on: 24-Dec-2018   @BadApple(bugUrl="https://issues.apache.org/jira/browse/SOLR-12028") // added 20-Sep-2018
   public void testRemoveArgs() {
     NamedList<Object> nl = new NamedList<>();
     nl.add("key1", "value1-1");
@@ -184,5 +188,24 @@ public class NamedListTest extends LuceneTestCase {
     assertNull(enltest3);
     Object enltest4 = enl.findRecursive("key2");
     assertNull(enltest4);
+  }
+
+  @Test
+  // commented out on: 24-Dec-2018   @BadApple(bugUrl="https://issues.apache.org/jira/browse/SOLR-12028") // added 20-Sep-2018
+  public void testShallowMap() {
+    NamedList nl = new NamedList();
+    nl.add("key1", "Val1");
+    Map m = nl.asShallowMap();
+    m.put("key1", "Val1_");
+    assertEquals("Val1_", nl.get("key1"));
+    assertEquals("Val1_", m.get("key1"));
+    assertEquals(0, nl.indexOf("key1", 0));
+    m.putAll(Utils.makeMap("key1", "Val1__", "key2", "Val2"));
+    assertEquals("Val1__", nl.get("key1"));
+    assertEquals("Val1__", m.get("key1"));
+    assertEquals(0, nl.indexOf("key1", 0));
+    assertEquals("Val2", nl.get("key2"));
+    assertEquals("Val2", m.get("key2"));
+
   }
 }

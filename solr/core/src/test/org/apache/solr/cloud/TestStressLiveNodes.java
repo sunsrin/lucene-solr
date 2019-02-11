@@ -26,7 +26,6 @@ import java.util.concurrent.TimeUnit;
 
 import org.apache.lucene.util.LuceneTestCase.Slow;
 import org.apache.lucene.util.TestUtil;
-import org.apache.solr.cloud.SolrCloudTestCase;
 import org.apache.solr.client.solrj.impl.CloudSolrClient;
 import org.apache.solr.common.cloud.SolrZkClient;
 import org.apache.solr.common.cloud.ZkStateReader;
@@ -67,9 +66,6 @@ public class TestStressLiveNodes extends SolrCloudTestCase {
     // we only need 1 node, and we don't care about any configs or collections
     // we're going to fake all the live_nodes changes we want to fake.
     configureCluster(1).configure();
-
-    // give all nodes a chance to come alive
-    TestTolerantUpdateProcessorCloud.assertSpinLoopAllJettyAreRunning(cluster);
     
     CLOUD_CLIENT = cluster.getSolrClient();
     CLOUD_CLIENT.connect(); // force connection even though we aren't sending any requests
@@ -132,7 +128,7 @@ public class TestStressLiveNodes extends SolrCloudTestCase {
   public void testStress() throws Exception {
 
     // do many iters, so we have "bursts" of adding nodes that we then check
-    final int numIters = atLeast(1000);
+    final int numIters = atLeast(TEST_NIGHTLY ? 1000 : 100);
     for (int iter = 0; iter < numIters; iter++) {
 
       // sanity check that ZK says there is in fact 1 live node

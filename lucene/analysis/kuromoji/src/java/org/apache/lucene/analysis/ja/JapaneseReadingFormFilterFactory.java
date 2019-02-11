@@ -18,7 +18,6 @@ package org.apache.lucene.analysis.ja;
 
 
 import org.apache.lucene.analysis.TokenStream;
-import org.apache.lucene.analysis.ja.JapaneseReadingFormFilter;
 import org.apache.lucene.analysis.util.TokenFilterFactory;
 
 import java.util.Map;
@@ -34,6 +33,7 @@ import java.util.Map;
  *   &lt;/analyzer&gt;
  * &lt;/fieldType&gt;
  * </pre>
+ * @since 3.6.0
  */
 public class JapaneseReadingFormFilterFactory extends TokenFilterFactory {
   private static final String ROMAJI_PARAM = "useRomaji";

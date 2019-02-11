@@ -68,7 +68,7 @@ public final class ConstantScoreQuery extends Query {
    *  wraps a query with its own optimized top-level
    *  scorer (e.g. BooleanScorer) we can use that
    *  top-level scorer. */
-  protected class ConstantBulkScorer extends BulkScorer {
+  protected static class ConstantBulkScorer extends BulkScorer {
     final BulkScorer bulkScorer;
     final Weight weight;
     final float theScore;
@@ -87,16 +87,12 @@ public final class ConstantScoreQuery extends Query {
     private LeafCollector wrapCollector(LeafCollector collector) {
       return new FilterLeafCollector(collector) {
         @Override
-        public void setScorer(Scorer scorer) throws IOException {
+        public void setScorer(Scorable scorer) throws IOException {
           // we must wrap again here, but using the scorer passed in as parameter:
-          in.setScorer(new FilterScorer(scorer) {
+          in.setScorer(new FilterScorable(scorer) {
             @Override
-            public float score() throws IOException {
+            public float score() {
               return theScore;
-            }
-            @Override
-            public int freq() throws IOException {
-              return 1;
             }
           });
         }
@@ -110,9 +106,9 @@ public final class ConstantScoreQuery extends Query {
   }
 
   @Override
-  public Weight createWeight(IndexSearcher searcher, boolean needsScores, float boost) throws IOException {
-    final Weight innerWeight = searcher.createWeight(query, false, 1f);
-    if (needsScores) {
+  public Weight createWeight(IndexSearcher searcher, ScoreMode scoreMode, float boost) throws IOException {
+    final Weight innerWeight = searcher.createWeight(query, ScoreMode.COMPLETE_NO_SCORES, 1f);
+    if (scoreMode.needsScores()) {
       return new ConstantScoreWeight(this, boost) {
 
         @Override
@@ -125,26 +121,56 @@ public final class ConstantScoreQuery extends Query {
         }
 
         @Override
-        public Scorer scorer(LeafReaderContext context) throws IOException {
-          final Scorer innerScorer = innerWeight.scorer(context);
-          if (innerScorer == null) {
+        public ScorerSupplier scorerSupplier(LeafReaderContext context) throws IOException {
+          ScorerSupplier innerScorerSupplier = innerWeight.scorerSupplier(context);
+          if (innerScorerSupplier == null) {
             return null;
           }
-          final float score = score();
-          return new FilterScorer(innerScorer) {
+          return new ScorerSupplier() {
             @Override
-            public float score() throws IOException {
-              return score;
+            public Scorer get(long leadCost) throws IOException {
+              final Scorer innerScorer = innerScorerSupplier.get(leadCost);
+              final float score = score();
+              return new FilterScorer(innerScorer) {
+                @Override
+                public float score() throws IOException {
+                  return score;
+                }
+                @Override
+                public float getMaxScore(int upTo) throws IOException {
+                  return score;
+                }
+                @Override
+                public Collection<ChildScorable> getChildren() {
+                  return Collections.singleton(new ChildScorable(innerScorer, "constant"));
+                }
+              };
             }
+
             @Override
-            public int freq() throws IOException {
-              return 1;
-            }
-            @Override
-            public Collection<ChildScorer> getChildren() {
-              return Collections.singleton(new ChildScorer(innerScorer, "constant"));
+            public long cost() {
+              return innerScorerSupplier.cost();
             }
           };
+        }
+
+        @Override
+        public Matches matches(LeafReaderContext context, int doc) throws IOException {
+          return innerWeight.matches(context, doc);
+        }
+
+        @Override
+        public Scorer scorer(LeafReaderContext context) throws IOException {
+          ScorerSupplier scorerSupplier = scorerSupplier(context);
+          if (scorerSupplier == null) {
+            return null;
+          }
+          return scorerSupplier.get(Long.MAX_VALUE);
+        }
+
+        @Override
+        public boolean isCacheable(LeafReaderContext ctx) {
+          return innerWeight.isCacheable(ctx);
         }
 
       };

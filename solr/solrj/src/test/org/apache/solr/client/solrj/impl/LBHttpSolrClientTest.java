@@ -17,6 +17,7 @@
 package org.apache.solr.client.solrj.impl;
 
 import org.apache.http.impl.client.CloseableHttpClient;
+import org.apache.lucene.util.LuceneTestCase;
 import org.apache.solr.client.solrj.ResponseParser;
 import org.apache.solr.common.params.ModifiableSolrParams;
 import org.junit.Test;
@@ -37,10 +38,11 @@ public class LBHttpSolrClientTest {
    * Validate that the parser passed in is used in the <code>HttpSolrClient</code> instances created.
    */
   @Test
+  @LuceneTestCase.BadApple(bugUrl="https://issues.apache.org/jira/browse/SOLR-12028") // added 20-Sep-2018
   public void testLBHttpSolrClientHttpClientResponseParserStringArray() throws IOException {
     CloseableHttpClient httpClient = HttpClientUtil.createClient(new ModifiableSolrParams());
     try (
-         LBHttpSolrClient testClient = new LBHttpSolrClient(httpClient, (ResponseParser) null);
+         LBHttpSolrClient testClient = new LBHttpSolrClient.Builder().withHttpClient(httpClient).withResponseParser(null).build();
          HttpSolrClient httpSolrClient = testClient.makeSolrClient("http://127.0.0.1:8080")) {
       assertNull("Generated server should have null parser.", httpSolrClient.getParser());
     } finally {

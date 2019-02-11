@@ -68,10 +68,14 @@ public final class Constants {
       JVM_MINOR_VERSION = 0;
     }
     boolean is64Bit = false;
-    final String x = System.getProperty("sun.arch.data.model");
-    if (x != null) {
-      is64Bit = x.contains("64");
-    } else {
+    String datamodel = null;
+    try {
+      datamodel = System.getProperty("sun.arch.data.model");
+      if (datamodel != null) {
+        is64Bit = datamodel.contains("64");
+      }
+    } catch (SecurityException ex) {}
+    if (datamodel == null) {
       if (OS_ARCH != null && OS_ARCH.contains("64")) {
         is64Bit = true;
       } else {
@@ -83,6 +87,7 @@ public final class Constants {
 
   public static final boolean JRE_IS_MINIMUM_JAVA8 = JVM_MAJOR_VERSION > 1 || (JVM_MAJOR_VERSION == 1 && JVM_MINOR_VERSION >= 8);
   public static final boolean JRE_IS_MINIMUM_JAVA9 = JVM_MAJOR_VERSION > 1 || (JVM_MAJOR_VERSION == 1 && JVM_MINOR_VERSION >= 9);
+  public static final boolean JRE_IS_MINIMUM_JAVA11 = JVM_MAJOR_VERSION > 1 || (JVM_MAJOR_VERSION == 1 && JVM_MINOR_VERSION >= 11);
 
   /**
    * This is the internal Lucene version, including bugfix versions, recorded into each segment.

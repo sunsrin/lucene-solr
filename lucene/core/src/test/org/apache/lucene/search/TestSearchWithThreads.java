@@ -29,10 +29,10 @@ import org.apache.lucene.store.Directory;
 import org.apache.lucene.util.LuceneTestCase;
 import org.apache.lucene.util.LuceneTestCase.SuppressCodecs;
 
-@SuppressCodecs({ "SimpleText", "Memory", "Direct" })
+@SuppressCodecs({ "SimpleText", "Direct" })
 public class TestSearchWithThreads extends LuceneTestCase {
   int NUM_DOCS;
-  final int NUM_SEARCH_THREADS = 5;
+  static final int NUM_SEARCH_THREADS = 5;
   int RUN_TIME_MSEC;
   
   @Override

@@ -107,14 +107,18 @@ class SegmentInfosSearcherManager extends ReferenceManager<IndexSearcher> {
     DirectoryReader r = StandardDirectoryReader.open(dir, currentInfos, subs);
     addReaderClosedListener(r);
     node.message("refreshed to version=" + currentInfos.getVersion() + " r=" + r);
-    return SearcherManager.getSearcher(searcherFactory, r, (DirectoryReader) old.getIndexReader());
+    return SearcherManager.getSearcher(searcherFactory, r, old.getIndexReader());
   }
 
   private void addReaderClosedListener(IndexReader r) {
+    IndexReader.CacheHelper cacheHelper = r.getReaderCacheHelper();
+    if (cacheHelper == null) {
+      throw new IllegalStateException("StandardDirectoryReader must support caching");
+    }
     openReaderCount.incrementAndGet();
-    r.addReaderClosedListener(new IndexReader.ReaderClosedListener() {
+    cacheHelper.addClosedListener(new IndexReader.ClosedListener() {
         @Override
-        public void onClose(IndexReader reader) {
+        public void onClose(IndexReader.CacheKey cacheKey) {
           onReaderClosed();
         }
       });

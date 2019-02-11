@@ -20,6 +20,7 @@ import java.io.IOException;
 import java.util.Arrays;
 import java.util.List;
 
+import com.google.common.primitives.Longs;
 import org.apache.lucene.index.IndexReaderContext;
 import org.apache.lucene.index.LeafReader;
 import org.apache.lucene.index.LeafReaderContext;
@@ -30,7 +31,8 @@ import org.apache.lucene.search.DocIdSet;
 import org.apache.lucene.search.IndexSearcher;
 import org.apache.lucene.search.LeafCollector;
 import org.apache.lucene.search.Query;
-import org.apache.lucene.search.Scorer;
+import org.apache.lucene.search.Scorable;
+import org.apache.lucene.search.ScoreMode;
 import org.apache.lucene.search.Weight;
 import org.apache.lucene.util.BitDocIdSet;
 import org.apache.lucene.util.Bits;
@@ -38,13 +40,12 @@ import org.apache.lucene.util.BytesRef;
 import org.apache.lucene.util.CharsRef;
 import org.apache.lucene.util.CharsRefBuilder;
 import org.apache.lucene.util.FixedBitSet;
+import org.apache.solr.common.SolrException;
 import org.apache.solr.common.params.SolrParams;
 import org.apache.solr.request.SolrQueryRequest;
 import org.apache.solr.schema.FieldType;
 import org.apache.solr.schema.IndexSchema;
 import org.apache.solr.schema.StrField;
-
-import com.google.common.primitives.Longs;
 
 /**
 * syntax fq={!hash workers=11 worker=4 keys=field1,field2}
@@ -59,24 +60,30 @@ public class HashQParserPlugin extends QParserPlugin {
     return new HashQParser(query, localParams, params, request);
   }
 
-  private class HashQParser extends QParser {
+  private static class HashQParser extends QParser {
 
     public HashQParser(String query, SolrParams localParams, SolrParams params, SolrQueryRequest request) {
       super(query, localParams, params, request);
     }
 
     public Query parse() {
-      int workers = localParams.getInt("workers");
-      int worker = localParams.getInt("worker");
-      String keys = params.get("partitionKeys");
-      keys = keys.replace(" ", "");
+      int workers = localParams.getInt("workers", 0);
+      if (workers < 2) {
+        throw new SolrException(SolrException.ErrorCode.BAD_REQUEST, "workers needs to be more than 1");
+      }
+      int worker = localParams.getInt("worker", 0);
+      String keyParam = params.get("partitionKeys");
+      String[] keys = keyParam.replace(" ", "").split(",");
+      if (keys.length > 4) {
+        throw new SolrException(SolrException.ErrorCode.BAD_REQUEST, "HashQuery supports upto 4 partitionKeys");
+      }
       return new HashQuery(keys, workers, worker);
     }
   }
 
-  private class HashQuery extends ExtendedQueryBase implements PostFilter {
+  private static class HashQuery extends ExtendedQueryBase implements PostFilter {
 
-    private String keysParam;
+    private String[] keys;
     private int workers;
     private int worker;
 
@@ -90,7 +97,7 @@ public class HashQParserPlugin extends QParserPlugin {
 
     public int hashCode() {
       return classHash() + 
-          31 * keysParam.hashCode() + 
+          31 * keys.hashCode() +
           31 * workers + 
           31 * worker;
     }
@@ -101,20 +108,20 @@ public class HashQParserPlugin extends QParserPlugin {
     }
 
     private boolean equalsTo(HashQuery other) {
-      return keysParam.equals(other.keysParam) && 
+      return keys.equals(other.keys) &&
              workers == other.workers && 
              worker == other.worker;
     }
 
-    public HashQuery(String keysParam, int workers, int worker) {
-      this.keysParam = keysParam;
+    public HashQuery(String[] keys, int workers, int worker) {
+      this.keys = keys;
       this.workers = workers;
       this.worker = worker;
     }
 
-    public Weight createWeight(IndexSearcher searcher, boolean needsScores, float boost) throws IOException {
+    @Override
+    public Weight createWeight(IndexSearcher searcher, ScoreMode scoreMode, float boost) throws IOException {
 
-      String[] keys = keysParam.split(",");
       SolrIndexSearcher solrIndexSearcher = (SolrIndexSearcher)searcher;
       IndexReaderContext context = solrIndexSearcher.getTopReaderContext();
 
@@ -132,10 +139,10 @@ public class HashQParserPlugin extends QParserPlugin {
       }
 
       ConstantScoreQuery constantScoreQuery = new ConstantScoreQuery(new BitsFilter(fixedBitSets));
-      return searcher.rewrite(constantScoreQuery).createWeight(searcher, false, boost);
+      return searcher.rewrite(constantScoreQuery).createWeight(searcher, ScoreMode.COMPLETE_NO_SCORES, boost);
     }
 
-    public class BitsFilter extends Filter {
+    public static class BitsFilter extends Filter {
       private FixedBitSet[] bitSets;
       public BitsFilter(FixedBitSet[] bitSets) {
         this.bitSets = bitSets;
@@ -166,7 +173,7 @@ public class HashQParserPlugin extends QParserPlugin {
     }
 
 
-    class SegmentPartitioner implements Runnable {
+    static class SegmentPartitioner implements Runnable {
 
       public LeafReaderContext context;
       private int worker;
@@ -218,7 +225,6 @@ public class HashQParserPlugin extends QParserPlugin {
     }
 
     public DelegatingCollector getFilterCollector(IndexSearcher indexSearcher) {
-      String[] keys = keysParam.split(",");
       HashKey[] hashKeys = new HashKey[keys.length];
       SolrIndexSearcher searcher = (SolrIndexSearcher)indexSearcher;
       IndexSchema schema = searcher.getSchema();
@@ -238,7 +244,7 @@ public class HashQParserPlugin extends QParserPlugin {
     }
   }
 
-  private class HashCollector extends DelegatingCollector {
+  private static class HashCollector extends DelegatingCollector {
     private int worker;
     private int workers;
     private HashKey hashKey;
@@ -250,7 +256,7 @@ public class HashQParserPlugin extends QParserPlugin {
       this.worker = worker;
     }
 
-    public void setScorer(Scorer scorer) throws IOException{
+    public void setScorer(Scorable scorer) throws IOException{
       leafCollector.setScorer(scorer);
     }
 
@@ -268,10 +274,10 @@ public class HashQParserPlugin extends QParserPlugin {
 
   private interface HashKey {
     public void setNextReader(LeafReaderContext reader) throws IOException;
-    public long hashCode(int doc);
+    public long hashCode(int doc) throws IOException;
   }
 
-  private class BytesHash implements HashKey {
+  private static class BytesHash implements HashKey {
 
     private SortedDocValues values;
     private String field;
@@ -287,15 +293,23 @@ public class HashQParserPlugin extends QParserPlugin {
       values = context.reader().getSortedDocValues(field);
     }
 
-    public long hashCode(int doc) {
-      BytesRef ref = values.get(doc);
+    public long hashCode(int doc) throws IOException {
+      if (doc > values.docID()) {
+        values.advance(doc);
+      }
+      BytesRef ref;
+      if (doc == values.docID()) {
+        ref = values.binaryValue();
+      } else {
+        ref = new BytesRef(); // EMPTY_BYTES . worker=0 will always process empty values
+      }
       this.fieldType.indexedToReadable(ref, charsRefBuilder);
       CharsRef charsRef = charsRefBuilder.get();
       return charsRef.hashCode();
     }
   }
 
-  private class NumericHash implements HashKey {
+  private static class NumericHash implements HashKey {
 
     private NumericDocValues values;
     private String field;
@@ -308,13 +322,22 @@ public class HashQParserPlugin extends QParserPlugin {
       values = context.reader().getNumericDocValues(field);
     }
 
-    public long hashCode(int doc) {
-      long l = values.get(doc);
+    public long hashCode(int doc) throws IOException {
+      int valuesDocID = values.docID();
+      if (valuesDocID < doc) {
+        valuesDocID = values.advance(doc);
+      }
+      long l;
+      if (valuesDocID == doc) {
+        l = values.longValue();
+      } else {
+        l = 0; //worker=0 will always process empty values
+      }
       return Longs.hashCode(l);
     }
   }
 
-  private class ZeroHash implements HashKey {
+  private static class ZeroHash implements HashKey {
 
     public long hashCode(int doc) {
       return 0;
@@ -325,7 +348,7 @@ public class HashQParserPlugin extends QParserPlugin {
     }
   }
 
-  private class CompositeHash implements HashKey {
+  private static class CompositeHash implements HashKey {
 
     private HashKey key1;
     private HashKey key2;
@@ -346,7 +369,7 @@ public class HashQParserPlugin extends QParserPlugin {
       key4.setNextReader(context);
     }
 
-    public long hashCode(int doc) {
+    public long hashCode(int doc) throws IOException {
       return key1.hashCode(doc)+key2.hashCode(doc)+key3.hashCode(doc)+key4.hashCode(doc);
     }
   }

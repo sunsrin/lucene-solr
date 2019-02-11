@@ -17,6 +17,8 @@
 package org.apache.solr.search.grouping.endresulttransformer;
 
 import org.apache.lucene.search.ScoreDoc;
+import org.apache.lucene.search.TopDocs;
+import org.apache.lucene.search.TotalHits;
 import org.apache.lucene.search.grouping.GroupDocs;
 import org.apache.lucene.search.grouping.TopGroups;
 import org.apache.lucene.util.BytesRef;
@@ -44,9 +46,6 @@ public class GroupedEndResultTransformer implements EndResultTransformer {
     this.searcher = searcher;
   }
 
-  /**
-   * {@inheritDoc}
-   */
   @Override
   public void transform(Map<String, ?> result, ResponseBuilder rb, SolrDocumentSource solrDocumentSource) {
     NamedList<Object> commands = new SimpleOrderedMap<>();
@@ -69,17 +68,18 @@ public class GroupedEndResultTransformer implements EndResultTransformer {
           SimpleOrderedMap<Object> groupResult = new SimpleOrderedMap<>();
           if (group.groupValue != null) {
             groupResult.add(
-                "groupValue", groupFieldType.toObject(groupField.createField(group.groupValue.utf8ToString(), 1.0f))
+                "groupValue", groupFieldType.toObject(groupField.createField(group.groupValue.utf8ToString()))
             );
           } else {
             groupResult.add("groupValue", null);
           }
           SolrDocumentList docList = new SolrDocumentList();
-          docList.setNumFound(group.totalHits);
+          assert group.totalHits.relation == TotalHits.Relation.EQUAL_TO;
+          docList.setNumFound(group.totalHits.value);
           if (!Float.isNaN(group.maxScore)) {
             docList.setMaxScore(group.maxScore);
           }
-          docList.setStart(rb.getGroupingSpec().getGroupOffset());
+          docList.setStart(rb.getGroupingSpec().getWithinGroupOffset());
           for (ScoreDoc scoreDoc : group.scoreDocs) {
             docList.add(solrDocumentSource.retrieve(scoreDoc));
           }
@@ -93,11 +93,13 @@ public class GroupedEndResultTransformer implements EndResultTransformer {
         NamedList<Object> command = new SimpleOrderedMap<>();
         command.add("matches", queryCommandResult.getMatches());
         SolrDocumentList docList = new SolrDocumentList();
-        docList.setNumFound(queryCommandResult.getTopDocs().totalHits);
-        if (!Float.isNaN(queryCommandResult.getTopDocs().getMaxScore())) {
-          docList.setMaxScore(queryCommandResult.getTopDocs().getMaxScore());
+        TopDocs topDocs = queryCommandResult.getTopDocs();
+        assert topDocs.totalHits.relation == TotalHits.Relation.EQUAL_TO;
+        docList.setNumFound(topDocs.totalHits.value);
+        if (!Float.isNaN(queryCommandResult.getMaxScore())) {
+          docList.setMaxScore(queryCommandResult.getMaxScore());
         }
-        docList.setStart(rb.getGroupingSpec().getGroupOffset());
+        docList.setStart(rb.getGroupingSpec().getWithinGroupOffset());
         for (ScoreDoc scoreDoc :queryCommandResult.getTopDocs().scoreDocs){
           docList.add(solrDocumentSource.retrieve(scoreDoc));
         }

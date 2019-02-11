@@ -45,6 +45,32 @@ import org.apache.lucene.util.NumericUtils;
  */
 public final class FloatPoint extends Field {
 
+  /**
+   * Return the least float that compares greater than {@code f} consistently
+   * with {@link Float#compare}. The only difference with
+   * {@link Math#nextUp(float)} is that this method returns {@code +0f} when
+   * the argument is {@code -0f}.
+   */
+  public static float nextUp(float f) {
+    if (Float.floatToIntBits(f) == 0x8000_0000) { // -0f
+      return +0f;
+    }
+    return Math.nextUp(f);
+  }
+
+  /**
+   * Return the greatest float that compares less than {@code f} consistently
+   * with {@link Float#compare}. The only difference with
+   * {@link Math#nextDown(float)} is that this method returns {@code -0f} when
+   * the argument is {@code +0f}.
+   */
+  public static float nextDown(float f) {
+    if (Float.floatToIntBits(f) == 0) { // +0f
+      return -0f;
+    }
+    return Math.nextDown(f);
+  }
+
   private static FieldType getType(int numDims) {
     FieldType type = new FieldType();
     type.setDimensions(numDims, Float.BYTES);
@@ -59,8 +85,8 @@ public final class FloatPoint extends Field {
 
   /** Change the values of this field */
   public void setFloatValues(float... point) {
-    if (type.pointDimensionCount() != point.length) {
-      throw new IllegalArgumentException("this field (name=" + name + ") uses " + type.pointDimensionCount() + " dimensions; cannot change to (incoming) " + point.length + " dimensions");
+    if (type.pointDataDimensionCount() != point.length) {
+      throw new IllegalArgumentException("this field (name=" + name + ") uses " + type.pointDataDimensionCount() + " dimensions; cannot change to (incoming) " + point.length + " dimensions");
     }
     fieldsData = pack(point);
   }
@@ -72,8 +98,8 @@ public final class FloatPoint extends Field {
 
   @Override
   public Number numericValue() {
-    if (type.pointDimensionCount() != 1) {
-      throw new IllegalStateException("this field (name=" + name + ") uses " + type.pointDimensionCount() + " dimensions; cannot convert to a single numeric value");
+    if (type.pointDataDimensionCount() != 1) {
+      throw new IllegalStateException("this field (name=" + name + ") uses " + type.pointDataDimensionCount() + " dimensions; cannot convert to a single numeric value");
     }
     BytesRef bytes = (BytesRef) fieldsData;
     assert bytes.length == Float.BYTES;
@@ -116,7 +142,7 @@ public final class FloatPoint extends Field {
     result.append(':');
 
     BytesRef bytes = (BytesRef) fieldsData;
-    for (int dim = 0; dim < type.pointDimensionCount(); dim++) {
+    for (int dim = 0; dim < type.pointDataDimensionCount(); dim++) {
       if (dim > 0) {
         result.append(',');
       }
@@ -164,8 +190,8 @@ public final class FloatPoint extends Field {
    * <p>
    * You can have half-open ranges (which are in fact &lt;/&le; or &gt;/&ge; queries)
    * by setting {@code lowerValue = Float.NEGATIVE_INFINITY} or {@code upperValue = Float.POSITIVE_INFINITY}.
-   * <p> Ranges are inclusive. For exclusive ranges, pass {@code Math#nextUp(lowerValue)}
-   * or {@code Math.nextDown(upperValue)}.
+   * <p> Ranges are inclusive. For exclusive ranges, pass {@link #nextUp(float) nextUp(lowerValue)}
+   * or {@link #nextUp(float) nextDown(upperValue)}.
    * <p>
    * Range comparisons are consistent with {@link Float#compareTo(Float)}.
    *

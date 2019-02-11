@@ -129,7 +129,7 @@ public class TokenSourcesTest extends BaseTokenStreamTestCase {
         // new SpanTermQuery(new Term(FIELD, "fox")) }, 0, true);
 
       TopDocs hits = indexSearcher.search(query, 1);
-      assertEquals(1, hits.totalHits);
+      assertEquals(1, hits.totalHits.value);
       final Highlighter highlighter = new Highlighter(
           new SimpleHTMLFormatter(), new SimpleHTMLEncoder(),
           new QueryScorer(query));
@@ -174,7 +174,7 @@ public class TokenSourcesTest extends BaseTokenStreamTestCase {
       // new SpanTermQuery(new Term(FIELD, "fox")) }, 0, true);
 
       TopDocs hits = indexSearcher.search(query, 1);
-      assertEquals(1, hits.totalHits);
+      assertEquals(1, hits.totalHits.value);
       final Highlighter highlighter = new Highlighter(
           new SimpleHTMLFormatter(), new SimpleHTMLEncoder(),
           new QueryScorer(query));
@@ -217,7 +217,7 @@ public class TokenSourcesTest extends BaseTokenStreamTestCase {
           new SpanTermQuery(new Term(FIELD, "fox"))}, 0, true);
 
       TopDocs hits = indexSearcher.search(phraseQuery, 1);
-      assertEquals(1, hits.totalHits);
+      assertEquals(1, hits.totalHits.value);
       final Highlighter highlighter = new Highlighter(
           new SimpleHTMLFormatter(), new SimpleHTMLEncoder(),
           new QueryScorer(phraseQuery));
@@ -260,7 +260,7 @@ public class TokenSourcesTest extends BaseTokenStreamTestCase {
           new SpanTermQuery(new Term(FIELD, "fox"))}, 0, true);
 
       TopDocs hits = indexSearcher.search(phraseQuery, 1);
-      assertEquals(1, hits.totalHits);
+      assertEquals(1, hits.totalHits.value);
       final Highlighter highlighter = new Highlighter(
           new SimpleHTMLFormatter(), new SimpleHTMLEncoder(),
           new QueryScorer(phraseQuery));
@@ -377,7 +377,7 @@ public class TokenSourcesTest extends BaseTokenStreamTestCase {
     }
 
     final BaseTermVectorsFormatTestCase.RandomTokenStream rTokenStream =
-        new BaseTermVectorsFormatTestCase.RandomTokenStream(TestUtil.nextInt(random(), 1, 10), terms, termBytes, false);
+        new BaseTermVectorsFormatTestCase.RandomTokenStream(TestUtil.nextInt(random(), 1, 10), terms, termBytes);
     //check to see if the token streams might have non-deterministic testable result
     final boolean storeTermVectorPositions = random().nextBoolean();
     final int[] startOffsets = rTokenStream.getStartOffsets();

@@ -217,7 +217,6 @@ class SubQueryAugmenter extends DocTransformer {
       
       if (vals != null) {
         StringBuilder rez = new StringBuilder();
-        int i = 0;
         for (Iterator iterator = vals.iterator(); iterator.hasNext();) {
           Object object = (Object) iterator.next();
           rez.append(convertFieldValue(object));
@@ -322,7 +321,7 @@ class SubQueryAugmenter extends DocTransformer {
   public boolean needsSolrIndexSearcher() { return false; }
 
   @Override
-  public void transform(SolrDocument doc, int docid, float score) {
+  public void transform(SolrDocument doc, int docid) {
 
     final SolrParams docWithDeprefixed = SolrParams.wrapDefaults(
         new DocRowParams(doc, prefix, separator), baseSubParams);

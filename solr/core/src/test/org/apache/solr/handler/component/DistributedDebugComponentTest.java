@@ -63,8 +63,9 @@ public class DistributedDebugComponentTest extends SolrJettyTestBase {
   
   @BeforeClass
   public static void createThings() throws Exception {
+    systemSetPropertySolrDisableShardsWhitelist("true");
     solrHome = createSolrHome();
-    createJetty(solrHome.getAbsolutePath());
+    createAndStartJetty(solrHome.getAbsolutePath());
     String url = jetty.getBaseUrl().toString();
 
     collection1 = getHttpSolrClient(url + "/collection1");
@@ -105,6 +106,7 @@ public class DistributedDebugComponentTest extends SolrJettyTestBase {
     jetty.stop();
     jetty=null;
     resetExceptionIgnores();
+    systemClearPropertySolrDisableShardsWhitelist();
   }
   
   @Test
@@ -156,19 +158,20 @@ public class DistributedDebugComponentTest extends SolrJettyTestBase {
   }
   
   @Test
+  @SuppressWarnings("resource") // Cannot close client in this loop!
   public void testRandom() throws Exception {
     final int NUM_ITERS = atLeast(50);
 
-    for (int i = 0; i < NUM_ITERS; i++) { 
-      SolrClient client = random().nextBoolean() ? collection1 : collection2;
-      
+    for (int i = 0; i < NUM_ITERS; i++) {
+      final SolrClient client = random().nextBoolean() ? collection1 : collection2;
+
       SolrQuery q = new SolrQuery();
       q.set("distrib", "true");
       q.setFields("id", "text");
-      
+
       boolean shard1Results = random().nextBoolean();
       boolean shard2Results = random().nextBoolean();
-      
+
       String qs = "_query_with_no_results_";
       if (shard1Results) {
         qs += " OR batman";
@@ -181,10 +184,8 @@ public class DistributedDebugComponentTest extends SolrJettyTestBase {
       Set<String> shards = new HashSet<String>(Arrays.asList(shard1, shard2));
       if (random().nextBoolean()) {
         shards.remove(shard1);
-        shard1Results = false;
       } else if (random().nextBoolean()) {
         shards.remove(shard2);
-        shard2Results = false;
       }
       q.set("shards", StringUtils.join(shards, ","));
 
@@ -343,7 +344,9 @@ public class DistributedDebugComponentTest extends SolrJettyTestBase {
     response = client.query(query);
     assertNull(response.getDebugMap());
   }
-  
+
+  @Test
+  // commented out on: 24-Dec-2018   @BadApple(bugUrl="https://issues.apache.org/jira/browse/SOLR-12028") // added 20-Sep-2018
   public void testCompareWithNonDistributedRequest() throws SolrServerException, IOException {
     SolrQuery query = new SolrQuery();
     query.setQuery("id:1 OR id:2");

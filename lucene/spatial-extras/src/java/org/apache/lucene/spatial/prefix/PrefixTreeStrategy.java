@@ -21,19 +21,19 @@ import java.util.Iterator;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
-import org.locationtech.spatial4j.shape.Point;
-import org.locationtech.spatial4j.shape.Shape;
 import org.apache.lucene.document.Field;
 import org.apache.lucene.document.FieldType;
 import org.apache.lucene.index.IndexOptions;
 import org.apache.lucene.index.IndexReaderContext;
-import org.apache.lucene.queries.function.ValueSource;
+import org.apache.lucene.search.DoubleValuesSource;
 import org.apache.lucene.spatial.SpatialStrategy;
 import org.apache.lucene.spatial.prefix.tree.Cell;
 import org.apache.lucene.spatial.prefix.tree.SpatialPrefixTree;
 import org.apache.lucene.spatial.query.SpatialArgs;
 import org.apache.lucene.spatial.util.ShapeFieldCacheDistanceValueSource;
 import org.apache.lucene.util.Bits;
+import org.locationtech.spatial4j.shape.Point;
+import org.locationtech.spatial4j.shape.Shape;
 
 /**
  * An abstract SpatialStrategy based on {@link SpatialPrefixTree}. The two
@@ -157,13 +157,30 @@ public abstract class PrefixTreeStrategy extends SpatialStrategy {
     return new Field[]{field};
   }
 
+  public class ShapeTokenStream extends BytesRefIteratorTokenStream {
+
+    public void setShape(Shape shape) {
+      double distErr = SpatialArgs.calcDistanceFromErrPct(shape, distErrPct, ctx);
+      int detailLevel = grid.getLevelForDistance(distErr);
+      Iterator<Cell> cells = createCellIteratorToIndex(shape, detailLevel, null);
+      CellToBytesRefIterator cellToBytesRefIterator = newCellToBytesRefIterator();
+      cellToBytesRefIterator.reset(cells);
+      setBytesRefIterator(cellToBytesRefIterator);
+    }
+
+  }
+
+  public ShapeTokenStream tokenStream() {
+    return new ShapeTokenStream();
+  }
+
   protected CellToBytesRefIterator newCellToBytesRefIterator() {
     //subclasses could return one that never emits leaves, or does both, or who knows.
     return new CellToBytesRefIterator();
   }
 
   protected Iterator<Cell> createCellIteratorToIndex(Shape shape, int detailLevel, Iterator<Cell> reuse) {
-    if (pointsOnly && !(shape instanceof Point)) {
+    if (pointsOnly && !isPointShape(shape)) {
       throw new IllegalArgumentException("pointsOnly is true yet a " + shape.getClass() + " is given for indexing");
     }
     return grid.getTreeCellIterator(shape, detailLevel);//TODO should take a re-use iterator
@@ -180,7 +197,7 @@ public abstract class PrefixTreeStrategy extends SpatialStrategy {
   }
 
   @Override
-  public ValueSource makeDistanceValueSource(Point queryPoint, double multiplier) {
+  public DoubleValuesSource makeDistanceValueSource(Point queryPoint, double multiplier) {
     PointPrefixTreeFieldCacheProvider p = provider.get( getFieldName() );
     if( p == null ) {
       synchronized (this) {//double checked locking idiom is okay since provider is threadsafe
@@ -204,5 +221,14 @@ public abstract class PrefixTreeStrategy extends SpatialStrategy {
   public HeatmapFacetCounter.Heatmap calcFacets(IndexReaderContext context, Bits topAcceptDocs,
                                    Shape inputShape, final int facetLevel, int maxCells) throws IOException {
     return HeatmapFacetCounter.calcFacets(this, context, topAcceptDocs, inputShape, facetLevel, maxCells);
+  }
+
+  /**
+   * Returns true if the {@code shape} is a {@link Point}.  For custom spatial contexts, it may make sense to
+   * have certain other shapes return true.
+   * @lucene.experimental
+   */
+  protected boolean isPointShape(Shape shape) {
+    return shape instanceof Point;
   }
 }

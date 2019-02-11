@@ -18,6 +18,7 @@ package org.apache.solr.handler.admin;
 
 import java.io.File;
 import java.lang.invoke.MethodHandles;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.Iterator;
@@ -28,6 +29,7 @@ import java.util.concurrent.ExecutorService;
 
 import com.google.common.collect.ImmutableMap;
 import org.apache.commons.lang.StringUtils;
+import org.apache.solr.api.Api;
 import org.apache.solr.cloud.CloudDescriptor;
 import org.apache.solr.cloud.ZkController;
 import org.apache.solr.common.SolrException;
@@ -42,11 +44,14 @@ import org.apache.solr.common.util.NamedList;
 import org.apache.solr.core.CoreContainer;
 import org.apache.solr.core.CoreDescriptor;
 import org.apache.solr.handler.RequestHandlerBase;
+import org.apache.solr.logging.MDCLoggingContext;
+import org.apache.solr.metrics.SolrMetricManager;
 import org.apache.solr.request.SolrQueryRequest;
 import org.apache.solr.response.SolrQueryResponse;
 import org.apache.solr.security.AuthorizationContext;
 import org.apache.solr.security.PermissionNameProvider;
 import org.apache.solr.util.DefaultSolrThreadFactory;
+import org.apache.solr.util.stats.MetricUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.slf4j.MDC;
@@ -64,8 +69,9 @@ public class CoreAdminHandler extends RequestHandlerBase implements PermissionNa
   private static final Logger log = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
   protected final CoreContainer coreContainer;
   protected final Map<String, Map<String, TaskObject>> requestStatusMap;
+  private final CoreAdminHandlerApi coreAdminHandlerApi;
 
-  protected final ExecutorService parallelExecutor = ExecutorUtil.newMDCAwareFixedThreadPool(50,
+  protected ExecutorService parallelExecutor = ExecutorUtil.newMDCAwareFixedThreadPool(50,
       new DefaultSolrThreadFactory("parallelCoreAdminExecutor"));
 
   protected static int MAX_TRACKED_REQUESTS = 100;
@@ -86,6 +92,7 @@ public class CoreAdminHandler extends RequestHandlerBase implements PermissionNa
     map.put(COMPLETED, Collections.synchronizedMap(new LinkedHashMap<String, TaskObject>()));
     map.put(FAILED, Collections.synchronizedMap(new LinkedHashMap<String, TaskObject>()));
     requestStatusMap = Collections.unmodifiableMap(map);
+    coreAdminHandlerApi = new CoreAdminHandlerApi(this);
   }
 
 
@@ -101,6 +108,7 @@ public class CoreAdminHandler extends RequestHandlerBase implements PermissionNa
     map.put(COMPLETED, Collections.synchronizedMap(new LinkedHashMap<String, TaskObject>()));
     map.put(FAILED, Collections.synchronizedMap(new LinkedHashMap<String, TaskObject>()));
     requestStatusMap = Collections.unmodifiableMap(map);
+    coreAdminHandlerApi = new CoreAdminHandlerApi(this);
   }
 
 
@@ -109,6 +117,17 @@ public class CoreAdminHandler extends RequestHandlerBase implements PermissionNa
     throw new SolrException(SolrException.ErrorCode.SERVER_ERROR,
             "CoreAdminHandler should not be configured in solrconf.xml\n" +
                     "it is a special Handler configured directly by the RequestDispatcher");
+  }
+
+  @Override
+  public void initializeMetrics(SolrMetricManager manager, String registryName, String tag, String scope) {
+    super.initializeMetrics(manager, registryName, tag, scope);
+    parallelExecutor = MetricUtils.instrumentedExecutorService(parallelExecutor, this, manager.registry(registryName),
+        SolrMetricManager.mkName("parallelCoreAdminExecutor", getCategory().name(),scope, "threadPool"));
+  }
+  @Override
+  public Boolean registerV2() {
+    return Boolean.TRUE;
   }
 
   /**
@@ -152,6 +171,11 @@ public class CoreAdminHandler extends RequestHandlerBase implements PermissionNa
       }
 
       final CallInfo callInfo = new CallInfo(this, req, rsp, op);
+      String coreName = req.getParams().get(CoreAdminParams.CORE);
+      if (coreName == null) {
+        coreName = req.getParams().get(CoreAdminParams.NAME);
+      }
+      MDCLoggingContext.setCoreName(coreName);
       if (taskId == null) {
         callInfo.call();
       } else {
@@ -209,6 +233,7 @@ public class CoreAdminHandler extends RequestHandlerBase implements PermissionNa
       .put(CoreAdminParams.ROLES, CoreDescriptor.CORE_ROLES)
       .put(CoreAdminParams.CORE_NODE_NAME, CoreDescriptor.CORE_NODE_NAME)
       .put(ZkStateReader.NUM_SHARDS_PROP, CloudDescriptor.NUM_SHARDS)
+      .put(CoreAdminParams.REPLICA_TYPE, CloudDescriptor.REPLICA_TYPE)
       .build();
 
   protected static Map<String, String> buildCoreParams(SolrParams params) {
@@ -263,6 +288,11 @@ public class CoreAdminHandler extends RequestHandlerBase implements PermissionNa
   @Override
   public String getDescription() {
     return "Manage Multiple Solr Cores";
+  }
+
+  @Override
+  public Category getCategory() {
+    return Category.ADMIN;
   }
 
   @Override
@@ -341,7 +371,7 @@ public class CoreAdminHandler extends RequestHandlerBase implements PermissionNa
    * Method to ensure shutting down of the ThreadPool Executor.
    */
   public void shutdown() {
-    if (parallelExecutor != null && !parallelExecutor.isShutdown())
+    if (parallelExecutor != null)
       ExecutorUtil.shutdownAndAwaitTermination(parallelExecutor);
   }
 
@@ -367,6 +397,11 @@ public class CoreAdminHandler extends RequestHandlerBase implements PermissionNa
 
   }
 
+  @Override
+  public Collection<Api> getApis() {
+    return coreAdminHandlerApi.getApis();
+  }
+
   static {
     for (CoreAdminOperation op : CoreAdminOperation.values())
       opMap.put(op.action.toString().toLowerCase(Locale.ROOT), op);
@@ -377,7 +412,16 @@ public class CoreAdminHandler extends RequestHandlerBase implements PermissionNa
   public interface Invocable {
     Map<String, Object> invoke(SolrQueryRequest req);
   }
+  
   interface CoreAdminOp {
+   /**
+    * @param it request/response object
+    *
+    * If the request is invalid throw a SolrException with SolrException.ErrorCode.BAD_REQUEST ( 400 )
+    * If the execution of the command fails throw a SolrException with SolrException.ErrorCode.SERVER_ERROR ( 500 )
+    * 
+    * Any non-SolrException's are wrapped at a higher level as a SolrException with SolrException.ErrorCode.SERVER_ERROR.
+    */
     void execute(CallInfo it) throws Exception;
   }
 }

@@ -18,7 +18,7 @@ package org.apache.solr.core;
 
 import java.util.List;
 
-import org.apache.solr.util.AbstractSolrTestCase;
+import org.apache.solr.SolrTestCaseJ4;
 import org.apache.solr.util.DOMUtilTestBase;
 import org.junit.Test;
 import org.w3c.dom.Node;
@@ -63,15 +63,16 @@ public class PluginInfoTest extends DOMUtilTestBase {
   @Test
   public void testNameRequired() throws Exception {
     Node nodeWithNoName = getNode("<plugin></plugin>", "plugin");
-    AbstractSolrTestCase.ignoreException("missing mandatory attribute");
     try {
-      PluginInfo pi = new PluginInfo(nodeWithNoName, "Node with No name", true, false);
-      fail("Exception should have been thrown");
-    } catch (RuntimeException e) {
-      assertTrue(e.getMessage().contains("missing mandatory attribute"));
+      SolrTestCaseJ4.ignoreException("missing mandatory attribute");
+      RuntimeException thrown = expectThrows(RuntimeException.class, () -> {
+        PluginInfo pi = new PluginInfo(nodeWithNoName, "Node with No name", true, false);
+      });
+      assertTrue(thrown.getMessage().contains("missing mandatory attribute"));
     } finally {
-      AbstractSolrTestCase.resetExceptionIgnores();
+      SolrTestCaseJ4.resetExceptionIgnores();
     }
+
     Node nodeWithAName = getNode("<plugin name=\"myName\" />", "plugin");
     PluginInfo pi2 = new PluginInfo(nodeWithAName, "Node with a Name", true, false);
     assertTrue(pi2.name.equals("myName"));
@@ -80,16 +81,16 @@ public class PluginInfoTest extends DOMUtilTestBase {
   @Test
   public void testClassRequired() throws Exception {
     Node nodeWithNoClass = getNode("<plugin></plugin>", "plugin");
-    AbstractSolrTestCase.ignoreException("missing mandatory attribute");
     try {
-      @SuppressWarnings("unused")
-      PluginInfo pi = new PluginInfo(nodeWithNoClass, "Node with No Class", false, true);
-      fail("Exception should have been thrown");
-    } catch (RuntimeException e) {
-      assertTrue(e.getMessage().contains("missing mandatory attribute"));
+      SolrTestCaseJ4.ignoreException("missing mandatory attribute");
+      RuntimeException thrown = expectThrows(RuntimeException.class, () -> {
+        PluginInfo pi = new PluginInfo(nodeWithNoClass, "Node with No Class", false, true);
+      });
+      assertTrue(thrown.getMessage().contains("missing mandatory attribute"));
     } finally {
-      AbstractSolrTestCase.resetExceptionIgnores();
+      SolrTestCaseJ4.resetExceptionIgnores();
     }
+
     Node nodeWithAClass = getNode("<plugin class=\"myName\" />", "plugin");
     PluginInfo pi2 = new PluginInfo(nodeWithAClass, "Node with a Class", false, true);
     assertTrue(pi2.className.equals("myName"));

@@ -17,8 +17,6 @@
 package org.apache.lucene.util;
 
 
-import java.util.Arrays;
-
 /**
  * A builder for {@link BytesRef} instances.
  * @lucene.internal
@@ -143,7 +141,7 @@ public class BytesRefBuilder {
    * represent the provided text.
    */
   public void copyChars(CharSequence text, int off, int len) {
-    grow(len * UnicodeUtil.MAX_UTF8_BYTES_PER_CHAR);
+    grow(UnicodeUtil.maxUTF8Length(len));
     ref.length = UnicodeUtil.UTF16toUTF8(text, off, len, ref.bytes);
   }
 
@@ -152,7 +150,7 @@ public class BytesRefBuilder {
    * represent the provided text.
    */
   public void copyChars(char[] text, int off, int len) {
-    grow(len * UnicodeUtil.MAX_UTF8_BYTES_PER_CHAR);
+    grow(UnicodeUtil.maxUTF8Length(len));
     ref.length = UnicodeUtil.UTF16toUTF8(text, off, len, ref.bytes);
   }
 
@@ -170,7 +168,7 @@ public class BytesRefBuilder {
    * Build a new {@link BytesRef} that has the same content as this buffer.
    */
   public BytesRef toBytesRef() {
-    return new BytesRef(Arrays.copyOf(ref.bytes, ref.length));
+    return new BytesRef(ArrayUtil.copyOfSubArray(ref.bytes, 0, ref.length));
   }
 
   @Override

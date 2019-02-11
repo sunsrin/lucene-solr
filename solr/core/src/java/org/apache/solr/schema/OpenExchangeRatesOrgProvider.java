@@ -35,7 +35,7 @@ import org.slf4j.LoggerFactory;
 
 /**
  * <p>
- * Exchange Rates Provider for {@link CurrencyField} capable of fetching &amp; 
+ * Exchange Rates Provider for {@link CurrencyField} and {@link CurrencyFieldType} capable of fetching &amp; 
  * parsing the freely available exchange rates from openexchangerates.org
  * </p>
  * <p>
@@ -136,10 +136,11 @@ public class OpenExchangeRatesOrgProvider implements ExchangeRateProvider {
   }
 
   @Override
+  @SuppressWarnings("resource")
   public boolean reload() throws SolrException {
     InputStream ratesJsonStream = null;
     try {
-      log.info("Reloading exchange rates from "+ratesFileLocation);
+      log.debug("Reloading exchange rates from "+ratesFileLocation);
       try {
         ratesJsonStream = (new URL(ratesFileLocation)).openStream();
       } catch (Exception e) {
@@ -151,10 +152,12 @@ public class OpenExchangeRatesOrgProvider implements ExchangeRateProvider {
     } catch (Exception e) {
       throw new SolrException(ErrorCode.SERVER_ERROR, "Error reloading exchange rates", e);
     } finally {
-      if (ratesJsonStream != null) try {
-        ratesJsonStream.close();
-      } catch (IOException e) {
-        throw new SolrException(ErrorCode.SERVER_ERROR, "Error closing stream", e);
+      if (ratesJsonStream != null) {
+        try {
+          ratesJsonStream.close();
+        } catch (IOException e) {
+          throw new SolrException(ErrorCode.SERVER_ERROR, "Error closing stream", e);
+        }
       }
     }
   }
@@ -172,7 +175,7 @@ public class OpenExchangeRatesOrgProvider implements ExchangeRateProvider {
         refreshInterval = 60;
         log.warn("Specified refreshInterval was too small. Setting to 60 minutes which is the update rate of openexchangerates.org");
       }
-      log.info("Initialized with rates="+ratesFileLocation+", refreshInterval="+refreshInterval+".");
+      log.debug("Initialized with rates="+ratesFileLocation+", refreshInterval="+refreshInterval+".");
       refreshIntervalSeconds = refreshInterval * 60;
     } catch (SolrException e1) {
       throw e1;

@@ -56,6 +56,10 @@
   <target name="test" depends="-clover.load, -init-totals, test-core, test-test-framework, test-modules, -check-totals"
           description="Runs all unit tests (core, modules and back-compat)"
   />
+  <target name="test-nocompile">
+    <fail message="Target 'test-nocompile' will not run recursively.  First change directory to the module you want to test."/>
+  </target>
+
 
   <target name="pitest" depends="pitest-modules"
           description="Runs pitests (core, modules and back-compat)"
@@ -163,7 +167,6 @@
     <check-missing-javadocs dir="build/docs/analyzers-phonetic" level="method"/>
     <!-- analyzers-smartcn: problems -->
     <check-missing-javadocs dir="build/docs/analyzers-stempel" level="method"/>
-    <!-- analyzers-uima: problems -->
     <!-- benchmark: problems -->
     <check-missing-javadocs dir="build/docs/classification" level="method"/>
     <!-- codecs: problems -->
@@ -204,7 +207,7 @@
     <modules-crawl target="-ecj-javadoc-lint"/>
   </target>
 
-  <target name="process-webpages" depends="resolve-pegdown">
+  <target name="process-webpages" depends="resolve-markdown">
     <makeurl property="process-webpages.buildfiles" separator="|">
       <fileset dir="." includes="**/build.xml" excludes="build.xml,analysis/*,build/**,tools/**,site/**"/>
     </makeurl>
@@ -213,6 +216,8 @@
       <filterchain>
         <!--  private static Codec defaultCodec   =   LOADER    .   lookup    (   "LuceneXXX"                 )   ; -->
         <containsregex pattern="^.*defaultCodec\s*=\s*LOADER\s*\.\s*lookup\s*\(\s*&quot;([^&quot;]+)&quot;\s*\)\s*;.*$" replace="\1"/>
+        <fixcrlf eol="unix" eof="remove" />
+        <deletecharacters chars="\n"/>
       </filterchain>
     </loadfile>
 
@@ -231,10 +236,10 @@
       <param name="defaultCodec" expression="${defaultCodec}"/>
     </xslt>
     
-    <pegdown todir="${javadoc.dir}">
+    <markdown todir="${javadoc.dir}">
       <fileset dir="." includes="MIGRATE.txt,JRE_VERSION_MIGRATION.txt,SYSTEM_REQUIREMENTS.txt"/>
       <globmapper from="*.txt" to="*.html"/>
-    </pegdown>
+    </markdown>
 
     <copy todir="${javadoc.dir}">
       <fileset dir="site/html"/>
@@ -347,20 +352,19 @@
 
     <!-- Exclude javadoc package-list files under licenses incompatible with the ASL -->
     <delete dir="${src.export.dir}/tools/javadoc/java8"/>
-    <!-- Exclude clover license files incompatible with the ASL -->
-    <delete dir="${src.export.dir}/tools/clover"/>
 
     <!-- because we only package the "lucene/" folder, we have to adjust dir to work on: -->
     <property name="local.src.export.dir" location="${src.export.dir}/lucene"/>
     
     <build-changes changes.src.file="${local.src.export.dir}/CHANGES.txt"
                    changes.target.dir="${local.src.export.dir}/docs/changes"
-                   changes.product="LUCENE"/>
+                   changes.product="lucene"/>
     <tar tarfile="${source.package.file}" compression="gzip" longfile="gnu">
       <tarfileset prefix="lucene-${version}" dir="${local.src.export.dir}"/>
     </tar>
     <make-checksums file="${source.package.file}"/>
   </target>
+
 
   <!-- ================================================================== -->
   <!-- Packages the sources from local working copy with tar-gzip     -->
@@ -383,7 +387,7 @@
   <!-- ================================================================== -->
   <target name="dist-src" depends="package-tgz-src"/>
 
-  <target name="dist-all" depends="dist, dist-src, -dist-changes, -dist-keys"/>
+  <target name="dist-all" depends="dist, dist-src, -dist-changes"/>
 
   <!-- copy changes/ to the release folder -->
   <target name="-dist-changes">
@@ -392,21 +396,8 @@
    </copy>
   </target>
 
-  <!-- copy KEYS to the release folder -->
-  <target name="-dist-keys">
-   <get src="http://home.apache.org/keys/group/lucene.asc" 
-        dest="${dist.dir}/KEYS"/>
-  </target>
-
-  <target name="copy-to-stage">
-    <copy-to-stage-macro artifacts.dir="${dist.dir}"/>
-  </target>
-
   <target name="prepare-release-no-sign" depends="clean, dist-all, generate-maven-artifacts"/>
   <target name="prepare-release" depends="prepare-release-no-sign, sign-artifacts"/>
-  <target name="stage" depends="prepare-release, copy-to-stage">
-
-  </target>
 
   <target name="-dist-maven" depends="install-maven-tasks">
     <sequential>
@@ -418,6 +409,19 @@
         <fileset dir="${common.dir}/test-framework" includes="build.xml"/>
       </subant>
       <modules-crawl target="-dist-maven"/>
+    </sequential>
+  </target>
+
+  <target name="-install-to-maven-local-repo" depends="install-maven-tasks">
+    <sequential>
+      <m2-install pom.xml="${filtered.pom.templates.dir}/pom.xml"/>        <!-- Lucene/Solr grandparent POM -->
+      <m2-install pom.xml="${filtered.pom.templates.dir}/lucene/pom.xml"/> <!-- Lucene parent POM -->
+      <subant target="-install-to-maven-local-repo" failonerror="true" inheritall="false">
+        <propertyset refid="uptodate.and.compiled.properties"/>
+        <fileset dir="${common.dir}/core" includes="build.xml"/>
+        <fileset dir="${common.dir}/test-framework" includes="build.xml"/>
+      </subant>
+      <modules-crawl target="-install-to-maven-local-repo"/>
     </sequential>
   </target>
 
@@ -476,7 +480,7 @@
   </target>
 
   <target name="changes-to-html">
-    <build-changes changes.product="LUCENE"/>
+    <build-changes changes.product="lucene"/>
   </target>
 
   <target name="pitest-modules" depends="compile-test">
@@ -537,7 +541,7 @@
   </target>
 
   <!-- Override common-build.xml definition to check for the jar already being up-to-date -->
-  <target name="jar-core" depends="check-lucene-core-uptodate,compile-lucene-core" unless="lucene-core.uptodate">
+  <target name="jar-core" depends="resolve-groovy,check-lucene-core-uptodate,compile-lucene-core" unless="lucene-core.uptodate">
     <ant dir="${common.dir}/core" target="jar-core" inheritAll="false">
       <propertyset refid="uptodate.and.compiled.properties"/>
     </ant>
@@ -559,7 +563,7 @@
   <target name="get-jenkins-line-docs" unless="enwiki.exists">
     <sequential>
       <!-- TODO: can get .lzma instead (it's ~17% smaller) but there's no builtin ant support...? -->
-      <get src="http://people.apache.org/~mikemccand/enwiki.random.lines.txt.bz2"
+      <get src="http://home.apache.org/~mikemccand/enwiki.random.lines.txt.bz2"
            dest="enwiki.random.lines.txt.bz2"/>
       <bunzip2 src="enwiki.random.lines.txt.bz2" dest="enwiki.random.lines.txt"/>
     </sequential>

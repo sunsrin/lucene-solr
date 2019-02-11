@@ -78,6 +78,22 @@ abstract class RangeFacetCounts extends Facets {
 
   @Override
   public List<FacetResult> getAllDims(int topN) throws IOException {
-    return Collections.singletonList(getTopChildren(topN, null));
+    return Collections.singletonList(getTopChildren(topN, field));
+  }
+
+  @Override
+  public String toString() {
+    StringBuilder b = new StringBuilder();
+    b.append("RangeFacetCounts totCount=");
+    b.append(totCount);
+    b.append(":\n");
+    for(int i=0;i<ranges.length;i++) {
+      b.append("  ");
+      b.append(ranges[i].label);
+      b.append(" -> count=");
+      b.append(counts[i]);
+      b.append('\n');
+    }
+    return b.toString();
   }
 }

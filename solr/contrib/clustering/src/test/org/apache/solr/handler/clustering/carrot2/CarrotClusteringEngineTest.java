@@ -17,6 +17,9 @@
 package org.apache.solr.handler.clustering.carrot2;
 
 import java.io.IOException;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -37,16 +40,10 @@ import org.apache.solr.handler.clustering.ClusteringEngine;
 import org.apache.solr.handler.clustering.SearchClusteringEngine;
 import org.apache.solr.request.LocalSolrQueryRequest;
 import org.apache.solr.search.DocList;
-import org.apache.solr.search.SolrIndexSearcher;
-import org.apache.solr.util.RefCounted;
-import org.apache.solr.util.SolrPluginUtils;
 import org.carrot2.clustering.lingo.LingoClusteringAlgorithm;
 import org.carrot2.core.LanguageCode;
 import org.carrot2.util.attribute.AttributeUtils;
 import org.junit.Test;
-
-import com.google.common.collect.ImmutableList;
-import com.google.common.collect.Lists;
 
 /**
  *
@@ -211,7 +208,7 @@ public class CarrotClusteringEngineTest extends AbstractClusteringTestCase {
     // stoplabels.mt, so we're expecting only one cluster with label "online".
     final List<NamedList<Object>> clusters = checkEngine(
         getClusteringEngine(engineName), 1, params);
-    assertEquals(getLabels(clusters.get(0)), ImmutableList.of("online"));
+    assertEquals(getLabels(clusters.get(0)), Collections.singletonList("online"));
   }
 
   @Test
@@ -226,7 +223,7 @@ public class CarrotClusteringEngineTest extends AbstractClusteringTestCase {
     // only one cluster with label "online".
     final List<NamedList<Object>> clusters = checkEngine(
         getClusteringEngine("lexical-resource-check"), 1, params);
-    assertEquals(getLabels(clusters.get(0)), ImmutableList.of("online"));
+    assertEquals(getLabels(clusters.get(0)), Collections.singletonList("online"));
   }
 
   @Test
@@ -243,9 +240,8 @@ public class CarrotClusteringEngineTest extends AbstractClusteringTestCase {
 
     final List<NamedList<Object>> clusters = checkEngine(
         getClusteringEngine("lexical-resource-check"), 2, params);
-    assertEquals(ImmutableList.of("online"), getLabels(clusters.get(0)));
-    assertEquals(ImmutableList.of("solrownstopword"),
-        getLabels(clusters.get(1)));
+    assertEquals(Collections.singletonList("online"), getLabels(clusters.get(0)));
+    assertEquals(Collections.singletonList("solrownstopword"), getLabels(clusters.get(1)));
   }
   
   @Test
@@ -395,8 +391,8 @@ public class CarrotClusteringEngineTest extends AbstractClusteringTestCase {
     ClusteringComponent comp = (ClusteringComponent) h.getCore().getSearchComponent("clustering-name-default");
     Map<String,SearchClusteringEngine> engines = getSearchClusteringEngines(comp);
     assertEquals(
-        Lists.newArrayList("stc", "default", "mock"),
-        Lists.newArrayList(engines.keySet()));
+        Arrays.asList("stc", "default", "mock"),
+        new ArrayList<>(engines.keySet()));
     assertEquals(
         LingoClusteringAlgorithm.class,
         ((CarrotClusteringEngine) engines.get(ClusteringEngine.DEFAULT_ENGINE_NAME)).getClusteringAlgorithmClass());
@@ -407,8 +403,8 @@ public class CarrotClusteringEngineTest extends AbstractClusteringTestCase {
     ClusteringComponent comp = (ClusteringComponent) h.getCore().getSearchComponent("clustering-name-decl-order");
     Map<String,SearchClusteringEngine> engines = getSearchClusteringEngines(comp);
     assertEquals(
-        Lists.newArrayList("unavailable", "lingo", "stc", "mock", "default"),
-        Lists.newArrayList(engines.keySet()));
+        Arrays.asList("unavailable", "lingo", "stc", "mock", "default"),
+        new ArrayList<>(engines.keySet()));
     assertEquals(
         LingoClusteringAlgorithm.class,
         ((CarrotClusteringEngine) engines.get(ClusteringEngine.DEFAULT_ENGINE_NAME)).getClusteringAlgorithmClass());
@@ -419,8 +415,8 @@ public class CarrotClusteringEngineTest extends AbstractClusteringTestCase {
     ClusteringComponent comp = (ClusteringComponent) h.getCore().getSearchComponent("clustering-name-dups");
     Map<String,SearchClusteringEngine> engines = getSearchClusteringEngines(comp);
     assertEquals(
-        Lists.newArrayList("", "default"),
-        Lists.newArrayList(engines.keySet()));
+        Arrays.asList("", "default"),
+        new ArrayList<>(engines.keySet()));
     assertEquals(
         MockClusteringAlgorithm.class,
         ((CarrotClusteringEngine) engines.get(ClusteringEngine.DEFAULT_ENGINE_NAME)).getClusteringAlgorithmClass());
@@ -451,13 +447,9 @@ public class CarrotClusteringEngineTest extends AbstractClusteringTestCase {
   private List<NamedList<Object>> checkEngine(CarrotClusteringEngine engine, int expectedNumDocs,
                            int expectedNumClusters, Query query, SolrParams clusteringParams) throws IOException {
     // Get all documents to cluster
-    RefCounted<SolrIndexSearcher> ref = h.getCore().getSearcher();
-
-    DocList docList;
-    try {
-      SolrIndexSearcher searcher = ref.get();
-      docList = searcher.getDocList(query, (Query) null, new Sort(), 0,
-              numberOfDocs);
+    return h.getCore().withSearcher(searcher -> {
+      DocList docList = searcher.getDocList(query, (Query) null, new Sort(), 0,
+          numberOfDocs);
       assertEquals("docList size", expectedNumDocs, docList.matches());
 
       ModifiableSolrParams solrParams = new ModifiableSolrParams();
@@ -466,7 +458,7 @@ public class CarrotClusteringEngineTest extends AbstractClusteringTestCase {
       // Perform clustering
       LocalSolrQueryRequest req = new LocalSolrQueryRequest(h.getCore(), solrParams);
       Map<SolrDocument,Integer> docIds = new HashMap<>(docList.size());
-      SolrDocumentList solrDocList = SolrPluginUtils.docListToSolrDocumentList( docList, searcher, engine.getFieldsToLoad(req), docIds );
+      SolrDocumentList solrDocList = ClusteringComponent.docListToSolrDocumentList( docList, searcher, engine.getFieldsToLoad(req), docIds );
 
       @SuppressWarnings("unchecked")
       List<NamedList<Object>> results = (List<NamedList<Object>>) engine.cluster(query, solrDocList, docIds, req);
@@ -474,9 +466,7 @@ public class CarrotClusteringEngineTest extends AbstractClusteringTestCase {
       assertEquals("number of clusters: " + results, expectedNumClusters, results.size());
       checkClusters(results, false);
       return results;
-    } finally {
-      ref.decref();
-    }
+    });
   }
 
   private void checkClusters(List<NamedList<Object>> results, int expectedDocCount,

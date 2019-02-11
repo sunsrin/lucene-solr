@@ -19,32 +19,40 @@ package org.apache.solr.cloud;
 import javax.security.auth.login.AppConfigurationEntry;
 import javax.security.auth.login.Configuration;
 import java.io.File;
+import java.lang.invoke.MethodHandles;
+import java.net.BindException;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Properties;
 
-import com.google.common.base.Preconditions;
+import org.apache.commons.io.FileUtils;
 import org.apache.hadoop.minikdc.MiniKdc;
 import org.apache.solr.client.solrj.impl.Krb5HttpClientBuilder;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 public class KerberosTestServices {
+  private static final Logger log = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
+  
+  private volatile MiniKdc kdc;
+  private volatile JaasConfiguration jaasConfiguration;
+  private volatile Configuration savedConfig;
+  private volatile Locale savedLocale;
 
-  private MiniKdc kdc;
-  private JaasConfiguration jaasConfiguration;
-  private Configuration savedConfig;
-  private Locale savedLocale;
+  private volatile File workDir;
 
-  private KerberosTestServices(MiniKdc kdc,
+  private KerberosTestServices(File workDir,
                                JaasConfiguration jaasConfiguration,
                                Configuration savedConfig,
                                Locale savedLocale) {
-    this.kdc = kdc;
     this.jaasConfiguration = jaasConfiguration;
     this.savedConfig = savedConfig;
     this.savedLocale = savedLocale;
+    this.workDir = workDir;
   }
 
   public MiniKdc getKdc() {
@@ -56,7 +64,28 @@ public class KerberosTestServices {
       Locale.setDefault(Locale.US);
     }
 
-    if (kdc != null) kdc.start();
+    // There is time lag between selecting a port and trying to bind with it. It's possible that
+    // another service captures the port in between which'll result in BindException.
+    boolean bindException;
+    int numTries = 0;
+    do {
+      try {
+        bindException = false;
+
+        kdc = getKdc(workDir);
+        kdc.start();
+      } catch (BindException e) {
+        FileUtils.deleteDirectory(workDir); // clean directory
+        numTries++;
+        if (numTries == 3) {
+          log.error("Failed setting up MiniKDC. Tried " + numTries + " times.");
+          throw e;
+        }
+        log.error("BindException encountered when setting up MiniKdc. Trying again.");
+        bindException = true;
+      }
+    } while (bindException);
+
     Configuration.setConfiguration(jaasConfiguration);
     Krb5HttpClientBuilder.regenerateJaasConfiguration();
   }
@@ -78,6 +107,7 @@ public class KerberosTestServices {
    */
   private static MiniKdc getKdc(File workDir) throws Exception {
     Properties conf = MiniKdc.createConf();
+    conf.setProperty("kdc.port", "0");
     return new MiniKdc(conf, workDir);
   }
 
@@ -193,10 +223,8 @@ public class KerberosTestServices {
 
     public Builder withJaasConfiguration(String clientPrincipal, File clientKeytab,
                                          String serverPrincipal, File serverKeytab) {
-      Preconditions.checkNotNull(clientPrincipal);
-      Preconditions.checkNotNull(clientKeytab);
-      this.clientPrincipal = clientPrincipal;
-      this.clientKeytab = clientKeytab;
+      this.clientPrincipal = Objects.requireNonNull(clientPrincipal);
+      this.clientKeytab = Objects.requireNonNull(clientKeytab);
       this.serverPrincipal = serverPrincipal;
       this.serverKeytab = serverKeytab;
       this.appName = null;
@@ -204,10 +232,8 @@ public class KerberosTestServices {
     }
 
     public Builder withJaasConfiguration(String principal, File keytab, String appName) {
-      Preconditions.checkNotNull(principal);
-      Preconditions.checkNotNull(keytab);
-      this.clientPrincipal = principal;
-      this.clientKeytab = keytab;
+      this.clientPrincipal = Objects.requireNonNull(principal);
+      this.clientKeytab = Objects.requireNonNull(keytab);
       this.serverPrincipal = null;
       this.serverKeytab = null;
       this.appName = appName;
@@ -215,7 +241,6 @@ public class KerberosTestServices {
     }
 
     public KerberosTestServices build() throws Exception {
-      final MiniKdc kdc = kdcWorkDir != null ? getKdc(kdcWorkDir) : null;
       final Configuration oldConfig = clientPrincipal != null ? Configuration.getConfiguration() : null;
       JaasConfiguration jaasConfiguration = null;
       if (clientPrincipal != null) {
@@ -223,7 +248,7 @@ public class KerberosTestServices {
             new JaasConfiguration(clientPrincipal, clientKeytab, serverPrincipal, serverKeytab) :
             new JaasConfiguration(clientPrincipal, clientKeytab, appName);
       }
-      return new KerberosTestServices(kdc, jaasConfiguration, oldConfig, savedLocale);
+      return new KerberosTestServices(kdcWorkDir, jaasConfiguration, oldConfig, savedLocale);
     }
   }
 }

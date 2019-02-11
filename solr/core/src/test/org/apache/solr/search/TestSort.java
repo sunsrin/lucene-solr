@@ -45,8 +45,8 @@ import org.apache.lucene.search.SortField.Type;
 import org.apache.lucene.search.SortField;
 import org.apache.lucene.search.TopDocs;
 import org.apache.lucene.search.TopFieldCollector;
+import org.apache.lucene.store.ByteBuffersDirectory;
 import org.apache.lucene.store.Directory;
-import org.apache.lucene.store.RAMDirectory;
 import org.apache.lucene.util.BitDocIdSet;
 import org.apache.lucene.util.Bits;
 import org.apache.lucene.util.FixedBitSet;
@@ -183,7 +183,7 @@ public class TestSort extends SolrTestCaseJ4 {
 
 
   public void testSort() throws Exception {
-    Directory dir = new RAMDirectory();
+    Directory dir = new ByteBuffersDirectory();
     Field f = new StringField("f", "0", Field.Store.NO);
     Field f2 = new StringField("f2", "0", Field.Store.NO);
 
@@ -271,9 +271,9 @@ public class TestSort extends SolrTestCaseJ4 {
 
         if (r.nextBoolean()) sfields.add( new SortField(null, SortField.Type.SCORE));
         // hit both use-cases of sort-missing-last
-        sfields.add( Sorting.getStringSortField("f", reverse, sortMissingLast, sortMissingFirst) );
+        sfields.add( getStringSortField("f", reverse, sortMissingLast, sortMissingFirst) );
         if (secondary) {
-          sfields.add( Sorting.getStringSortField("f2", reverse2, sortMissingLast2, sortMissingFirst2) );
+          sfields.add( getStringSortField("f2", reverse2, sortMissingLast2, sortMissingFirst2) );
         }
         if (r.nextBoolean()) sfields.add( new SortField(null, SortField.Type.SCORE));
 
@@ -282,10 +282,8 @@ public class TestSort extends SolrTestCaseJ4 {
         final String nullRep = luceneSort || sortMissingFirst && !reverse || sortMissingLast && reverse ? "" : "zzz";
         final String nullRep2 = luceneSort2 || sortMissingFirst2 && !reverse2 || sortMissingLast2 && reverse2 ? "" : "zzz";
 
-        boolean trackScores = r.nextBoolean();
-        boolean trackMaxScores = r.nextBoolean();
         boolean scoreInOrder = r.nextBoolean();
-        final TopFieldCollector topCollector = TopFieldCollector.create(sort, top, true, trackScores, trackMaxScores);
+        final TopFieldCollector topCollector = TopFieldCollector.create(sort, top, Integer.MAX_VALUE);
 
         final List<MyDoc> collectedDocs = new ArrayList<>();
         // delegate and collect docs ourselves
@@ -355,5 +353,20 @@ public class TestSort extends SolrTestCaseJ4 {
     return new BitDocIdSet(obs);
   }  
   
-
+  private static SortField getStringSortField(String fieldName, boolean reverse, boolean nullLast, boolean nullFirst) {
+    SortField sortField = new SortField(fieldName, SortField.Type.STRING, reverse);
+    
+    // 4 cases:
+    // missingFirst / forward: default lucene behavior
+    // missingFirst / reverse: set sortMissingLast
+    // missingLast  / forward: set sortMissingLast
+    // missingLast  / reverse: default lucene behavior
+    
+    if (nullFirst && reverse) {
+      sortField.setMissingValue(SortField.STRING_LAST);
+    } else if (nullLast && !reverse) {
+      sortField.setMissingValue(SortField.STRING_LAST);
+    }
+    return sortField;
+  }
 }

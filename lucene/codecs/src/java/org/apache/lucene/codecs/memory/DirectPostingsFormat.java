@@ -29,16 +29,18 @@ import org.apache.lucene.codecs.PostingsFormat;
 import org.apache.lucene.codecs.lucene50.Lucene50PostingsFormat;
 import org.apache.lucene.index.FieldInfo;
 import org.apache.lucene.index.Fields;
+import org.apache.lucene.index.ImpactsEnum;
 import org.apache.lucene.index.IndexOptions;
 import org.apache.lucene.index.OrdTermState;
 import org.apache.lucene.index.PostingsEnum;
 import org.apache.lucene.index.SegmentReadState;
 import org.apache.lucene.index.SegmentWriteState;
+import org.apache.lucene.index.SlowImpactsEnum;
 import org.apache.lucene.index.TermState;
 import org.apache.lucene.index.Terms;
 import org.apache.lucene.index.TermsEnum;
+import org.apache.lucene.store.ByteBuffersDataOutput;
 import org.apache.lucene.store.IOContext;
-import org.apache.lucene.store.RAMOutputStream;
 import org.apache.lucene.util.Accountable;
 import org.apache.lucene.util.Accountables;
 import org.apache.lucene.util.ArrayUtil;
@@ -331,7 +333,7 @@ public final class DirectPostingsFormat extends PostingsFormat {
       final IntArrayWriter scratch = new IntArrayWriter();
 
       // Used for payloads, if any:
-      final RAMOutputStream ros = new RAMOutputStream();
+      final ByteBuffersDataOutput ros = ByteBuffersDataOutput.newResettableInstance();
 
       // if (DEBUG) {
       //   System.out.println("\nLOAD terms seg=" + state.segmentInfo.name + " field=" + field + " hasOffsets=" + hasOffsets + " hasFreq=" + hasFreq + " hasPos=" + hasPos + " hasPayloads=" + hasPayloads);
@@ -372,7 +374,6 @@ public final class DirectPostingsFormat extends PostingsFormat {
         int docID;
 
         if (docFreq <= lowFreqCutoff) {
-
           ros.reset();
 
           // Pack postings for low-freq terms into a single int[]:
@@ -402,14 +403,7 @@ public final class DirectPostingsFormat extends PostingsFormat {
             }
           }
 
-          final byte[] payloads;
-          if (hasPayloads) {
-            payloads = new byte[(int) ros.getFilePointer()];
-            ros.writeTo(payloads, 0);
-          } else {
-            payloads = null;
-          }
-
+          final byte[] payloads = hasPayloads ? ros.toArrayCopy() : null;
           final int[] postings = scratch.get();
 
           ent = new LowFreqTerm(postings, payloads, docFreq, (int) totalTermFreq);
@@ -659,6 +653,9 @@ public final class DirectPostingsFormat extends PostingsFormat {
 
     @Override
     public TermsEnum intersect(CompiledAutomaton compiled, final BytesRef startTerm) {
+      if (compiled.type != CompiledAutomaton.AUTOMATON_TYPE.NORMAL) {
+        throw new IllegalArgumentException("please use CompiledAutomaton.getTermsEnum instead");
+      }
       return new DirectIntersectTermsEnum(compiled, startTerm);
     }
 
@@ -941,6 +938,10 @@ public final class DirectPostingsFormat extends PostingsFormat {
         }
       }
 
+      @Override
+      public ImpactsEnum impacts(int flags) throws IOException {
+        return new SlowImpactsEnum(postings(null, flags));
+      }
     }
 
     private final class DirectIntersectTermsEnum extends TermsEnum {
@@ -969,7 +970,7 @@ public final class DirectPostingsFormat extends PostingsFormat {
         states = new State[1];
         states[0] = new State();
         states[0].changeOrd = terms.length;
-        states[0].state = runAutomaton.getInitialState();
+        states[0].state = 0;
         states[0].transitionCount = compiledAutomaton.automaton.getNumTransitions(states[0].state);
         compiledAutomaton.automaton.initTransition(states[0].state, states[0].transition);
         states[0].transitionUpto = -1;
@@ -1493,6 +1494,11 @@ public final class DirectPostingsFormat extends PostingsFormat {
       }
 
       @Override
+      public ImpactsEnum impacts(int flags) throws IOException {
+        return new SlowImpactsEnum(postings(null, flags));
+      }
+
+      @Override
       public SeekStatus seekCeil(BytesRef term) {
         throw new UnsupportedOperationException();
       }
@@ -1500,6 +1506,11 @@ public final class DirectPostingsFormat extends PostingsFormat {
       @Override
       public void seekExact(long ord) {
         throw new UnsupportedOperationException();
+      }
+      
+      @Override
+      public boolean seekExact(BytesRef text) throws IOException {
+        return seekCeil(text) == SeekStatus.FOUND;
       }
     }
   }

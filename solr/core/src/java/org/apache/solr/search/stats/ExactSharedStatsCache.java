@@ -16,20 +16,20 @@
  */
 package org.apache.solr.search.stats;
 
+import java.lang.invoke.MethodHandles;
+import java.util.Map;
+import java.util.Map.Entry;
+import java.util.concurrent.ConcurrentHashMap;
+
 import org.apache.solr.core.PluginInfo;
 import org.apache.solr.handler.component.ResponseBuilder;
 import org.apache.solr.request.SolrQueryRequest;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.lang.invoke.MethodHandles;
-import java.util.Map;
-import java.util.Map.Entry;
-import java.util.concurrent.ConcurrentHashMap;
-
 
 public class ExactSharedStatsCache extends ExactStatsCache {
-  private static final Logger LOG = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
+  private static final Logger log = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
   
   // local stats obtained from shard servers
   private final Map<String,Map<String,TermStats>> perShardTermStats = new ConcurrentHashMap<>();
@@ -40,7 +40,7 @@ public class ExactSharedStatsCache extends ExactStatsCache {
 
   @Override
   public StatsSource get(SolrQueryRequest req) {
-    LOG.debug("total={}, cache {}", currentGlobalColStats, currentGlobalTermStats.size());
+    log.debug("total={}, cache {}", currentGlobalColStats, currentGlobalTermStats.size());
     return new ExactStatsSource(currentGlobalTermStats, currentGlobalColStats);
   }
   
@@ -55,7 +55,7 @@ public class ExactSharedStatsCache extends ExactStatsCache {
 
   @Override
   protected void printStats(SolrQueryRequest req) {
-    LOG.debug("perShardColStats={}, perShardTermStats={}", perShardColStats, perShardTermStats);
+    log.debug("perShardColStats={}, perShardTermStats={}", perShardColStats, perShardTermStats);
   }
 
   @Override
@@ -73,7 +73,7 @@ public class ExactSharedStatsCache extends ExactStatsCache {
 
   protected TermStats getPerShardTermStats(SolrQueryRequest req, String t, String shard) {
     Map<String,TermStats> cache = perShardTermStats.get(shard);
-    return cache.get(t);
+    return (cache != null) ? cache.get(t) : null; //Term doesn't exist in shard;
   }
 
   protected void addToGlobalColStats(SolrQueryRequest req,

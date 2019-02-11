@@ -27,10 +27,12 @@ import java.util.NoSuchElementException;
 import org.apache.lucene.codecs.CodecUtil;
 import org.apache.lucene.codecs.TermVectorsReader;
 import org.apache.lucene.index.CorruptIndexException;
+import org.apache.lucene.index.SlowImpactsEnum;
 import org.apache.lucene.index.PostingsEnum;
 import org.apache.lucene.index.FieldInfo;
 import org.apache.lucene.index.FieldInfos;
 import org.apache.lucene.index.Fields;
+import org.apache.lucene.index.ImpactsEnum;
 import org.apache.lucene.index.IndexFileNames;
 import org.apache.lucene.index.SegmentInfo;
 import org.apache.lucene.index.Terms;
@@ -59,7 +61,6 @@ import static org.apache.lucene.codecs.compressing.CompressingTermVectorsWriter.
 import static org.apache.lucene.codecs.compressing.CompressingTermVectorsWriter.POSITIONS;
 import static org.apache.lucene.codecs.compressing.CompressingTermVectorsWriter.VECTORS_EXTENSION;
 import static org.apache.lucene.codecs.compressing.CompressingTermVectorsWriter.VECTORS_INDEX_EXTENSION;
-import static org.apache.lucene.codecs.compressing.CompressingTermVectorsWriter.VERSION_CHUNK_STATS;
 import static org.apache.lucene.codecs.compressing.CompressingTermVectorsWriter.VERSION_CURRENT;
 import static org.apache.lucene.codecs.compressing.CompressingTermVectorsWriter.VERSION_START;
 
@@ -148,18 +149,14 @@ public final class CompressingTermVectorsReader extends TermVectorsReader implem
       assert CodecUtil.indexHeaderLength(codecNameDat, segmentSuffix) == vectorsStream.getFilePointer();
       
       long pos = vectorsStream.getFilePointer();
-      
-      if (version >= VERSION_CHUNK_STATS) {
-        vectorsStream.seek(maxPointer);
-        numChunks = vectorsStream.readVLong();
-        numDirtyChunks = vectorsStream.readVLong();
-        if (numDirtyChunks > numChunks) {
-          throw new CorruptIndexException("invalid chunk counts: dirty=" + numDirtyChunks + ", total=" + numChunks, vectorsStream);
-        }
-      } else {
-        numChunks = numDirtyChunks = -1;
+
+      vectorsStream.seek(maxPointer);
+      numChunks = vectorsStream.readVLong();
+      numDirtyChunks = vectorsStream.readVLong();
+      if (numDirtyChunks > numChunks) {
+        throw new CorruptIndexException("invalid chunk counts: dirty=" + numDirtyChunks + ", total=" + numChunks, vectorsStream);
       }
-      
+
       // NOTE: data file is too costly to verify checksum against all the bytes on open,
       // but for now we at least verify proper structure of the checksum footer: which looks
       // for FOOTER_MAGIC + algorithmID. This is cheap and can detect some forms of corruption
@@ -747,9 +744,10 @@ public final class CompressingTermVectorsReader extends TermVectorsReader implem
 
   }
 
-  private class TVTerms extends Terms {
+  private static class TVTerms extends Terms {
 
     private final int numTerms, flags;
+    private final long totalTermFreq;
     private final int[] prefixLengths, suffixLengths, termFreqs, positionIndex, positions, startOffsets, lengths, payloadIndex;
     private final BytesRef termBytes, payloadBytes;
 
@@ -769,6 +767,11 @@ public final class CompressingTermVectorsReader extends TermVectorsReader implem
       this.payloadIndex = payloadIndex;
       this.payloadBytes = payloadBytes;
       this.termBytes = termBytes;
+      long ttf = 0;
+      for (int tf : termFreqs) {
+        ttf += tf;
+      }
+      this.totalTermFreq = ttf;
     }
 
     @Override
@@ -787,7 +790,7 @@ public final class CompressingTermVectorsReader extends TermVectorsReader implem
 
     @Override
     public long getSumTotalTermFreq() throws IOException {
-      return -1L;
+      return totalTermFreq;
     }
 
     @Override
@@ -904,6 +907,11 @@ public final class CompressingTermVectorsReader extends TermVectorsReader implem
     }
 
     @Override
+    public boolean seekExact(BytesRef text) throws IOException {
+      return seekCeil(text) == SeekStatus.FOUND;
+    }
+    
+    @Override
     public void seekExact(long ord) throws IOException {
       throw new UnsupportedOperationException();
     }
@@ -939,6 +947,12 @@ public final class CompressingTermVectorsReader extends TermVectorsReader implem
 
       docsEnum.reset(termFreqs[ord], positionIndex[ord], positions, startOffsets, lengths, payloads, payloadIndex);
       return docsEnum;
+    }
+
+    @Override
+    public ImpactsEnum impacts(int flags) throws IOException {
+      final PostingsEnum delegate = postings(null, PostingsEnum.FREQS);
+      return new SlowImpactsEnum(delegate);
     }
 
   }

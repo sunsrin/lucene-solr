@@ -16,8 +16,10 @@
  */
 package org.apache.solr.request;
 
+import javax.servlet.http.HttpServletRequest;
 import java.io.Closeable;
 import java.lang.invoke.MethodHandles;
+import java.security.Principal;
 import java.util.Date;
 import java.util.LinkedList;
 import java.util.List;
@@ -40,6 +42,7 @@ public class SolrRequestInfo {
   protected SolrQueryRequest req;
   protected SolrQueryResponse rsp;
   protected Date now;
+  protected HttpServletRequest httpRequest;
   protected TimeZone tz;
   protected ResponseBuilder rb;
   protected List<Closeable> closeHooks;
@@ -55,7 +58,7 @@ public class SolrRequestInfo {
     SolrRequestInfo prev = threadLocal.get();
     if (prev != null) {
       log.error("Previous SolrRequestInfo was not closed!  req=" + prev.req.getOriginalParams().toString());
-      log.error("prev == info : {}", prev.req == info.req);
+      log.error("prev == info : {}", prev.req == info.req, new RuntimeException());
     }
     assert prev == null;
 
@@ -83,6 +86,17 @@ public class SolrRequestInfo {
     this.req = req;
     this.rsp = rsp;    
   }
+  public SolrRequestInfo(HttpServletRequest  httpReq, SolrQueryResponse rsp) {
+    this.httpRequest = httpReq;
+    this.rsp = rsp;
+  }
+
+  public Principal getUserPrincipal() {
+    if (req != null) return req.getUserPrincipal();
+    if (httpRequest != null) return httpRequest.getUserPrincipal();
+    return null;
+  }
+
 
   public Date getNOW() {    
     if (now != null) return now;
@@ -100,18 +114,10 @@ public class SolrRequestInfo {
     return now;
   }
 
-  /** The TimeZone specified by the request, or null if none was specified */
-  public TimeZone getClientTimeZone() {    
-
+  /** The TimeZone specified by the request, or UTC if none was specified. */
+  public TimeZone getClientTimeZone() {
     if (tz == null)  {
-      String tzStr = req.getParams().get(CommonParams.TZ);
-      if (tzStr != null) {
-        tz = TimeZoneUtils.getTimeZone(tzStr);
-        if (null == tz) {
-          throw new SolrException(SolrException.ErrorCode.BAD_REQUEST,
-                                  "Solr JVM does not support TZ: " + tzStr);
-        }
-      } 
+      tz = TimeZoneUtils.parseTimezone(req.getParams().get(CommonParams.TZ));
     }
     return tz;
   }

@@ -35,9 +35,10 @@ import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
 
+// commented out on: 24-Dec-2018 @LuceneTestCase.BadApple(bugUrl="https://issues.apache.org/jira/browse/SOLR-12028") // 12-Jun-2018
 public class BlockDirectoryTest extends SolrTestCaseJ4 {
 
-  private class MapperCache implements Cache {
+  private static class MapperCache implements Cache {
     public Map<String, byte[]> map = Caffeine.newBuilder()
         .maximumSize(8)
         .<String, byte[]>build()
@@ -110,7 +111,18 @@ public class BlockDirectoryTest extends SolrTestCaseJ4 {
     file = createTempDir().toFile();
     FSDirectory dir = FSDirectory.open(new File(file, "base").toPath());
     mapperCache = new MapperCache();
-    directory = new BlockDirectory("test", dir, mapperCache, null, true, true);
+
+    if (random().nextBoolean()) {
+      Metrics metrics = new Metrics();
+      int blockSize = 8192;
+      int slabSize = blockSize * 16384;
+      long totalMemory = 1 * slabSize;
+      BlockCache blockCache = new BlockCache(metrics, true, totalMemory, slabSize, blockSize);
+      BlockDirectoryCache cache = new BlockDirectoryCache(blockCache, "/collection1", metrics, true);
+      directory = new BlockDirectory("test", dir, cache, null, true, false);
+    } else {
+      directory = new BlockDirectory("test", dir, mapperCache, null, true, true);
+    }
     random = random();
   }
   
@@ -256,7 +268,11 @@ public class BlockDirectoryTest extends SolrTestCaseJ4 {
 
     BlockDirectory d = directory;
     assertTrue(d.useReadCache("", IOContext.DEFAULT));
-    assertTrue(d.useWriteCache("", IOContext.DEFAULT));
+    if (d.getCache() instanceof MapperCache) {
+      assertTrue(d.useWriteCache("", IOContext.DEFAULT));
+    } else {
+      assertFalse(d.useWriteCache("", IOContext.DEFAULT));
+    }
     assertFalse(d.useWriteCache("", mergeContext));
 
     d = new BlockDirectory("test", directory, mapperCache, null, true, false);
@@ -266,7 +282,11 @@ public class BlockDirectoryTest extends SolrTestCaseJ4 {
 
     d = new BlockDirectory("test", directory, mapperCache, null, false, true);
     assertFalse(d.useReadCache("", IOContext.DEFAULT));
-    assertTrue(d.useWriteCache("", IOContext.DEFAULT));
+    if (d.getCache() instanceof MapperCache) {
+      assertTrue(d.useWriteCache("", IOContext.DEFAULT));
+    } else {
+      assertFalse(d.useWriteCache("", IOContext.DEFAULT));
+    }
     assertFalse(d.useWriteCache("", mergeContext));
   }
 }

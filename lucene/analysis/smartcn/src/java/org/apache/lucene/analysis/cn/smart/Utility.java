@@ -18,22 +18,24 @@ package org.apache.lucene.analysis.cn.smart;
 
 import org.apache.lucene.analysis.cn.smart.hhmm.SegTokenFilter; // for javadoc
 
+import static java.lang.Character.isSurrogate;
+
 /**
  * SmartChineseAnalyzer utility constants and methods
  * @lucene.experimental
  */
 public class Utility {
 
-  public static final char[] STRING_CHAR_ARRAY = new String("未##串")
+  public static final char[] STRING_CHAR_ARRAY = "未##串"
       .toCharArray();
 
-  public static final char[] NUMBER_CHAR_ARRAY = new String("未##数")
+  public static final char[] NUMBER_CHAR_ARRAY = "未##数"
       .toCharArray();
 
-  public static final char[] START_CHAR_ARRAY = new String("始##始")
+  public static final char[] START_CHAR_ARRAY = "始##始"
       .toCharArray();
 
-  public static final char[] END_CHAR_ARRAY = new String("末##末").toCharArray();
+  public static final char[] END_CHAR_ARRAY = "末##末".toCharArray();
 
   /**
    * Delimiters will be filtered to this character by {@link SegTokenFilter}
@@ -152,6 +154,8 @@ public class Utility {
    * @see CharType
    */
   public static int getCharType(char ch) {
+    if (isSurrogate(ch))
+      return CharType.SURROGATE;
     // Most (but not all!) of these are Han Ideographic Characters
     if (ch >= 0x4E00 && ch <= 0x9FA5)
       return CharType.HANZI;

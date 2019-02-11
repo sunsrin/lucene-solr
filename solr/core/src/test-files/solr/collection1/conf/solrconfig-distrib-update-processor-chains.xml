@@ -20,7 +20,7 @@
 <config>
   <jmx />
 
-  <luceneMatchVersion>${tests.luceneMatchVersion:LUCENE_CURRENT}</luceneMatchVersion>
+  <luceneMatchVersion>${tests.luceneMatchVersion:LATEST}</luceneMatchVersion>
   
   <directoryFactory name="DirectoryFactory" class="${solr.directoryFactory:solr.RAMDirectoryFactory}">
     <!-- used to keep RAM reqs down for HdfsDirectoryFactory -->
@@ -43,8 +43,7 @@
    <processor class="solr.RunUpdateProcessorFactory" />
  </updateRequestProcessorChain>
 
-  <requestHandler name="standard" class="solr.StandardRequestHandler">
-  </requestHandler>
+  <requestHandler name="/select" class="solr.SearchHandler"/>
 
   <requestHandler name="/get" class="solr.RealTimeGetHandler">
     <lst name="defaults">

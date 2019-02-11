@@ -84,7 +84,7 @@ public abstract class CoreAdminParams
 
   /** The hash ranges to be used to split a shard or an index */
   public final static String RANGES = "ranges";
-  
+
   public static final String ROLES = "roles";
 
   public static final String REQUESTID = "requestid";
@@ -100,6 +100,8 @@ public abstract class CoreAdminParams
   public static final String DELETE_DATA_DIR = "deleteDataDir";
 
   public static final String DELETE_INSTANCE_DIR = "deleteInstanceDir";
+
+  public static final String DELETE_METRICS_HISTORY = "deleteMetricsHistory";
 
   public static final String LOAD_ON_STARTUP = "loadOnStartup";
   
@@ -122,6 +124,16 @@ public abstract class CoreAdminParams
    * A parameter to specify the name of the commit to be stored during the backup operation.
    */
   public static final String COMMIT_NAME = "commitName";
+
+  /**
+   * A boolean parameter specifying if a core is being created as part of a new collection
+   */
+  public static final String NEW_COLLECTION = "newCollection";
+
+  /**
+   * Tells the CoreAdminHandler that the new Core will be a replica of a particular {@link org.apache.solr.common.cloud.Replica.Type}
+   */
+  public static final String REPLICA_TYPE = "replicaType";
 
   public enum CoreAdminAction {
     STATUS(true),

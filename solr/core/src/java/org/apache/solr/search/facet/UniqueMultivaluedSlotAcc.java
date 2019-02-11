@@ -18,19 +18,21 @@
 package org.apache.solr.search.facet;
 
 import java.io.IOException;
+import java.util.function.IntFunction;
 
 import org.apache.lucene.util.BytesRef;
 import org.apache.lucene.util.FixedBitSet;
+import org.apache.solr.schema.SchemaField;
 import org.apache.solr.search.SolrIndexSearcher;
 
 class UniqueMultivaluedSlotAcc extends UniqueSlotAcc implements UnInvertedField.Callback {
   private UnInvertedField uif;
   private UnInvertedField.DocToTerm docToTerm;
 
-  public UniqueMultivaluedSlotAcc(FacetContext fcontext, String field, int numSlots, HLLAgg.HLLFactory factory) throws IOException {
+  public UniqueMultivaluedSlotAcc(FacetContext fcontext, SchemaField field, int numSlots, HLLAgg.HLLFactory factory) throws IOException {
     super(fcontext, field, numSlots, factory);
     SolrIndexSearcher searcher = fcontext.qcontext.searcher();
-    uif = UnInvertedField.getUnInvertedField(field, searcher);
+    uif = UnInvertedField.getUnInvertedField(field.getName(), searcher);
     docToTerm = uif.new DocToTerm();
     fcontext.qcontext.addCloseHook(this);  // TODO: find way to close accumulators instead of using close hook?
     nTerms = uif.numTerms();
@@ -49,7 +51,7 @@ class UniqueMultivaluedSlotAcc extends UniqueSlotAcc implements UnInvertedField.
   }
 
   @Override
-  public void collect(int doc, int slotNum) throws IOException {
+  public void collect(int doc, int slotNum, IntFunction<SlotContext> slotContext) throws IOException {
     bits = arr[slotNum];
     if (bits == null) {
       bits = new FixedBitSet(nTerms);

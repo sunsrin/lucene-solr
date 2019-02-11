@@ -92,7 +92,7 @@ public class DateRangePrefixTree extends NumberRangePrefixTree {
   private static final int YEAR_LEVEL = 3;
 
   //how many million years are there?
-  private static final int NUM_MYEARS = 585;// we assert how this was computed in the constructor
+  private static final int NUM_MYEARS = 586;// we assert how this was computed in the constructor
 
   /** An instanced based on {@link Calendar#getInstance(TimeZone, Locale)} with UTC and Locale.Root. This
    * will (always?) be a {@link GregorianCalendar} with a so-called "Gregorian Change Date" of 1582.
@@ -142,9 +142,9 @@ public class DateRangePrefixTree extends NumberRangePrefixTree {
     BC_YEARS = BC_FIRSTYEAR - BC_LASTYEAR + 1;
     AD_FIRSTYEAR = MAXCAL.getActualMinimum(Calendar.YEAR); // 1
     AD_LASTYEAR = MAXCAL.getActualMaximum(Calendar.YEAR);
-    AD_YEAR_BASE = (((BC_YEARS-1) / 1000_000)+1) * 1000_000;
+    AD_YEAR_BASE = (((BC_YEARS-1) / 1000_000)+1) * 1000_000; // align year 0 at an even # of million years
     assert BC_LASTYEAR == 1 && AD_FIRSTYEAR == 1;
-    assert NUM_MYEARS == (AD_YEAR_BASE + AD_LASTYEAR) / 1000_000;
+    assert NUM_MYEARS == (AD_YEAR_BASE + AD_LASTYEAR) / 1000_000 + 1;
 
     maxLV = toShape((Calendar)MAXCAL.clone());
     minLV = toShape((Calendar)MINCAL.clone());
@@ -165,7 +165,7 @@ public class DateRangePrefixTree extends NumberRangePrefixTree {
     int cmp = comparePrefix(lv, maxLV);
     assert cmp <= 0;
     if (cmp == 0)//edge case (literally!)
-      return maxLV.getValAtLevel(lv.getLevel()+1);
+      return maxLV.getValAtLevel(lv.getLevel()+1) + 1;
 
     // if using GregorianCalendar and we're after the "Gregorian change date" then we'll compute
     //  the sub-cells ourselves more efficiently without the need to construct a Calendar.
@@ -446,6 +446,7 @@ public class DateRangePrefixTree extends NumberRangePrefixTree {
     if (str.equals("*"))
       return cal;
     int offset = 0;//a pointer
+    int parsedVal = 0;
     try {
       //year & era:
       int lastOffset = str.charAt(str.length()-1) == 'Z' ? str.length() - 1 : str.length();
@@ -463,41 +464,72 @@ public class DateRangePrefixTree extends NumberRangePrefixTree {
       // The str.substring()'s hopefully get optimized to be stack-allocated.
 
       //month:
-      cal.set(Calendar.MONTH, Integer.parseInt(str.substring(offset, offset+2)) - 1);//starts at 0
+      parsedVal = parseAndCheck( str, offset, 1, 12);
+      cal.set(Calendar.MONTH, parsedVal - 1);//starts at 0
       offset += 3;
       if (lastOffset < offset)
         return cal;
       //day:
-      cal.set(Calendar.DAY_OF_MONTH, Integer.parseInt(str.substring(offset, offset+2)));
+      checkDelimeter(str, offset-1, '-');
+
+      parsedVal = parseAndCheck( str, offset, 1, 31);
+      cal.set(Calendar.DAY_OF_MONTH, parsedVal);
       offset += 3;
       if (lastOffset < offset)
         return cal;
+      checkDelimeter(str, offset-1, 'T');
       //hour:
-      cal.set(Calendar.HOUR_OF_DAY, Integer.parseInt(str.substring(offset, offset+2)));
+
+      parsedVal = parseAndCheck( str, offset, 0, 24);
+      cal.set(Calendar.HOUR_OF_DAY, parsedVal);
       offset += 3;
       if (lastOffset < offset)
         return cal;
+      checkDelimeter(str, offset-1, ':');
       //minute:
-      cal.set(Calendar.MINUTE, Integer.parseInt(str.substring(offset, offset+2)));
+
+      parsedVal = parseAndCheck( str, offset, 0, 59);
+      cal.set(Calendar.MINUTE, parsedVal);
       offset += 3;
       if (lastOffset < offset)
         return cal;
+      checkDelimeter(str, offset-1, ':');
       //second:
-      cal.set(Calendar.SECOND, Integer.parseInt(str.substring(offset, offset+2)));
+
+      parsedVal = parseAndCheck( str, offset, 0, 59);
+      cal.set(Calendar.SECOND, parsedVal);
       offset += 3;
       if (lastOffset < offset)
         return cal;
+      checkDelimeter(str, offset-1, '.');
       //ms:
+
       cal.set(Calendar.MILLISECOND, Integer.parseInt(str.substring(offset, offset+3)));
       offset += 3;//last one, move to next char
       if (lastOffset == offset)
         return cal;
     } catch (Exception e) {
-      ParseException pe = new ParseException("Improperly formatted date: "+str, offset);
+      ParseException pe = new ParseException("Improperly formatted datetime: "+str, offset);
       pe.initCause(e);
       throw pe;
     }
-    throw new ParseException("Improperly formatted date: "+str, offset);
+    throw new ParseException("Improperly formatted datetime: "+str, offset);
+  }
+
+  private  void checkDelimeter(String str, int offset, char delim) {
+    if (str.charAt(offset) != delim) {
+      throw new IllegalArgumentException("Invalid delimeter: '"+str.charAt(offset)+
+          "', expecting '"+delim+"'");
+    }
+  }
+
+  private int parseAndCheck(String  str, int offset, int min, int max) {
+    int val = Integer.parseInt(str.substring(offset, offset+2));
+    if (val < min  || val > max) {
+      throw new IllegalArgumentException("Invalid value: "+val+"," +
+          " expecting from "+min+" to "+max+"]");
+    }
+    return val;
   }
 
 }

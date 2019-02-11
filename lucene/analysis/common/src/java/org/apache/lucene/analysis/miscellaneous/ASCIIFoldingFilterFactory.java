@@ -19,11 +19,8 @@ package org.apache.lucene.analysis.miscellaneous;
 
 import java.util.Map;
 
-import org.apache.lucene.analysis.util.AbstractAnalysisFactory;
-import org.apache.lucene.analysis.util.MultiTermAwareComponent;
-import org.apache.lucene.analysis.util.TokenFilterFactory;
-import org.apache.lucene.analysis.miscellaneous.ASCIIFoldingFilter;
 import org.apache.lucene.analysis.TokenStream;
+import org.apache.lucene.analysis.util.TokenFilterFactory;
 
 /** 
  * Factory for {@link ASCIIFoldingFilter}.
@@ -34,27 +31,36 @@ import org.apache.lucene.analysis.TokenStream;
  *     &lt;filter class="solr.ASCIIFoldingFilterFactory" preserveOriginal="false"/&gt;
  *   &lt;/analyzer&gt;
  * &lt;/fieldType&gt;</pre>
+ *
+ * @since 3.1
  */
-public class ASCIIFoldingFilterFactory extends TokenFilterFactory implements MultiTermAwareComponent {
+public class ASCIIFoldingFilterFactory extends TokenFilterFactory {
+  private static final String PRESERVE_ORIGINAL = "preserveOriginal";
+
   private final boolean preserveOriginal;
   
   /** Creates a new ASCIIFoldingFilterFactory */
   public ASCIIFoldingFilterFactory(Map<String,String> args) {
     super(args);
-    preserveOriginal = getBoolean(args, "preserveOriginal", false);
+    preserveOriginal = getBoolean(args, PRESERVE_ORIGINAL, false);
     if (!args.isEmpty()) {
       throw new IllegalArgumentException("Unknown parameters: " + args);
     }
   }
   
   @Override
-  public ASCIIFoldingFilter create(TokenStream input) {
+  public TokenStream create(TokenStream input) {
     return new ASCIIFoldingFilter(input, preserveOriginal);
   }
 
   @Override
-  public AbstractAnalysisFactory getMultiTermComponent() {
-    return this;
+  public TokenStream normalize(TokenStream input) {
+    // The main use-case for using preserveOriginal is to match regardless of
+    // case and to give better scores to exact matches. Since most multi-term
+    // queries return constant scores anyway, for normalization we
+    // emit only the folded token
+    return new ASCIIFoldingFilter(input, false);
   }
+
 }
 

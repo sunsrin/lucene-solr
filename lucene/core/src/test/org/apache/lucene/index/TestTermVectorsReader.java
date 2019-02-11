@@ -47,10 +47,10 @@ public class TestTermVectorsReader extends LuceneTestCase {
   private int[][] positions = new int[testTerms.length][];
   private Directory dir;
   private SegmentCommitInfo seg;
-  private FieldInfos fieldInfos = new FieldInfos(new FieldInfo[0]);
+  private FieldInfos fieldInfos = FieldInfos.EMPTY;
   private static int TERM_FREQ = 3;
 
-  private class TestToken implements Comparable<TestToken> {
+  private static class TestToken implements Comparable<TestToken> {
     String text;
     int pos;
     int startOffset;

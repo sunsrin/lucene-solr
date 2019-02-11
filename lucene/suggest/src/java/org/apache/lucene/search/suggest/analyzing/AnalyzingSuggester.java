@@ -332,6 +332,7 @@ public class AnalyzingSuggester extends Lookup implements Accountable {
   TokenStreamToAutomaton getTokenStreamToAutomaton() {
     final TokenStreamToAutomaton tsta = new TokenStreamToAutomaton();
     tsta.setPreservePositionIncrements(preservePositionIncrements);
+    tsta.setFinalOffsetGapAsHole(true);
     return tsta;
   }
   
@@ -389,9 +390,11 @@ public class AnalyzingSuggester extends Lookup implements Accountable {
       } else {
         scratchA.offset = readerA.getPosition();
         scratchB.offset = readerB.getPosition();
-        scratchA.length = a.length - scratchA.offset;
-        scratchB.length = b.length - scratchB.offset;
+        scratchA.length = readerA.length() - readerA.getPosition();
+        scratchB.length = readerB.length() - readerB.getPosition();
       }
+      assert scratchA.isValid();
+      assert scratchB.isValid();
    
       return scratchA.compareTo(scratchB);
     }
@@ -865,7 +868,7 @@ public class AnalyzingSuggester extends Lookup implements Accountable {
     // Turn tokenstream into automaton:
     Automaton automaton = null;
     try (TokenStream ts = queryAnalyzer.tokenStream("", key.toString())) {
-        automaton = getTokenStreamToAutomaton().toAutomaton(ts);
+      automaton = getTokenStreamToAutomaton().toAutomaton(ts);
     }
 
     automaton = replaceSep(automaton);

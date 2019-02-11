@@ -20,6 +20,10 @@ import static org.apache.lucene.util.SloppyMath.TO_RADIANS;
 import static org.apache.lucene.util.SloppyMath.cos;
 import static org.apache.lucene.util.SloppyMath.haversinMeters;
 
+import org.apache.lucene.index.PointValues;
+import org.apache.lucene.index.PointValues.Relation;
+import org.apache.lucene.util.SloppyMath;
+
 /**
  * Basic reusable geo-spatial utility methods
  *
@@ -123,5 +127,112 @@ public final class GeoUtils {
     double ceil = Double.longBitsToDouble(lo);
     assert haversinMeters(ceil) > radius;
     return ceil;
+  }
+
+  /**
+   * Compute the relation between the provided box and distance query.
+   * This only works for boxes that do not cross the dateline.
+   */
+  public static PointValues.Relation relate(
+      double minLat, double maxLat, double minLon, double maxLon,
+      double lat, double lon, double distanceSortKey, double axisLat) {
+
+    if (minLon > maxLon) {
+      throw new IllegalArgumentException("Box crosses the dateline");
+    }
+
+    if ((lon < minLon || lon > maxLon) && (axisLat + Rectangle.AXISLAT_ERROR < minLat || axisLat - Rectangle.AXISLAT_ERROR > maxLat)) {
+      // circle not fully inside / crossing axis
+      if (SloppyMath.haversinSortKey(lat, lon, minLat, minLon) > distanceSortKey &&
+          SloppyMath.haversinSortKey(lat, lon, minLat, maxLon) > distanceSortKey &&
+          SloppyMath.haversinSortKey(lat, lon, maxLat, minLon) > distanceSortKey &&
+          SloppyMath.haversinSortKey(lat, lon, maxLat, maxLon) > distanceSortKey) {
+        // no points inside
+        return Relation.CELL_OUTSIDE_QUERY;
+      }
+    }
+
+    if (within90LonDegrees(lon, minLon, maxLon) &&
+        SloppyMath.haversinSortKey(lat, lon, minLat, minLon) <= distanceSortKey &&
+        SloppyMath.haversinSortKey(lat, lon, minLat, maxLon) <= distanceSortKey &&
+        SloppyMath.haversinSortKey(lat, lon, maxLat, minLon) <= distanceSortKey &&
+        SloppyMath.haversinSortKey(lat, lon, maxLat, maxLon) <= distanceSortKey) {
+      // we are fully enclosed, collect everything within this subtree
+      return Relation.CELL_INSIDE_QUERY;
+    }
+
+    return Relation.CELL_CROSSES_QUERY;
+  }
+
+  /** Return whether all points of {@code [minLon,maxLon]} are within 90 degrees of {@code lon}. */
+  static boolean within90LonDegrees(double lon, double minLon, double maxLon) {
+    if (maxLon <= lon - 180) {
+      lon -= 360;
+    } else if (minLon >= lon + 180) {
+      lon += 360;
+    }
+    return maxLon - lon < 90 && lon - minLon < 90;
+  }
+
+  /**
+   * Returns a positive value if points a, b, and c are arranged in counter-clockwise order,
+   * negative value if clockwise, zero if collinear.
+   */
+  // see the "Orient2D" method described here:
+  // http://www.cs.berkeley.edu/~jrs/meshpapers/robnotes.pdf
+  // https://www.cs.cmu.edu/~quake/robust.html
+  // Note that this one does not yet have the floating point tricks to be exact!
+  public static int orient(double ax, double ay, double bx, double by, double cx, double cy) {
+    double v1 = (bx - ax) * (cy - ay);
+    double v2 = (cx - ax) * (by - ay);
+    if (v1 > v2) {
+      return 1;
+    } else if (v1 < v2) {
+      return -1;
+    } else {
+      return 0;
+    }
+  }
+
+  /**
+   * uses orient method to compute relation between two line segments
+   * note the following return values:
+   * CELL_CROSSES_QUERY - if the two line segments fully cross
+   * CELL_INSIDE_QUERY - if the one line segment terminates on the other
+   * CELL_OUTSIDE_QUERY - if the two segments do not cross
+   **/
+  public static Relation lineRelateLine(double a1x, double a1y, double b1x, double b1y, double a2x, double a2y, double b2x, double b2y) {
+    // shortcut: either "line" is actually a point
+    if ((a1x == b1x && a1y == b1y) || (a2x == b2x && a2y == b2y)) {
+      return Relation.CELL_OUTSIDE_QUERY;
+    }
+
+    int a = orient(a2x, a2y, b2x, b2y, a1x, a1y) * orient(a2x, a2y, b2x, b2y, b1x, b1y);
+    int b = orient(a1x, a1y, b1x, b1y, a2x, a2y) * orient(a1x, a1y, b1x, b1y, b2x, b2y);
+
+    if (a <= 0 && b <= 0) {
+      return a == 0 || b == 0 ? Relation.CELL_INSIDE_QUERY : Relation.CELL_CROSSES_QUERY;
+    }
+
+    return Relation.CELL_OUTSIDE_QUERY;
+  }
+
+  /**
+   * used to define the orientation of 3 points
+   * -1 = Clockwise
+   * 0 = Colinear
+   * 1 = Counter-clockwise
+   **/
+  public enum WindingOrder {
+    CW(-1), COLINEAR(0), CCW(1);
+    private final int sign;
+    WindingOrder(int sign) { this.sign = sign; }
+    public int sign() {return sign;}
+    public static WindingOrder fromSign(final int sign) {
+      if (sign == CW.sign) return CW;
+      if (sign == COLINEAR.sign) return COLINEAR;
+      if (sign == CCW.sign) return CCW;
+      throw new IllegalArgumentException("Invalid WindingOrder sign: " + sign);
+    }
   }
 }

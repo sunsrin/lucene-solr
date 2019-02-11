@@ -18,7 +18,6 @@ package org.apache.solr.client.solrj.request;
 
 import java.io.IOException;
 import java.util.Arrays;
-import java.util.Collection;
 import java.util.List;
 
 import org.apache.solr.client.solrj.SolrClient;
@@ -32,7 +31,6 @@ import org.apache.solr.common.params.CoreAdminParams;
 import org.apache.solr.common.params.CoreAdminParams.CoreAdminAction;
 import org.apache.solr.common.params.ModifiableSolrParams;
 import org.apache.solr.common.params.SolrParams;
-import org.apache.solr.common.util.ContentStream;
 
 /**
  * This class is experimental and subject to change.
@@ -567,10 +565,6 @@ public class CoreAdminRequest extends SolrRequest<CoreAdminResponse> {
   //
   //---------------------------------------------------------------------------------------
 
-  @Override
-  public Collection<ContentStream> getContentStreams() throws IOException {
-    return null;
-  }
 
   @Override
   protected CoreAdminResponse createResponse(SolrClient client) {
@@ -617,6 +611,36 @@ public class CoreAdminRequest extends SolrRequest<CoreAdminResponse> {
     req.setOtherCoreName(SolrIdentifierValidator.validateCoreName(newName));
     req.setAction( CoreAdminAction.RENAME );
     return req.process( client );
+  }
+
+  /**
+   * Swap two existing cores.
+   * @param core1 name of the first core
+   * @param core2 name of the other core
+   * @param client SolrClient to use
+   * @return response
+   * @throws SolrServerException if one or both cores don't exist
+   * @throws IOException on IO errors
+   */
+  public static CoreAdminResponse swapCore(String core1, String core2, SolrClient client)
+      throws SolrServerException, IOException {
+    CoreAdminRequest req = new CoreAdminRequest();
+    req.setCoreName(core1);
+    req.setOtherCoreName(core2);
+    req.setAction( CoreAdminAction.SWAP );
+    return req.process( client );
+  }
+
+  public static CoreStatus getCoreStatus(String coreName, SolrClient client) throws SolrServerException, IOException {
+    return getCoreStatus(coreName, true, client);
+  }
+
+  public static CoreStatus getCoreStatus(String coreName, boolean getIndexInfo, SolrClient client)
+      throws SolrServerException, IOException {
+    CoreAdminRequest req = new CoreAdminRequest();
+    req.setAction(CoreAdminAction.STATUS);
+    req.setIndexInfoNeeded(getIndexInfo);
+    return new CoreStatus(req.process(client).getCoreStatus(coreName));
   }
 
   public static CoreAdminResponse getStatus( String name, SolrClient client ) throws SolrServerException, IOException

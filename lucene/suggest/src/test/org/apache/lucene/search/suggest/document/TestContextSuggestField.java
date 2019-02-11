@@ -21,6 +21,7 @@ import java.io.ByteArrayOutputStream;
 import org.apache.lucene.analysis.Analyzer;
 import org.apache.lucene.analysis.MockAnalyzer;
 import org.apache.lucene.analysis.TokenStream;
+import org.apache.lucene.analysis.miscellaneous.ConcatenateGraphFilter;
 import org.apache.lucene.analysis.standard.StandardAnalyzer;
 import org.apache.lucene.document.Document;
 import org.apache.lucene.index.DirectoryReader;
@@ -109,21 +110,21 @@ public class TestContextSuggestField extends LuceneTestCase {
     CharsRefBuilder builder = new CharsRefBuilder();
     builder.append("context1");
     builder.append(((char) ContextSuggestField.CONTEXT_SEPARATOR));
-    builder.append(((char) CompletionAnalyzer.SEP_LABEL));
+    builder.append((char) ConcatenateGraphFilter.SEP_LABEL);
     builder.append("input");
     expectedOutputs[0] = builder.toCharsRef().toString();
     builder.clear();
     builder.append("context2");
     builder.append(((char) ContextSuggestField.CONTEXT_SEPARATOR));
-    builder.append(((char) CompletionAnalyzer.SEP_LABEL));
+    builder.append((char) ConcatenateGraphFilter.SEP_LABEL);
     builder.append("input");
     expectedOutputs[1] = builder.toCharsRef().toString();
-    TokenStream stream = new CompletionTokenStreamTest.PayloadAttrToTypeAttrFilter(field.tokenStream(analyzer, null));
-    assertTokenStreamContents(stream, expectedOutputs, null, null, new String[]{payload.utf8ToString(), payload.utf8ToString()}, new int[]{1, 1}, null, null);
+    TokenStream stream = new TestSuggestField.PayloadAttrToTypeAttrFilter(field.tokenStream(analyzer, null));
+    assertTokenStreamContents(stream, expectedOutputs, null, null, new String[]{payload.utf8ToString(), payload.utf8ToString()}, new int[]{1, 0}, null, null);
 
     CompletionAnalyzer completionAnalyzer = new CompletionAnalyzer(analyzer);
-    stream = new CompletionTokenStreamTest.PayloadAttrToTypeAttrFilter(field.tokenStream(completionAnalyzer, null));
-    assertTokenStreamContents(stream, expectedOutputs, null, null, new String[]{payload.utf8ToString(), payload.utf8ToString()}, new int[]{1, 1}, null, null);
+    stream = new TestSuggestField.PayloadAttrToTypeAttrFilter(field.tokenStream(completionAnalyzer, null));
+    assertTokenStreamContents(stream, expectedOutputs, null, null, new String[]{payload.utf8ToString(), payload.utf8ToString()}, new int[]{1, 0}, null, null);
   }
 
   @Test
@@ -172,7 +173,7 @@ public class TestContextSuggestField extends LuceneTestCase {
     SuggestIndexSearcher suggestIndexSearcher = new SuggestIndexSearcher(reader);
 
     CompletionQuery query = new PrefixCompletionQuery(analyzer, new Term("suggest_field", "sugg"));
-    TopSuggestDocs suggest = suggestIndexSearcher.suggest(query, 10);
+    TopSuggestDocs suggest = suggestIndexSearcher.suggest(query, 10, false);
     assertSuggestions(suggest,
         new Entry("suggestion1", 4),
         new Entry("suggestion2", 3),
@@ -180,7 +181,7 @@ public class TestContextSuggestField extends LuceneTestCase {
         new Entry("suggestion4", 1));
 
     query = new PrefixCompletionQuery(analyzer, new Term("context_suggest_field", "sugg"));
-    suggest = suggestIndexSearcher.suggest(query, 10);
+    suggest = suggestIndexSearcher.suggest(query, 10, false);
     assertSuggestions(suggest,
         new Entry("suggestion1", "type1", 4),
         new Entry("suggestion2", "type2", 3),
@@ -212,14 +213,14 @@ public class TestContextSuggestField extends LuceneTestCase {
     DirectoryReader reader = iw.getReader();
     SuggestIndexSearcher suggestIndexSearcher = new SuggestIndexSearcher(reader);
     ContextQuery query = new ContextQuery(new PrefixCompletionQuery(completionAnalyzer, new Term("suggest_field", "sugg")));
-    TopSuggestDocs suggest = suggestIndexSearcher.suggest(query, 4);
+    TopSuggestDocs suggest = suggestIndexSearcher.suggest(query, 4, false);
     assertSuggestions(suggest,
         new Entry("suggestion1", "type1", 4),
         new Entry("suggestion2", "type2", 3),
         new Entry("suggestion3", "type3", 2),
         new Entry("suggestion4", "type4", 1));
     query.addContext("type1");
-    suggest = suggestIndexSearcher.suggest(query, 4);
+    suggest = suggestIndexSearcher.suggest(query, 4, false);
     assertSuggestions(suggest,
         new Entry("suggestion1", "type1", 4));
     reader.close();

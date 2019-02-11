@@ -18,11 +18,12 @@ package org.apache.lucene.search;
 
 
 
-import java.util.Arrays;
+import java.io.IOException;
 import java.util.Collections;
 import java.util.Random;
 
 import org.apache.lucene.analysis.MockAnalyzer;
+import org.apache.lucene.codecs.Codec;
 import org.apache.lucene.document.Document;
 import org.apache.lucene.document.Field;
 import org.apache.lucene.document.FieldType;
@@ -36,7 +37,7 @@ import org.apache.lucene.index.Term;
 import org.apache.lucene.search.similarities.ClassicSimilarity;
 import org.apache.lucene.store.Directory;
 import org.apache.lucene.store.IOContext;
-import org.apache.lucene.store.MockDirectoryWrapper;
+import org.apache.lucene.util.ArrayUtil;
 import org.apache.lucene.util.LuceneTestCase;
 import org.apache.lucene.util.TestUtil;
 import org.junit.AfterClass;
@@ -66,19 +67,38 @@ public class TestBoolean2 extends LuceneTestCase {
   private static Directory dir2;
   private static int mulFactor;
 
+  private static Directory copyOf(Directory dir) throws IOException {
+    Directory copy = newFSDirectory(createTempDir());
+    for(String name : dir.listAll()) {
+      if (name.startsWith("extra")) {
+        continue;
+      }
+      copy.copyFrom(dir, name, name, IOContext.DEFAULT);
+      copy.sync(Collections.singleton(name));
+    }
+    return copy;
+  }
+
   @BeforeClass
   public static void beforeClass() throws Exception {
     // in some runs, test immediate adjacency of matches - in others, force a full bucket gap between docs
     NUM_FILLER_DOCS = random().nextBoolean() ? 0 : BooleanScorer.SIZE;
     PRE_FILLER_DOCS = TestUtil.nextInt(random(), 0, (NUM_FILLER_DOCS / 2));
+    if (VERBOSE) {
+      System.out.println("TEST: NUM_FILLER_DOCS=" + NUM_FILLER_DOCS + " PRE_FILLER_DOCS=" + PRE_FILLER_DOCS);
+    }
 
     if (NUM_FILLER_DOCS * PRE_FILLER_DOCS > 100000) {
       directory = newFSDirectory(createTempDir());
     } else {
       directory = newDirectory();
     }
-    
-    RandomIndexWriter writer= new RandomIndexWriter(random(), directory, newIndexWriterConfig(new MockAnalyzer(random())).setMergePolicy(newLogMergePolicy()));
+
+    IndexWriterConfig iwc = newIndexWriterConfig(new MockAnalyzer(random()));
+    // randomized codecs are sometimes too costly for this test:
+    iwc.setCodec(Codec.forName("Lucene80"));
+    iwc.setMergePolicy(newLogMergePolicy());
+    RandomIndexWriter writer= new RandomIndexWriter(random(), directory, iwc);
     // we'll make a ton of docs, disable store/norms/vectors
     FieldType ft = new FieldType(TextField.TYPE_NOT_STORED);
     ft.setOmitNorms(true);
@@ -118,18 +138,20 @@ public class TestBoolean2 extends LuceneTestCase {
       singleSegmentDirectory.sync(Collections.singleton(fileName));
     }
     
-    IndexWriterConfig iwc = newIndexWriterConfig(new MockAnalyzer(random()));
+    iwc = newIndexWriterConfig(new MockAnalyzer(random()));
     // we need docID order to be preserved:
+    // randomized codecs are sometimes too costly for this test:
+    iwc.setCodec(Codec.forName("Lucene80"));
     iwc.setMergePolicy(newLogMergePolicy());
     try (IndexWriter w = new IndexWriter(singleSegmentDirectory, iwc)) {
       w.forceMerge(1, true);
     }
     singleSegmentReader = DirectoryReader.open(singleSegmentDirectory);
     singleSegmentSearcher = newSearcher(singleSegmentReader);
-    singleSegmentSearcher.setSimilarity(searcher.getSimilarity(true));
+    singleSegmentSearcher.setSimilarity(searcher.getSimilarity());
     
     // Make big index
-    dir2 = new MockDirectoryWrapper(random(), TestUtil.ramCopyOf(directory));
+    dir2 = copyOf(directory);
 
     // First multiply small test index:
     mulFactor = 1;
@@ -141,17 +163,25 @@ public class TestBoolean2 extends LuceneTestCase {
       if (VERBOSE) {
         System.out.println("\nTEST: cycle...");
       }
-      final Directory copy = new MockDirectoryWrapper(random(), TestUtil.ramCopyOf(dir2));
-      RandomIndexWriter w = new RandomIndexWriter(random(), dir2);
+      final Directory copy = copyOf(dir2);
+
+      iwc = newIndexWriterConfig(new MockAnalyzer(random()));
+      // randomized codecs are sometimes too costly for this test:
+      iwc.setCodec(Codec.forName("Lucene80"));
+      RandomIndexWriter w = new RandomIndexWriter(random(), dir2, iwc);
       w.addIndexes(copy);
-      docCount = w.maxDoc();
+      copy.close();
+      docCount = w.getDocStats().maxDoc;
       w.close();
       mulFactor *= 2;
     } while(docCount < 3000 * NUM_FILLER_DOCS);
 
-    RandomIndexWriter w = new RandomIndexWriter(random(), dir2, 
-        newIndexWriterConfig(new MockAnalyzer(random()))
-        .setMaxBufferedDocs(TestUtil.nextInt(random(), 50, 1000)));
+    iwc = newIndexWriterConfig(new MockAnalyzer(random()));
+    iwc.setMaxBufferedDocs(TestUtil.nextInt(random(), 50, 1000));
+    // randomized codecs are sometimes too costly for this test:
+    iwc.setCodec(Codec.forName("Lucene80"));
+    RandomIndexWriter w = new RandomIndexWriter(random(), dir2, iwc);
+
     doc = new Document();
     doc.add(new Field("field2", "xxx", ft));
     for(int i=0;i<NUM_EXTRA_DOCS/2;i++) {
@@ -197,7 +227,7 @@ public class TestBoolean2 extends LuceneTestCase {
 
     // adjust the expected doc numbers according to our filler docs
     if (0 < NUM_FILLER_DOCS) {
-      expDocNrs = Arrays.copyOf(expDocNrs, expDocNrs.length);
+      expDocNrs = ArrayUtil.copyOfSubArray(expDocNrs, 0, expDocNrs.length);
       for (int i=0; i < expDocNrs.length; i++) {
         expDocNrs[i] = PRE_FILLER_DOCS + ((NUM_FILLER_DOCS + 1) * expDocNrs[i]);
       }
@@ -207,10 +237,10 @@ public class TestBoolean2 extends LuceneTestCase {
     // The asserting searcher will sometimes return the bulk scorer and
     // sometimes return a default impl around the scorer so that we can
     // compare BS1 and BS2
-    TopScoreDocCollector collector = TopScoreDocCollector.create(topDocsToCheck);
+    TopScoreDocCollector collector = TopScoreDocCollector.create(topDocsToCheck, Integer.MAX_VALUE);
     searcher.search(query, collector);
     ScoreDoc[] hits1 = collector.topDocs().scoreDocs;
-    collector = TopScoreDocCollector.create(topDocsToCheck);
+    collector = TopScoreDocCollector.create(topDocsToCheck, Integer.MAX_VALUE);
     searcher.search(query, collector);
     ScoreDoc[] hits2 = collector.topDocs().scoreDocs; 
 
@@ -218,20 +248,20 @@ public class TestBoolean2 extends LuceneTestCase {
 
     // Since we have no deleted docs, we should also be able to verify identical matches &
     // scores against an single segment copy of our index
-    collector = TopScoreDocCollector.create(topDocsToCheck);
+    collector = TopScoreDocCollector.create(topDocsToCheck, Integer.MAX_VALUE);
     singleSegmentSearcher.search(query, collector);
     hits2 = collector.topDocs().scoreDocs; 
     CheckHits.checkHitsQuery(query, hits1, hits2, expDocNrs);
     
     // sanity check expected num matches in bigSearcher
     assertEquals(mulFactor * collector.totalHits,
-                 bigSearcher.search(query, 1).totalHits);
+                 bigSearcher.count(query));
 
     // now check 2 diff scorers from the bigSearcher as well
-    collector = TopScoreDocCollector.create(topDocsToCheck);
+    collector = TopScoreDocCollector.create(topDocsToCheck, Integer.MAX_VALUE);
     bigSearcher.search(query, collector);
     hits1 = collector.topDocs().scoreDocs;
-    collector = TopScoreDocCollector.create(topDocsToCheck);
+    collector = TopScoreDocCollector.create(topDocsToCheck, Integer.MAX_VALUE);
     bigSearcher.search(query, collector);
     hits2 = collector.topDocs().scoreDocs; 
 
@@ -349,17 +379,17 @@ public class TestBoolean2 extends LuceneTestCase {
         QueryUtils.check(random(), q1,searcher); // baseline sim
         try {
           // a little hackish, QueryUtils.check is too costly to do on bigSearcher in this loop.
-          searcher.setSimilarity(bigSearcher.getSimilarity(true)); // random sim
+          searcher.setSimilarity(bigSearcher.getSimilarity()); // random sim
           QueryUtils.check(random(), q1, searcher);
         } finally {
           searcher.setSimilarity(new ClassicSimilarity()); // restore
         }
 
         // check diff (randomized) scorers (from AssertingSearcher) produce the same results
-        TopFieldCollector collector = TopFieldCollector.create(sort, 1000, false, true, true);
+        TopFieldCollector collector = TopFieldCollector.create(sort, 1000, 1);
         searcher.search(q1, collector);
         ScoreDoc[] hits1 = collector.topDocs().scoreDocs;
-        collector = TopFieldCollector.create(sort, 1000, false, true, true);
+        collector = TopFieldCollector.create(sort, 1000, 1);
         searcher.search(q1, collector);
         ScoreDoc[] hits2 = collector.topDocs().scoreDocs;
         tot+=hits2.length;
@@ -368,14 +398,13 @@ public class TestBoolean2 extends LuceneTestCase {
         BooleanQuery.Builder q3 = new BooleanQuery.Builder();
         q3.add(q1, BooleanClause.Occur.SHOULD);
         q3.add(new PrefixQuery(new Term("field2", "b")), BooleanClause.Occur.SHOULD);
-        TopDocs hits4 = bigSearcher.search(q3.build(), 1);
-        assertEquals(mulFactor*collector.totalHits + NUM_EXTRA_DOCS/2, hits4.totalHits);
+        assertEquals(mulFactor*collector.totalHits + NUM_EXTRA_DOCS/2, bigSearcher.count(q3.build()));
 
         // test diff (randomized) scorers produce the same results on bigSearcher as well
-        collector = TopFieldCollector.create(sort, 1000 * mulFactor, false, true, true);
+        collector = TopFieldCollector.create(sort, 1000 * mulFactor, 1);
         bigSearcher.search(q1, collector);
         hits1 = collector.topDocs().scoreDocs;
-        collector = TopFieldCollector.create(sort, 1000 * mulFactor, false, true, true);
+        collector = TopFieldCollector.create(sort, 1000 * mulFactor, 1);
         bigSearcher.search(q1, collector);
         hits2 = collector.topDocs().scoreDocs;
         CheckHits.checkEqual(q1, hits1, hits2);

@@ -28,9 +28,7 @@ import org.apache.lucene.index.TermsEnum;
 import org.apache.lucene.util.BytesRef;
 import org.apache.solr.SolrTestCaseJ4;
 import org.apache.solr.common.params.FacetParams;
-import org.apache.solr.search.SolrIndexSearcher;
 import org.apache.solr.uninverting.DocTermOrds;
-import org.apache.solr.util.RefCounted;
 import org.junit.After;
 import org.junit.BeforeClass;
 import org.junit.Test;
@@ -41,6 +39,8 @@ import org.junit.Test;
 public class TestFaceting extends SolrTestCaseJ4 {
   @BeforeClass
   public static void beforeClass() throws Exception {
+    // we need DVs on point fields to compute stats & facets
+    if (Boolean.getBoolean(NUMERIC_POINTS_SYSPROP)) System.setProperty(NUMERIC_DOCVALUES_SYSPROP,"true");
     initCore("solrconfig.xml","schema11.xml");
   }
 
@@ -64,7 +64,7 @@ public class TestFaceting extends SolrTestCaseJ4 {
   void createIndex(int nTerms) {
     assertU(delQ("*:*"));
     for (int i=0; i<nTerms; i++) {
-      assertU(adoc("id", Float.toString(i), proto.field(), t(i) ));
+      assertU(adoc("id", Integer.toString(i), proto.field(), t(i) ));
     }
     assertU(optimize()); // squeeze out any possible deleted docs
   }
@@ -82,7 +82,7 @@ public class TestFaceting extends SolrTestCaseJ4 {
     createIndex(size);
     req = lrf.makeRequest("q","*:*");
 
-    SortedSetDocValues dv = DocValues.getSortedSet(req.getSearcher().getLeafReader(), proto.field());
+    SortedSetDocValues dv = DocValues.getSortedSet(req.getSearcher().getSlowAtomicReader(), proto.field());
 
     assertEquals(size, dv.getValueCount());
 
@@ -269,6 +269,9 @@ public class TestFaceting extends SolrTestCaseJ4 {
 
   @Test
   public void testTrieFields() {
+    assumeFalse("Test is only relevant when randomizing Trie fields",
+                Boolean.getBoolean(NUMERIC_POINTS_SYSPROP));
+           
     // make sure that terms are correctly filtered even for trie fields that index several
     // terms for a single value
     List<String> fields = new ArrayList<>();
@@ -286,9 +289,10 @@ public class TestFaceting extends SolrTestCaseJ4 {
         for (String facetSort : new String[] {FacetParams.FACET_SORT_COUNT, FacetParams.FACET_SORT_INDEX}) {
           for (String value : new String[] {"42", "43"}) { // match or not
             final String field = "f_" + suffix;
+            final int num_constraints = ("42".equals(value)) ? 1 : 0;
             assertQ("field=" + field + ",method=" + facetMethod + ",sort=" + facetSort,
-                req("q", field + ":" + value, FacetParams.FACET, "true", FacetParams.FACET_FIELD, field, FacetParams.FACET_MINCOUNT, "0", FacetParams.FACET_SORT, facetSort, FacetParams.FACET_METHOD, facetMethod),
-                "*[count(//lst[@name='" + field + "']/int)=1]"); // exactly 1 facet count
+                req("q", field + ":" + value, FacetParams.FACET, "true", FacetParams.FACET_FIELD, field, FacetParams.FACET_MINCOUNT, "1", FacetParams.FACET_SORT, facetSort, FacetParams.FACET_METHOD, facetMethod),
+                "*[count(//lst[@name='" + field + "']/int)="+num_constraints+"]");
           }
         }
       }
@@ -297,9 +301,9 @@ public class TestFaceting extends SolrTestCaseJ4 {
 
   @Test
   public void testFacetSortWithMinCount() {
-    assertU(adoc("id", "1.0", "f_td", "-420.126"));
-    assertU(adoc("id", "2.0", "f_td", "-285.672"));
-    assertU(adoc("id", "3.0", "f_td", "-1.218"));
+    assertU(adoc("id", "1", "f_td", "-420.126"));
+    assertU(adoc("id", "2", "f_td", "-285.672"));
+    assertU(adoc("id", "3", "f_td", "-1.218"));
     assertU(commit());
 
     assertQ(req("q", "*:*", FacetParams.FACET, "true", FacetParams.FACET_FIELD, "f_td", "f.f_td.facet.sort", FacetParams.FACET_SORT_INDEX),
@@ -329,9 +333,12 @@ public class TestFaceting extends SolrTestCaseJ4 {
 
   @Test
   public void testFacetSortWithMinCount0() {
-    assertU(adoc("id", "1.0", "f_td", "-420.126"));
-    assertU(adoc("id", "2.0", "f_td", "-285.672"));
-    assertU(adoc("id", "3.0", "f_td", "-1.218"));
+    assumeFalse("facet.mincount=0 doesn't work with point fields (SOLR-11174) or single valued DV",
+                Boolean.getBoolean(NUMERIC_POINTS_SYSPROP) || Boolean.getBoolean(NUMERIC_DOCVALUES_SYSPROP));
+    
+    assertU(adoc("id", "1", "f_td", "-420.126"));
+    assertU(adoc("id", "2", "f_td", "-285.672"));
+    assertU(adoc("id", "3", "f_td", "-1.218"));
     assertU(commit());
 
     assertQ(req("q", "id:1.0", FacetParams.FACET, "true", FacetParams.FACET_FIELD, "f_td", "f.f_td.facet.sort", FacetParams.FACET_SORT_INDEX, FacetParams.FACET_MINCOUNT, "0", FacetParams.FACET_METHOD, FacetParams.FACET_METHOD_fc),
@@ -347,8 +354,28 @@ public class TestFaceting extends SolrTestCaseJ4 {
         "//lst[@name='facet_fields']/lst[@name='f_td']/int[3][@name='-1.218']");
   }
 
+  @Test
+  public void testFacetOverPointFieldWithMinCount0() {
+    String field = "f_" + new String[]{"i","l","f","d"}[random().nextInt(4)] + "_p";
+    String expectedWarning = "Raising facet.mincount from 0 to 1, because field " + field + " is Points-based.";
+    SolrQueryRequest req = req("q", "id:1.0",
+        FacetParams.FACET, "true",
+        FacetParams.FACET_FIELD, field,
+        FacetParams.FACET_MINCOUNT, "0");
+    assertQ(req
+        , "/response/lst[@name='responseHeader']/arr[@name='warnings']/str[.='" + expectedWarning + "']");
+    
+    field = "f_" + new String[]{"is","ls","fs","ds"}[random().nextInt(4)] + "_p";
+    expectedWarning = "Raising facet.mincount from 0 to 1, because field " + field + " is Points-based.";
+    req = req("q", "id:1.0",
+        FacetParams.FACET, "true",
+        FacetParams.FACET_FIELD, field,
+        FacetParams.FACET_MINCOUNT, "0");
+    assertQ(req
+        , "/response/lst[@name='responseHeader']/arr[@name='warnings']/str[.='" + expectedWarning + "']");
+  }
 
-    public void testSimpleFacetCountsWithMultipleConfigurationsForSameField() {
+  public void testSimpleFacetCountsWithMultipleConfigurationsForSameField() {
       clearIndex();
       String fname = "trait_ss";
       assertU(adoc("id", "42",
@@ -709,19 +736,18 @@ public class TestFaceting extends SolrTestCaseJ4 {
 
     );
 
-    RefCounted<SolrIndexSearcher> currentSearcherRef = h.getCore().getSearcher();
-    try {
-      SolrIndexSearcher currentSearcher = currentSearcherRef.get();
-      SortedSetDocValues ui0 = DocValues.getSortedSet(currentSearcher.getLeafReader(), "f0_ws");
-      SortedSetDocValues ui1 = DocValues.getSortedSet(currentSearcher.getLeafReader(), "f1_ws");
-      SortedSetDocValues ui2 = DocValues.getSortedSet(currentSearcher.getLeafReader(), "f2_ws");
-      SortedSetDocValues ui3 = DocValues.getSortedSet(currentSearcher.getLeafReader(), "f3_ws");
-      SortedSetDocValues ui4 = DocValues.getSortedSet(currentSearcher.getLeafReader(), "f4_ws");
-      SortedSetDocValues ui5 = DocValues.getSortedSet(currentSearcher.getLeafReader(), "f5_ws");
-      SortedSetDocValues ui6 = DocValues.getSortedSet(currentSearcher.getLeafReader(), "f6_ws");
-      SortedSetDocValues ui7 = DocValues.getSortedSet(currentSearcher.getLeafReader(), "f7_ws");
-      SortedSetDocValues ui8 = DocValues.getSortedSet(currentSearcher.getLeafReader(), "f8_ws");
-      SortedSetDocValues ui9 = DocValues.getSortedSet(currentSearcher.getLeafReader(), "f9_ws");
+    h.getCore().withSearcher(currentSearcher -> {
+
+      SortedSetDocValues ui0 = DocValues.getSortedSet(currentSearcher.getSlowAtomicReader(), "f0_ws");
+      SortedSetDocValues ui1 = DocValues.getSortedSet(currentSearcher.getSlowAtomicReader(), "f1_ws");
+      SortedSetDocValues ui2 = DocValues.getSortedSet(currentSearcher.getSlowAtomicReader(), "f2_ws");
+      SortedSetDocValues ui3 = DocValues.getSortedSet(currentSearcher.getSlowAtomicReader(), "f3_ws");
+      SortedSetDocValues ui4 = DocValues.getSortedSet(currentSearcher.getSlowAtomicReader(), "f4_ws");
+      SortedSetDocValues ui5 = DocValues.getSortedSet(currentSearcher.getSlowAtomicReader(), "f5_ws");
+      SortedSetDocValues ui6 = DocValues.getSortedSet(currentSearcher.getSlowAtomicReader(), "f6_ws");
+      SortedSetDocValues ui7 = DocValues.getSortedSet(currentSearcher.getSlowAtomicReader(), "f7_ws");
+      SortedSetDocValues ui8 = DocValues.getSortedSet(currentSearcher.getSlowAtomicReader(), "f8_ws");
+      SortedSetDocValues ui9 = DocValues.getSortedSet(currentSearcher.getSlowAtomicReader(), "f9_ws");
 
       assertQ("check threading, more threads than fields",
           req(methodParam
@@ -871,9 +897,39 @@ public class TestFaceting extends SolrTestCaseJ4 {
           , "*[count(//lst[@name='facet_fields']/lst)=10]"
           , "*[count(//lst[@name='facet_fields']/lst/int)=20]"
       );
-    } finally {
-      currentSearcherRef.decref();
-    }
+      return null;
+    });
+  }
+
+  @Test
+  public void testListedTermCounts() throws Exception {
+    assertU(adoc("id", "1", "title_ws", "Book1"));
+    assertU(adoc("id", "2", "title_ws", "Book2"));
+    assertU(adoc("id", "3", "title_ws", "Book3"));
+    assertU(adoc("id", "4", "title_ws", "Book2"));
+    assertU(adoc("id", "5", "title_ws", "Book1"));
+    assertU(adoc("id", "6", "title_ws", "Book2"));
+    assertU(commit());
+
+    // order is the same as in facet.field, when no facet.sort specified
+    assertQ(req("q", "*:*", FacetParams.FACET, "true", FacetParams.FACET_FIELD, "{!terms=Book3,Book2,Book1}title_ws"),
+        "//lst[@name='facet_fields']/lst[@name='title_ws']/int[1][@name='Book3']",
+        "//lst[@name='facet_fields']/lst[@name='title_ws']/int[2][@name='Book2']",
+        "//lst[@name='facet_fields']/lst[@name='title_ws']/int[3][@name='Book1']");
+
+    // order is by counts, when facet.sort by count specified
+    assertQ(req("q", "*:*", FacetParams.FACET, "true", FacetParams.FACET_FIELD, "{!terms=Book3,Book2,Book1}title_ws",
+            "facet.sort", FacetParams.FACET_SORT_COUNT),
+        "//lst[@name='facet_fields']/lst[@name='title_ws']/int[1][@name='Book2']",
+        "//lst[@name='facet_fields']/lst[@name='title_ws']/int[2][@name='Book1']",
+        "//lst[@name='facet_fields']/lst[@name='title_ws']/int[3][@name='Book3']");
+
+    // order is by index, when facet.sort by index specified
+    assertQ(req("q", "*:*", FacetParams.FACET, "true", FacetParams.FACET_FIELD, "{!terms=Book3,Book2,Book1}title_ws",
+            "facet.sort", FacetParams.FACET_SORT_INDEX),
+        "//lst[@name='facet_fields']/lst[@name='title_ws']/int[1][@name='Book1']",
+        "//lst[@name='facet_fields']/lst[@name='title_ws']/int[2][@name='Book2']",
+        "//lst[@name='facet_fields']/lst[@name='title_ws']/int[3][@name='Book3']");
   }
 }
 

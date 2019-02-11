@@ -101,11 +101,16 @@ class SortedSetDocValuesTermsEnum extends TermsEnum {
 
   @Override
   public long totalTermFreq() {
-    return -1;
+    throw new UnsupportedOperationException();
   }
 
   @Override
   public PostingsEnum postings(PostingsEnum reuse, int flags) throws IOException {
+    throw new UnsupportedOperationException();
+  }
+
+  @Override
+  public ImpactsEnum impacts(int flags) throws IOException {
     throw new UnsupportedOperationException();
   }
 

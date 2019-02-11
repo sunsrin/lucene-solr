@@ -19,11 +19,9 @@ package org.apache.solr.search.join;
 import java.io.IOException;
 
 import org.apache.lucene.index.LeafReaderContext;
-import org.apache.lucene.search.join.ToParentBlockJoinQuery.ChildrenMatchesScorer;
 import org.apache.solr.common.util.NamedList;
 import org.apache.solr.request.SolrQueryRequest;
 import org.apache.solr.search.join.BlockJoinFieldFacetAccumulator.AggregatableDocIter;
-import org.apache.solr.search.join.BlockJoinFieldFacetAccumulator.SortedIntsAggDocIterator;
 
 /**
  * For each collected parent document creates matched block, which is a docSet with matched children and parent doc
@@ -32,8 +30,6 @@ import org.apache.solr.search.join.BlockJoinFieldFacetAccumulator.SortedIntsAggD
 class BlockJoinFacetAccsHolder {
   private BlockJoinFieldFacetAccumulator[] blockJoinFieldFacetAccumulators;
   private boolean firstSegment = true;
-  private ChildrenMatchesScorer blockJoinScorer;
-  private int[] childDocs = new int[0];
   
   BlockJoinFacetAccsHolder(SolrQueryRequest req) throws IOException {
     String[] facetFieldNames = BlockJoinFacetComponentSupport.getChildFacetFields(req);
@@ -61,16 +57,6 @@ class BlockJoinFacetAccsHolder {
     }
   }
 
-  protected void incrementFacets(int parent) throws IOException {
-    final int[] docNums = blockJoinScorer.swapChildDocs(childDocs);
-    // now we don't
-    //includeParentDoc(parent);
-    //final int childCountPlusParent = childTracking.getChildCount()+1;
-    final int childCountNoParent = blockJoinScorer.getChildCount();
-    final SortedIntsAggDocIterator iter = new SortedIntsAggDocIterator(docNums, childCountNoParent, parent);
-    countFacets(iter);
-  }
-
   /** is not used 
   protected int[] includeParentDoc(int parent) {
     final int[] docNums = ArrayUtil.grow(childTracking.getChildDocs(), childTracking.getChildCount()+1);
@@ -85,7 +71,7 @@ class BlockJoinFacetAccsHolder {
     }
   }
   
-  NamedList getFacets() {
+  NamedList getFacets() throws IOException {
     NamedList<NamedList<Integer>> facets = new NamedList<>(blockJoinFieldFacetAccumulators.length);
     for (BlockJoinFieldFacetAccumulator state : blockJoinFieldFacetAccumulators) {
       facets.add(state.getFieldName(), state.getFacetValue());

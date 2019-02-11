@@ -18,11 +18,14 @@ package org.apache.lucene.index;
 
 
 import java.io.PrintStream;
+import java.util.Arrays;
 import java.util.EnumSet;
+import java.util.stream.Collectors;
 
 import org.apache.lucene.analysis.Analyzer;
 import org.apache.lucene.analysis.standard.StandardAnalyzer;
 import org.apache.lucene.codecs.Codec;
+import org.apache.lucene.document.Field;
 import org.apache.lucene.index.IndexWriter.IndexReaderWarmer;
 import org.apache.lucene.search.Sort;
 import org.apache.lucene.search.SortField;
@@ -30,6 +33,7 @@ import org.apache.lucene.search.similarities.Similarity;
 import org.apache.lucene.util.InfoStream;
 import org.apache.lucene.util.PrintStreamInfoStream;
 import org.apache.lucene.util.SetOnce.AlreadySetException;
+import org.apache.lucene.util.Version;
 import org.apache.lucene.util.SetOnce;
 
 /**
@@ -89,8 +93,12 @@ public final class IndexWriterConfig extends LiveIndexWriterConfig {
    */
   public final static double DEFAULT_RAM_BUFFER_SIZE_MB = 16.0;
 
-  /** Default setting for {@link #setReaderPooling}. */
-  public final static boolean DEFAULT_READER_POOLING = false;
+  /** Default setting (true) for {@link #setReaderPooling}. */
+  // We changed this default to true with concurrent deletes/updates (LUCENE-7868),
+  // because we will otherwise need to open and close segment readers more frequently.
+  // False is still supported, but will have worse performance since readers will
+  // be forced to aggressively move all state to disk.
+  public final static boolean DEFAULT_READER_POOLING = true;
 
   /** Default value is 1945. Change using {@link #setRAMPerThreadHardLimitMB(int)} */
   public static final int DEFAULT_RAM_PER_THREAD_HARD_LIMIT_MB = 1945;
@@ -163,6 +171,35 @@ public final class IndexWriterConfig extends LiveIndexWriterConfig {
   @Override
   public OpenMode getOpenMode() {
     return openMode;
+  }
+
+  /**
+   * Expert: set the compatibility version to use for this index. In case the
+   * index is created, it will use the given major version for compatibility.
+   * It is sometimes useful to set the previous major version for compatibility
+   * due to the fact that {@link IndexWriter#addIndexes} only accepts indices
+   * that have been written with the same major version as the current index.
+   * If the index already exists, then this value is ignored.
+   * Default value is the {@link Version#major major} of the
+   * {@link Version#LATEST latest version}.
+   * <p><b>NOTE</b>: Changing the creation version reduces backward
+   * compatibility guarantees. For instance an index created with Lucene 8 with
+   * a compatibility version of 7 can't be read with Lucene 9 due to the fact
+   * that Lucene only supports reading indices created with the current or
+   * previous major release.
+   * @param indexCreatedVersionMajor the major version to use for compatibility
+   */
+  public IndexWriterConfig setIndexCreatedVersionMajor(int indexCreatedVersionMajor) {
+    if (indexCreatedVersionMajor > Version.LATEST.major) {
+      throw new IllegalArgumentException("indexCreatedVersionMajor may not be in the future: current major version is " +
+          Version.LATEST.major + ", but got: " + indexCreatedVersionMajor);
+    }
+    if (indexCreatedVersionMajor < Version.LATEST.major - 1) {
+      throw new IllegalArgumentException("indexCreatedVersionMajor may not be less than the minimum supported version: " +
+          (Version.LATEST.major-1) + ", but got: " + indexCreatedVersionMajor);
+    }
+    this.createdVersionMajor = indexCreatedVersionMajor;
+    return this;
   }
 
   /**
@@ -321,7 +358,6 @@ public final class IndexWriterConfig extends LiveIndexWriterConfig {
    * Expert: Controls when segments are flushed to disk during indexing.
    * The {@link FlushPolicy} initialized during {@link IndexWriter} instantiation and once initialized
    * the given instance is bound to this {@link IndexWriter} and should not be used with another writer.
-   * @see #setMaxBufferedDeleteTerms(int)
    * @see #setMaxBufferedDocs(int)
    * @see #setRAMBufferSizeMB(double)
    */
@@ -373,11 +409,6 @@ public final class IndexWriterConfig extends LiveIndexWriterConfig {
   }
   
   @Override
-  public int getMaxBufferedDeleteTerms() {
-    return super.getMaxBufferedDeleteTerms();
-  }
-  
-  @Override
   public int getMaxBufferedDocs() {
     return super.getMaxBufferedDocs();
   }
@@ -423,11 +454,6 @@ public final class IndexWriterConfig extends LiveIndexWriterConfig {
   }
   
   @Override
-  public IndexWriterConfig setMaxBufferedDeleteTerms(int maxBufferedDeleteTerms) {
-    return (IndexWriterConfig) super.setMaxBufferedDeleteTerms(maxBufferedDeleteTerms);
-  }
-  
-  @Override
   public IndexWriterConfig setMaxBufferedDocs(int maxBufferedDocs) {
     return (IndexWriterConfig) super.setMaxBufferedDocs(maxBufferedDocs);
   }
@@ -464,15 +490,17 @@ public final class IndexWriterConfig extends LiveIndexWriterConfig {
                                                                                      SortField.Type.FLOAT);
 
   /**
-   * Set the {@link Sort} order to use when merging segments.  Note that newly flushed segments will remain unsorted.
+   * Set the {@link Sort} order to use for all (flushed and merged) segments.
    */
   public IndexWriterConfig setIndexSort(Sort sort) {
     for(SortField sortField : sort.getSort()) {
-      if (ALLOWED_INDEX_SORT_TYPES.contains(sortField.getType()) == false) {
+      final SortField.Type sortType = Sorter.getSortFieldType(sortField);
+      if (ALLOWED_INDEX_SORT_TYPES.contains(sortType) == false) {
         throw new IllegalArgumentException("invalid SortField type: must be one of " + ALLOWED_INDEX_SORT_TYPES + " but got: " + sortField);
       }
     }
     this.indexSort = sort;
+    this.indexSortFields = Arrays.stream(sort.getSort()).map(SortField::getField).collect(Collectors.toSet());
     return this;
   }
 
@@ -481,6 +509,39 @@ public final class IndexWriterConfig extends LiveIndexWriterConfig {
     StringBuilder sb = new StringBuilder(super.toString());
     sb.append("writer=").append(writer.get()).append("\n");
     return sb.toString();
+  }
+
+  @Override
+  public IndexWriterConfig setCheckPendingFlushUpdate(boolean checkPendingFlushOnUpdate) {
+    return (IndexWriterConfig) super.setCheckPendingFlushUpdate(checkPendingFlushOnUpdate);
+  }
+
+  /**
+   * Sets the soft deletes field. A soft delete field in lucene is a doc-values field that marks a document as soft-deleted if a
+   * document has at least one value in that field. If a document is marked as soft-deleted the document is treated as
+   * if it has been hard-deleted through the IndexWriter API ({@link IndexWriter#deleteDocuments(Term...)}.
+   * Merges will reclaim soft-deleted as well as hard-deleted documents and index readers obtained from the IndexWriter
+   * will reflect all deleted documents in it's live docs. If soft-deletes are used documents must be indexed via
+   * {@link IndexWriter#softUpdateDocument(Term, Iterable, Field...)}. Deletes are applied via
+   * {@link IndexWriter#updateDocValues(Term, Field...)}.
+   *
+   * Soft deletes allow to retain documents across merges if the merge policy modifies the live docs of a merge reader.
+   * {@link SoftDeletesRetentionMergePolicy} for instance allows to specify an arbitrary query to mark all documents
+   * that should survive the merge. This can be used to for example keep all document modifications for a certain time
+   * interval or the last N operations if some kind of sequence ID is available in the index.
+   *
+   * Currently there is no API support to un-delete a soft-deleted document. In oder to un-delete the document must be
+   * re-indexed using {@link IndexWriter#softUpdateDocument(Term, Iterable, Field...)}.
+   *
+   * The default value for this is <code>null</code> which disables soft-deletes. If soft-deletes are enabled documents
+   * can still be hard-deleted. Hard-deleted documents will won't considered as soft-deleted even if they have
+   * a value in the soft-deletes field.
+   *
+   * @see #getSoftDeletesField()
+   */
+  public IndexWriterConfig setSoftDeletesField(String softDeletesField) {
+    this.softDeletesField = softDeletesField;
+    return this;
   }
   
 }

@@ -26,6 +26,7 @@ import java.util.TreeMap;
 
 import org.apache.solr.client.solrj.SolrClient;
 import org.apache.solr.client.solrj.beans.DocumentObjectBinder;
+import org.apache.solr.client.solrj.response.json.NestableJsonFacet;
 import org.apache.solr.common.SolrDocumentList;
 import org.apache.solr.common.params.CursorMarkParams;
 import org.apache.solr.common.util.NamedList;
@@ -48,9 +49,11 @@ public class QueryResponse extends SolrResponseBase
   private NamedList<Object> _highlightingInfo = null;
   private NamedList<Object> _spellInfo = null;
   private List<NamedList<Object>> _clusterInfo = null;
+  private NamedList<Object> _jsonFacetingInfo = null;
   private Map<String,NamedList<Object>> _suggestInfo = null;
   private NamedList<Object> _statsInfo = null;
-  private NamedList<NamedList<Number>> _termsInfo = null;
+  private NamedList<NamedList<Object>> _termsInfo = null;
+  private NamedList<SolrDocumentList> _moreLikeThisInfo = null;
   private String _cursorMarkNext = null;
 
   // Grouping response
@@ -77,6 +80,9 @@ public class QueryResponse extends SolrResponseBase
 
   // Clustering Response
   private ClusteringResponse _clusterResponse = null;
+
+  // Json Faceting Response
+  private NestableJsonFacet _jsonFacetingResponse = null;
 
   // Suggester Response
   private SuggesterResponse _suggestResponse = null;
@@ -156,6 +162,10 @@ public class QueryResponse extends SolrResponseBase
         _clusterInfo = (ArrayList<NamedList<Object>>) res.getVal(i);
         extractClusteringInfo(_clusterInfo);
       }
+      else if ("facets".equals(n)) {
+        _jsonFacetingInfo = (NamedList<Object>) res.getVal(i);
+        // Don't call extractJsonFacetingInfo(_jsonFacetingInfo) here in an effort to do it lazily
+      }
       else if ( "suggest".equals( n ) )  {
         _suggestInfo = (Map<String,NamedList<Object>>) res.getVal( i );
         extractSuggesterInfo(_suggestInfo);
@@ -165,8 +175,11 @@ public class QueryResponse extends SolrResponseBase
         extractStatsInfo( _statsInfo );
       }
       else if ( "terms".equals( n ) ) {
-        _termsInfo = (NamedList<NamedList<Number>>) res.getVal( i );
+        _termsInfo = (NamedList<NamedList<Object>>) res.getVal( i );
         extractTermsInfo( _termsInfo );
+      }
+      else if ( "moreLikeThis".equals( n ) ) {
+        _moreLikeThisInfo = (NamedList<SolrDocumentList>) res.getVal( i );
       }
       else if ( CursorMarkParams.CURSOR_MARK_NEXT.equals( n ) ) {
         _cursorMarkNext = (String) res.getVal( i );
@@ -183,11 +196,15 @@ public class QueryResponse extends SolrResponseBase
     _clusterResponse = new ClusteringResponse(clusterInfo);
   }
 
+  private void extractJsonFacetingInfo(NamedList<Object> facetInfo) {
+    _jsonFacetingResponse = new NestableJsonFacet(facetInfo);
+  }
+
   private void extractSuggesterInfo(Map<String, NamedList<Object>> suggestInfo) {
     _suggestResponse = new SuggesterResponse(suggestInfo);
   }
 
-  private void extractTermsInfo(NamedList<NamedList<Number>> termsInfo) {
+  private void extractTermsInfo(NamedList<NamedList<Object>> termsInfo) {
     _termsResponse = new TermsResponse(termsInfo);
   }
   
@@ -380,7 +397,7 @@ public class QueryResponse extends SolrResponseBase
         Number between = (Number) values.get("between");
 
         rangeFacet = new RangeFacet.Numeric(facet.getKey(), start, end, gap, before, after, between);
-      } else {
+      } else if (rawGap instanceof String && values.get("start") instanceof Date) {
         String gap = (String) rawGap;
         Date start = (Date) values.get("start");
         Date end = (Date) values.get("end");
@@ -390,8 +407,18 @@ public class QueryResponse extends SolrResponseBase
         Number between = (Number) values.get("between");
 
         rangeFacet = new RangeFacet.Date(facet.getKey(), start, end, gap, before, after, between);
+      } else {
+        String gap = (String) rawGap;
+        String start = (String) values.get("start");
+        String end = (String) values.get("end");
+        
+        Number before = (Number) values.get("before");
+        Number after = (Number) values.get("after");
+        Number between = (Number) values.get("between");
+        
+        rangeFacet = new RangeFacet.Currency(facet.getKey(), start, end, gap, before, after, between);
       }
-
+      
       NamedList<Integer> counts = (NamedList<Integer>) values.get("counts");
       for (Map.Entry<String, Integer> entry : counts)   {
         rangeFacet.addCount(entry.getKey(), entry.getValue());
@@ -540,12 +567,21 @@ public class QueryResponse extends SolrResponseBase
     return _clusterResponse;
   }
 
+  public NestableJsonFacet getJsonFacetingResponse() {
+    if (_jsonFacetingInfo != null && _jsonFacetingResponse == null) extractJsonFacetingInfo(_jsonFacetingInfo);
+    return _jsonFacetingResponse;
+  }
+
   public SuggesterResponse getSuggesterResponse() {
     return _suggestResponse;
   }
 
   public TermsResponse getTermsResponse() {
     return _termsResponse;
+  }
+
+  public NamedList<SolrDocumentList> getMoreLikeThis() {
+    return _moreLikeThisInfo;
   }
   
   /**

@@ -49,12 +49,11 @@ import org.apache.lucene.index.IndexOptions;
 import org.apache.lucene.index.IndexReader;
 import org.apache.lucene.index.IndexWriter;
 import org.apache.lucene.index.IndexWriterConfig;
-import org.apache.lucene.index.MultiFields;
+import org.apache.lucene.index.MultiTerms;
 import org.apache.lucene.index.Terms;
 import org.apache.lucene.index.TermsEnum;
 import org.apache.lucene.search.suggest.InputIterator;
 import org.apache.lucene.search.suggest.Lookup;
-import org.apache.lucene.store.ByteArrayDataInput;
 import org.apache.lucene.store.DataInput;
 import org.apache.lucene.store.DataOutput;
 import org.apache.lucene.store.Directory;
@@ -221,50 +220,6 @@ public class FreeTextSuggester extends Lookup implements Accountable {
     }
   }
 
-  private static class AnalyzingComparator implements Comparator<BytesRef> {
-
-    private final ByteArrayDataInput readerA = new ByteArrayDataInput();
-    private final ByteArrayDataInput readerB = new ByteArrayDataInput();
-    private final BytesRef scratchA = new BytesRef();
-    private final BytesRef scratchB = new BytesRef();
-
-    @Override
-    public int compare(BytesRef a, BytesRef b) {
-      readerA.reset(a.bytes, a.offset, a.length);
-      readerB.reset(b.bytes, b.offset, b.length);
-
-      // By token:
-      scratchA.length = readerA.readShort();
-      scratchA.bytes = a.bytes;
-      scratchA.offset = readerA.getPosition();
-
-      scratchB.bytes = b.bytes;
-      scratchB.length = readerB.readShort();
-      scratchB.offset = readerB.getPosition();
-
-      int cmp = scratchA.compareTo(scratchB);
-      if (cmp != 0) {
-        return cmp;
-      }
-      readerA.skipBytes(scratchA.length);
-      readerB.skipBytes(scratchB.length);
-
-      // By length (smaller surface forms sorted first):
-      cmp = a.length - b.length;
-      if (cmp != 0) {
-        return cmp;
-      }
-
-      // By surface form:
-      scratchA.offset = readerA.getPosition();
-      scratchA.length = a.length - scratchA.offset;
-      scratchB.offset = readerB.getPosition();
-      scratchB.length = b.length - scratchB.offset;
-
-      return scratchA.compareTo(scratchB);
-    }
-  }
-
   private Analyzer addShingles(final Analyzer other) {
     if (grams == 1) {
       return other;
@@ -281,7 +236,7 @@ public class FreeTextSuggester extends Lookup implements Accountable {
         protected TokenStreamComponents wrapComponents(String fieldName, TokenStreamComponents components) {
           ShingleFilter shingles = new ShingleFilter(components.getTokenStream(), 2, grams);
           shingles.setTokenSeparator(Character.toString((char) separator));
-          return new TokenStreamComponents(components.getTokenizer(), shingles);
+          return new TokenStreamComponents(components.getSource(), shingles);
         }
       };
     }
@@ -340,7 +295,7 @@ public class FreeTextSuggester extends Lookup implements Accountable {
       }
       reader = DirectoryReader.open(writer);
 
-      Terms terms = MultiFields.getTerms(reader, "body");
+      Terms terms = MultiTerms.getTerms(reader, "body");
       if (terms == null) {
         throw new IllegalArgumentException("need at least one suggestion");
       }

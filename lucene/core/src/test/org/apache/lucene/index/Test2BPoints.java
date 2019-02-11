@@ -35,7 +35,7 @@ import com.carrotsearch.randomizedtesting.annotations.TimeoutSuite;
 // 
 //   or: python -u /l/util/src/python/repeatLuceneTest.py -heap 6g -once -nolog -tmpDir /b/tmp -logDir /l/logs Test2BPoints.test2D -verbose
 
-@SuppressCodecs({ "SimpleText", "Memory", "Direct", "Compressing" })
+@SuppressCodecs({ "SimpleText", "Direct", "Compressing" })
 @TimeoutSuite(millis = 365 * 24 * TimeUnits.HOUR) // hopefully ~1 year is long enough ;)
 @Monster("takes at least 4 hours and consumes many GB of temp disk space")
 public class Test2BPoints extends LuceneTestCase {
@@ -78,7 +78,7 @@ public class Test2BPoints extends LuceneTestCase {
     DirectoryReader r = DirectoryReader.open(w);
     IndexSearcher s = new IndexSearcher(r);
     assertEquals(numDocs, s.count(LongPoint.newRangeQuery("long", Long.MIN_VALUE, Long.MAX_VALUE)));
-    assertTrue(r.leaves().get(0).reader().getPointValues().size("long") > Integer.MAX_VALUE);
+    assertTrue(r.leaves().get(0).reader().getPointValues("long").size() > Integer.MAX_VALUE);
     r.close();
     w.close();
     System.out.println("TEST: now CheckIndex");
@@ -126,7 +126,7 @@ public class Test2BPoints extends LuceneTestCase {
     DirectoryReader r = DirectoryReader.open(w);
     IndexSearcher s = new IndexSearcher(r);
     assertEquals(numDocs, s.count(LongPoint.newRangeQuery("long", new long[] {Long.MIN_VALUE, Long.MIN_VALUE}, new long[] {Long.MAX_VALUE, Long.MAX_VALUE})));
-    assertTrue(r.leaves().get(0).reader().getPointValues().size("long") > Integer.MAX_VALUE);
+    assertTrue(r.leaves().get(0).reader().getPointValues("long").size() > Integer.MAX_VALUE);
     r.close();
     w.close();
     System.out.println("TEST: now CheckIndex");
@@ -135,6 +135,6 @@ public class Test2BPoints extends LuceneTestCase {
   }
 
   private static Codec getCodec() {
-    return Codec.forName("Lucene62");
+    return Codec.forName("Lucene80");
   }
 }

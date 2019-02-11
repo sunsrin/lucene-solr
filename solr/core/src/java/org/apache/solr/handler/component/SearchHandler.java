@@ -53,6 +53,7 @@ import org.apache.solr.util.plugin.SolrCoreAware;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import static org.apache.solr.common.params.CommonParams.DISTRIB;
 import static org.apache.solr.common.params.CommonParams.PATH;
 
 
@@ -128,7 +129,7 @@ public class SearchHandler extends RequestHandlerBase implements SolrCoreAware ,
         "First/Last components only valid if you do not declare 'components'");
 
     if (shfInfo == null) {
-      shardHandlerFactory = core.getCoreDescriptor().getCoreContainer().getShardHandlerFactory();
+      shardHandlerFactory = core.getCoreContainer().getShardHandlerFactory();
     } else {
       shardHandlerFactory = core.createInitInstance(shfInfo, ShardHandlerFactory.class, null, null);
       core.addCloseHook(new CloseHook() {
@@ -184,12 +185,12 @@ public class SearchHandler extends RequestHandlerBase implements SolrCoreAware ,
         dbgCmp = (DebugComponent) comp;
       } else {
         components.add(comp);
-        log.debug("Adding  component:"+comp);
+        log.debug("Adding  component:{}", comp);
       }
     }
     if (makeDebugLast == true && dbgCmp != null){
       components.add(dbgCmp);
-      log.debug("Adding  debug component:" + dbgCmp);
+      log.debug("Adding  debug component:{}", dbgCmp);
     }
     this.components = components;
   }
@@ -210,9 +211,9 @@ public class SearchHandler extends RequestHandlerBase implements SolrCoreAware ,
   private ShardHandler getAndPrepShardHandler(SolrQueryRequest req, ResponseBuilder rb) {
     ShardHandler shardHandler = null;
 
-    CoreContainer cc = req.getCore().getCoreDescriptor().getCoreContainer();
+    CoreContainer cc = req.getCore().getCoreContainer();
     boolean isZkAware = cc.isZooKeeperAware();
-    rb.isDistrib = req.getParams().getBool("distrib", isZkAware);
+    rb.isDistrib = req.getParams().getBool(DISTRIB, isZkAware);
     if (!rb.isDistrib) {
       // for back compat, a shards param with URLs like localhost:8983/solr will mean that this
       // search is distributed.
@@ -228,16 +229,19 @@ public class SearchHandler extends RequestHandlerBase implements SolrCoreAware ,
       }
     }
 
-    if(isZkAware) {
+    if (isZkAware) {
+      String shardsTolerant = req.getParams().get(ShardParams.SHARDS_TOLERANT);
+      boolean requireZkConnected = shardsTolerant != null && shardsTolerant.equals(ShardParams.REQUIRE_ZK_CONNECTED);
       ZkController zkController = cc.getZkController();
-      NamedList<Object> headers = rb.rsp.getResponseHeader();
-      if(headers != null) {
-        headers.add("zkConnected", 
-            zkController != null 
-          ? !zkController.getZkClient().getConnectionManager().isLikelyExpired() 
-          : false);
+      boolean zkConnected = zkController != null && ! zkController.getZkClient().getConnectionManager().isLikelyExpired();
+      if (requireZkConnected && false == zkConnected) {
+        throw new SolrException(SolrException.ErrorCode.SERVER_ERROR, "ZooKeeper is not connected");
+      } else {
+        NamedList<Object> headers = rb.rsp.getResponseHeader();
+        if (headers != null) {
+          headers.add("zkConnected", zkConnected);
+        }
       }
-      
     }
 
     return shardHandler;
@@ -361,7 +365,7 @@ public class SearchHandler extends RequestHandlerBase implements SolrCoreAware ,
             for (String shard : sreq.actualShards) {
               ModifiableSolrParams params = new ModifiableSolrParams(sreq.params);
               params.remove(ShardParams.SHARDS);      // not a top-level request
-              params.set(CommonParams.DISTRIB, "false");               // not a top-level request
+              params.set(DISTRIB, "false");               // not a top-level request
               params.remove("indent");
               params.remove(CommonParams.HEADER_ECHO_PARAMS);
               params.set(ShardParams.IS_SHARD, true);  // a sub (shard) request
@@ -383,7 +387,7 @@ public class SearchHandler extends RequestHandlerBase implements SolrCoreAware ,
                   params.set(CommonParams.QT, reqPath);
                 } // else if path is /select, then the qt gets passed thru if set
               }
-              shardHandler1.submit(sreq, shard, params, rb.preferredHostAddress);
+              shardHandler1.submit(sreq, shard, params);
             }
           }
 
@@ -391,7 +395,7 @@ public class SearchHandler extends RequestHandlerBase implements SolrCoreAware ,
           // now wait for replies, but if anyone puts more requests on
           // the outgoing queue, send them out immediately (by exiting
           // this loop)
-          boolean tolerant = rb.req.getParams().getBool(ShardParams.SHARDS_TOLERANT, false);
+          boolean tolerant = ShardParams.getShardsTolerantAsBool(rb.req.getParams());
           while (rb.outgoing.size() == 0) {
             ShardResponse srsp = tolerant ? 
                 shardHandler1.takeCompletedIncludingErrors():
@@ -477,6 +481,11 @@ public class SearchHandler extends RequestHandlerBase implements SolrCoreAware ,
       }
     }
     return sb.toString();
+  }
+
+  @Override
+  public Boolean registerV2() {
+    return Boolean.TRUE;
   }
 }
 

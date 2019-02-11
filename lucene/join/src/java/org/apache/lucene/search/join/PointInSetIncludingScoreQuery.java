@@ -66,6 +66,7 @@ abstract class PointInSetIncludingScoreQuery extends Query {
     }
   };
 
+  final ScoreMode scoreMode;
   final Query originalQuery;
   final boolean multipleValuesPerDocument;
   final PrefixCodedTerms sortedPackedPoints;
@@ -81,8 +82,9 @@ abstract class PointInSetIncludingScoreQuery extends Query {
 
   }
 
-  PointInSetIncludingScoreQuery(Query originalQuery, boolean multipleValuesPerDocument, String field, int bytesPerDim,
-                                Stream packedPoints) {
+  PointInSetIncludingScoreQuery(ScoreMode scoreMode, Query originalQuery, boolean multipleValuesPerDocument,
+                                String field, int bytesPerDim, Stream packedPoints) {
+    this.scoreMode = scoreMode;
     this.originalQuery = originalQuery;
     this.multipleValuesPerDocument = multipleValuesPerDocument;
     this.field = field;
@@ -118,7 +120,7 @@ abstract class PointInSetIncludingScoreQuery extends Query {
   }
 
   @Override
-  public final Weight createWeight(IndexSearcher searcher, boolean needsScores, float boost) throws IOException {
+  public final Weight createWeight(IndexSearcher searcher, org.apache.lucene.search.ScoreMode scoreMode, float boost) throws IOException {
     return new Weight(this) {
 
       @Override
@@ -140,24 +142,24 @@ abstract class PointInSetIncludingScoreQuery extends Query {
       @Override
       public Scorer scorer(LeafReaderContext context) throws IOException {
         LeafReader reader = context.reader();
-        PointValues values = reader.getPointValues();
-        if (values == null) {
-          return null;
-        }
         FieldInfo fieldInfo = reader.getFieldInfos().fieldInfo(field);
         if (fieldInfo == null) {
           return null;
         }
-        if (fieldInfo.getPointDimensionCount() != 1) {
-          throw new IllegalArgumentException("field=\"" + field + "\" was indexed with numDims=" + fieldInfo.getPointDimensionCount() + " but this query has numDims=1");
+        if (fieldInfo.getPointDataDimensionCount() != 1) {
+          throw new IllegalArgumentException("field=\"" + field + "\" was indexed with numDims=" + fieldInfo.getPointDataDimensionCount() + " but this query has numDims=1");
         }
         if (fieldInfo.getPointNumBytes() != bytesPerDim) {
           throw new IllegalArgumentException("field=\"" + field + "\" was indexed with bytesPerDim=" + fieldInfo.getPointNumBytes() + " but this query has bytesPerDim=" + bytesPerDim);
         }
+        PointValues values = reader.getPointValues(field);
+        if (values == null) {
+          return null;
+        }
 
         FixedBitSet result = new FixedBitSet(reader.maxDoc());
         float[] scores = new float[reader.maxDoc()];
-        values.intersect(field, new MergePointVisitor(sortedPackedPoints, result, scores));
+        values.intersect(new MergePointVisitor(sortedPackedPoints, result, scores));
         return new Scorer(this) {
 
           DocIdSetIterator disi = new BitSetIterator(result, 10L);
@@ -168,8 +170,8 @@ abstract class PointInSetIncludingScoreQuery extends Query {
           }
 
           @Override
-          public int freq() throws IOException {
-            return 1;
+          public float getMaxScore(int upTo) throws IOException {
+            return Float.POSITIVE_INFINITY;
           }
 
           @Override
@@ -184,6 +186,12 @@ abstract class PointInSetIncludingScoreQuery extends Query {
 
         };
       }
+
+      @Override
+      public boolean isCacheable(LeafReaderContext ctx) {
+        return true;
+      }
+
     };
   }
 
@@ -276,6 +284,7 @@ abstract class PointInSetIncludingScoreQuery extends Query {
   @Override
   public final int hashCode() {
     int hash = classHash();
+    hash = 31 * hash + scoreMode.hashCode();
     hash = 31 * hash + field.hashCode();
     hash = 31 * hash + originalQuery.hashCode();
     hash = 31 * hash + sortedPackedPointsHashCode;
@@ -290,7 +299,8 @@ abstract class PointInSetIncludingScoreQuery extends Query {
   }
 
   private boolean equalsTo(PointInSetIncludingScoreQuery other) {
-    return other.field.equals(field) &&
+    return other.scoreMode.equals(scoreMode) &&
+           other.field.equals(field) &&
            other.originalQuery.equals(originalQuery) &&
            other.bytesPerDim == bytesPerDim &&
            other.sortedPackedPointsHashCode == sortedPackedPointsHashCode &&

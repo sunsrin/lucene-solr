@@ -20,7 +20,6 @@ package org.apache.lucene.analysis.cjk;
 import java.util.Map;
 
 import org.apache.lucene.analysis.TokenStream;
-import org.apache.lucene.analysis.cjk.CJKBigramFilter;
 import org.apache.lucene.analysis.util.TokenFilterFactory;
 
 /** 
@@ -36,6 +35,7 @@ import org.apache.lucene.analysis.util.TokenFilterFactory;
  *       katakana="true" hangul="true" outputUnigrams="false" /&gt;
  *   &lt;/analyzer&gt;
  * &lt;/fieldType&gt;</pre>
+ * @since 3.6.0
  */
 public class CJKBigramFilterFactory extends TokenFilterFactory {
   final int flags;

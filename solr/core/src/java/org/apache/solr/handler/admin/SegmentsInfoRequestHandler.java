@@ -60,7 +60,13 @@ public class SegmentsInfoRequestHandler extends RequestHandlerBase {
 
     SimpleOrderedMap<Object> segmentInfos = new SimpleOrderedMap<>();
     SimpleOrderedMap<Object> segmentInfo = null;
-    for (SegmentCommitInfo segmentCommitInfo : infos) {
+    List<SegmentCommitInfo> sortable = new ArrayList<>();
+    sortable.addAll(infos.asList());
+    // Order by the number of live docs. The display is logarithmic so it is a little jumbled visually
+    sortable.sort((s1, s2) -> {
+      return (s2.info.maxDoc() - s2.getDelCount()) - (s1.info.maxDoc() - s1.getDelCount());
+    });
+    for (SegmentCommitInfo segmentCommitInfo : sortable) {
       segmentInfo = getSegmentInfo(segmentCommitInfo);
       if (mergeCandidates.contains(segmentCommitInfo.info.name)) {
         segmentInfo.add("mergeCandidate", true);
@@ -84,6 +90,7 @@ public class SegmentsInfoRequestHandler extends RequestHandlerBase {
     segmentInfoMap.add("age", new Date(timestamp));
     segmentInfoMap.add("source",
         segmentCommitInfo.info.getDiagnostics().get("source"));
+    segmentInfoMap.add("version", segmentCommitInfo.info.getVersion().toString());
 
     return segmentInfoMap;
   }
@@ -115,5 +122,10 @@ public class SegmentsInfoRequestHandler extends RequestHandlerBase {
   @Override
   public String getDescription() {
     return "Lucene segments info.";
+  }
+
+  @Override
+  public Category getCategory() {
+    return Category.ADMIN;
   }
 }

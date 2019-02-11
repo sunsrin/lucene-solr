@@ -20,7 +20,6 @@ package org.apache.lucene.analysis.no;
 import java.util.Map;
 
 import org.apache.lucene.analysis.TokenStream;
-import org.apache.lucene.analysis.no.NorwegianLightStemFilter;
 import org.apache.lucene.analysis.util.TokenFilterFactory;
 
 import static org.apache.lucene.analysis.no.NorwegianLightStemmer.BOKMAAL;
@@ -36,6 +35,7 @@ import static org.apache.lucene.analysis.no.NorwegianLightStemmer.NYNORSK;
  *     &lt;filter class="solr.NorwegianLightStemFilterFactory" variant="nb"/&gt;
  *   &lt;/analyzer&gt;
  * &lt;/fieldType&gt;</pre>
+ * @since 3.6.0
  */
 public class NorwegianLightStemFilterFactory extends TokenFilterFactory {
   

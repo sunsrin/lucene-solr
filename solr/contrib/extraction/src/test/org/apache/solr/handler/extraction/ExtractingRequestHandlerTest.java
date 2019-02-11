@@ -15,9 +15,11 @@
  * limitations under the License.
  */
 package org.apache.solr.handler.extraction;
+
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
+import java.util.TimeZone;
 
 import org.apache.solr.SolrTestCaseJ4;
 import org.apache.solr.common.SolrException;
@@ -42,8 +44,14 @@ public class ExtractingRequestHandlerTest extends SolrTestCaseJ4 {
 
   @BeforeClass
   public static void beforeClass() throws Exception {
-    assumeFalse("This test fails on UNIX with Turkish default locale (https://issues.apache.org/jira/browse/SOLR-6387)",
-        new Locale("tr").getLanguage().equals(Locale.getDefault().getLanguage()));
+    // Is the JDK/env affected by a known bug?
+    final String tzDisplayName = TimeZone.getDefault().getDisplayName(false, TimeZone.SHORT, Locale.US);
+    if (!tzDisplayName.matches("[A-Za-z]{3,}([+-]\\d\\d(:\\d\\d)?)?")) {
+      assertTrue("Is some other JVM affected?  Or bad regex? TzDisplayName: " + tzDisplayName,
+          System.getProperty("java.version").startsWith("11"));
+      assumeTrue("SOLR-12759 JDK 11 (1st release) and Tika 1.x can result in extracting dates in a bad format.", false);
+    }
+
     initCore("solrconfig.xml", "schema.xml", getFile("extraction/solr").getAbsolutePath());
   }
 
@@ -113,7 +121,7 @@ public class ExtractingRequestHandlerTest extends SolrTestCaseJ4 {
     assertQ(req("+id:simple2 +t_content:serif"), "//*[@numFound='0']"); // make sure <style> content is excluded
     assertQ(req("+id:simple2 +t_content:blur"), "//*[@numFound='0']"); // make sure <script> content is excluded
 
-    // load again in the exact same way, but boost one field
+    // make sure the fact there is an index-time boost does not fail the parsing
     loadLocal("extraction/simple.html",
       "literal.id","simple3",
       "uprefix", "t_",
@@ -125,7 +133,7 @@ public class ExtractingRequestHandlerTest extends SolrTestCaseJ4 {
     );
 
     assertQ(req("t_href:http"), "//*[@numFound='2']");
-    assertQ(req("t_href:http"), "//doc[1]/str[.='simple3']");
+    assertQ(req("t_href:http"), "//doc[2]/str[.='simple3']");
     assertQ(req("+id:simple3 +t_content_type:[* TO *]"), "//*[@numFound='1']");//test lowercase and then uprefix
 
     loadLocal("extraction/version_control.xml", "fmap.created", "extractedDate", "fmap.producer", "extractedProducer",

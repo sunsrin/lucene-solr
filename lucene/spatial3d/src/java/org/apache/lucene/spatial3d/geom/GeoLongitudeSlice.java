@@ -16,6 +16,10 @@
  */
 package org.apache.lucene.spatial3d.geom;
 
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.io.IOException;
+
 /**
  * Bounding box limited on left and right.
  * The left-right maximum extent for this shape is PI; for anything larger, use
@@ -32,6 +36,8 @@ class GeoLongitudeSlice extends GeoBaseBBox {
   protected final SidedPlane leftPlane;
   /** The right plane of the slice */
   protected final SidedPlane rightPlane;
+  /** Backing plane (for narrow angles) */
+  protected final SidedPlane backingPlane;
   /** The notable points for the slice (north and south poles) */
   protected final GeoPoint[] planePoints;
   /** The center point of the slice */
@@ -72,13 +78,36 @@ class GeoLongitudeSlice extends GeoBaseBBox {
       rightLon += Math.PI * 2.0;
     }
     final double middleLon = (leftLon + rightLon) * 0.5;
-    this.centerPoint = new GeoPoint(planetModel, 0.0, middleLon);
+    final double sinMiddleLon = Math.sin(middleLon);
+    final double cosMiddleLon = Math.cos(middleLon);
+
+    this.centerPoint = new GeoPoint(planetModel, 0.0, sinMiddleLon, 1.0, cosMiddleLon);
 
     this.leftPlane = new SidedPlane(centerPoint, cosLeftLon, sinLeftLon);
     this.rightPlane = new SidedPlane(centerPoint, cosRightLon, sinRightLon);
+    
+    // Compute the backing plane
+    // The normal for this plane is a unit vector through the origin that goes through the middle lon.  The plane's D is 0,
+    // because it goes through the origin.
+    this.backingPlane = new SidedPlane(this.centerPoint, cosMiddleLon, sinMiddleLon, 0.0, 0.0);
 
     this.planePoints = new GeoPoint[]{planetModel.NORTH_POLE, planetModel.SOUTH_POLE};
     this.edgePoints = new GeoPoint[]{planetModel.NORTH_POLE};
+  }
+
+  /**
+   * Constructor for deserialization.
+   * @param planetModel is the planet model.
+   * @param inputStream is the input stream.
+   */
+  public GeoLongitudeSlice(final PlanetModel planetModel, final InputStream inputStream) throws IOException {
+    this(planetModel, SerializableObject.readDouble(inputStream), SerializableObject.readDouble(inputStream));
+  }
+
+  @Override
+  public void write(final OutputStream outputStream) throws IOException {
+    SerializableObject.writeDouble(outputStream, leftLon);
+    SerializableObject.writeDouble(outputStream, rightLon);
   }
 
   @Override
@@ -98,7 +127,8 @@ class GeoLongitudeSlice extends GeoBaseBBox {
 
   @Override
   public boolean isWithin(final double x, final double y, final double z) {
-    return leftPlane.isWithin(x, y, z) &&
+    return backingPlane.isWithin(x, y, z) &&
+        leftPlane.isWithin(x, y, z) &&
         rightPlane.isWithin(x, y, z);
   }
 
@@ -128,41 +158,20 @@ class GeoLongitudeSlice extends GeoBaseBBox {
   }
 
   @Override
+  public boolean intersects(final GeoShape geoShape) {
+    return geoShape.intersects(leftPlane, planePoints, rightPlane) ||
+        geoShape.intersects(rightPlane, planePoints, leftPlane);
+  }
+
+  @Override
   public void getBounds(Bounds bounds) {
     super.getBounds(bounds);
     bounds
       .addVerticalPlane(planetModel, leftLon, leftPlane, rightPlane)
       .addVerticalPlane(planetModel, rightLon, rightPlane, leftPlane)
-      .addIntersection(planetModel, rightPlane, leftPlane)
+      //.addIntersection(planetModel, rightPlane, leftPlane)
       .addPoint(planetModel.NORTH_POLE)
       .addPoint(planetModel.SOUTH_POLE);
-  }
-
-  @Override
-  public int getRelationship(final GeoShape path) {
-    final int insideRectangle = isShapeInsideBBox(path);
-    if (insideRectangle == SOME_INSIDE)
-      return OVERLAPS;
-
-    final boolean insideShape = path.isWithin(planetModel.NORTH_POLE);
-
-    if (insideRectangle == ALL_INSIDE && insideShape)
-      return OVERLAPS;
-
-    if (path.intersects(leftPlane, planePoints, rightPlane) ||
-        path.intersects(rightPlane, planePoints, leftPlane)) {
-      return OVERLAPS;
-    }
-
-    if (insideRectangle == ALL_INSIDE) {
-      return WITHIN;
-    }
-
-    if (insideShape) {
-      return CONTAINS;
-    }
-
-    return DISJOINT;
   }
 
   @Override

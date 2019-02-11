@@ -47,7 +47,7 @@ import org.apache.lucene.util.LuceneTestCase.SuppressCodecs;
 import org.apache.lucene.util.LuceneTestCase;
 import org.apache.lucene.util.ThreadInterruptedException;
 
-@SuppressCodecs({ "SimpleText", "Memory", "Direct" })
+@SuppressCodecs({ "SimpleText", "Direct" })
 public class TestControlledRealTimeReopenThread extends ThreadedIndexingAndSearchingTestCase {
 
   // Not guaranteed to reflect deletes:
@@ -107,7 +107,7 @@ public class TestControlledRealTimeReopenThread extends ThreadedIndexingAndSearc
         System.out.println(Thread.currentThread().getName() + ": nrt: got deletes searcher=" + s);
       }
       try {
-        assertEquals(docs.size(), s.search(new TermQuery(id), 10).totalHits);
+        assertEquals(docs.size(), s.search(new TermQuery(id), 10).totalHits.value);
       } finally {
         nrtDeletes.release(s);
       }
@@ -131,7 +131,7 @@ public class TestControlledRealTimeReopenThread extends ThreadedIndexingAndSearc
         System.out.println(Thread.currentThread().getName() + ": nrt: got noDeletes searcher=" + s);
       }
       try {
-        assertEquals(docs.size(), s.search(new TermQuery(id), 10).totalHits);
+        assertEquals(docs.size(), s.search(new TermQuery(id), 10).totalHits.value);
       } finally {
         nrtNoDeletes.release(s);
       }
@@ -155,7 +155,7 @@ public class TestControlledRealTimeReopenThread extends ThreadedIndexingAndSearc
         System.out.println(Thread.currentThread().getName() + ": nrt: got noDeletes searcher=" + s);
       }
       try {
-        assertEquals(1, s.search(new TermQuery(id), 10).totalHits);
+        assertEquals(1, s.search(new TermQuery(id), 10).totalHits.value);
       } finally {
         nrtNoDeletes.release(s);
       }
@@ -178,7 +178,7 @@ public class TestControlledRealTimeReopenThread extends ThreadedIndexingAndSearc
         System.out.println(Thread.currentThread().getName() + ": nrt: got deletes searcher=" + s);
       }
       try {
-        assertEquals(1, s.search(new TermQuery(id), 10).totalHits);
+        assertEquals(1, s.search(new TermQuery(id), 10).totalHits.value);
       } finally {
         nrtDeletes.release(s);
       }
@@ -201,7 +201,7 @@ public class TestControlledRealTimeReopenThread extends ThreadedIndexingAndSearc
         System.out.println(Thread.currentThread().getName() + ": nrt: got deletes searcher=" + s);
       }
       try {
-        assertEquals(0, s.search(new TermQuery(id), 10).totalHits);
+        assertEquals(0, s.search(new TermQuery(id), 10).totalHits.value);
       } finally {
         nrtDeletes.release(s);
       }
@@ -333,9 +333,11 @@ public class TestControlledRealTimeReopenThread extends ThreadedIndexingAndSearc
     };
     t.start();
     writer.waitAfterUpdate = true; // wait in addDocument to let some reopens go through
+
     final long lastGen = writer.updateDocument(new Term("foo", "bar"), doc); // once this returns the doc is already reflected in the last reopen
 
-    assertFalse(manager.isSearcherCurrent()); // false since there is a delete in the queue
+    // We now eagerly resolve deletes so the manager should see it after update:
+    assertTrue(manager.isSearcherCurrent());
     
     IndexSearcher searcher = manager.acquire();
     try {
@@ -522,7 +524,7 @@ public class TestControlledRealTimeReopenThread extends ThreadedIndexingAndSearc
       IndexSearcher searcher = sm.acquire();
       TopDocs td = searcher.search(new TermQuery(new Term("count", i + "")), 10);
       sm.release(searcher);
-      assertEquals(1, td.totalHits);
+      assertEquals(1, td.totalHits.value);
     }
 
     for(Thread commitThread : commitThreads) {

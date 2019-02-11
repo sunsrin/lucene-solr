@@ -18,7 +18,7 @@ package org.apache.lucene.search;
 
 import java.io.IOException;
 import java.util.Random;
-import com.carrotsearch.randomizedtesting.generators.RandomInts;
+import com.carrotsearch.randomizedtesting.generators.RandomNumbers;
 
 import org.apache.lucene.index.IndexReader;
 import org.apache.lucene.index.LeafReaderContext;
@@ -62,8 +62,8 @@ public class RandomApproximationQuery extends Query {
   }
 
   @Override
-  public Weight createWeight(IndexSearcher searcher, boolean needsScores, float boost) throws IOException {
-    final Weight weight = query.createWeight(searcher, needsScores, boost);
+  public Weight createWeight(IndexSearcher searcher, ScoreMode scoreMode, float boost) throws IOException {
+    final Weight weight = query.createWeight(searcher, scoreMode, boost);
     return new RandomApproximationWeight(weight, new Random(random.nextLong()));
   }
 
@@ -109,18 +109,29 @@ public class RandomApproximationQuery extends Query {
     }
 
     @Override
-    public int freq() throws IOException {
-      return scorer.freq();
+    public int advanceShallow(int target) throws IOException {
+      if (scorer.docID() > target && twoPhaseView.approximation.docID() != scorer.docID()) {
+        // The random approximation can return doc ids that are not present in the underlying
+        // scorer. These additional doc ids are always *before* the next matching doc so we
+        // cannot use them to shallow advance the main scorer which is already ahead.
+        target = scorer.docID();
+      }
+      return scorer.advanceShallow(target);
+    }
+
+    @Override
+    public float getMaxScore(int upTo) throws IOException {
+      return scorer.getMaxScore(upTo);
     }
 
     @Override
     public int docID() {
-      return scorer.docID();
+      return twoPhaseView.approximation().docID();
     }
 
     @Override
     public DocIdSetIterator iterator() {
-      return scorer.iterator();
+      return  TwoPhaseIterator.asDocIdSetIterator(twoPhaseView);
     }
 
   }
@@ -185,7 +196,7 @@ public class RandomApproximationQuery extends Query {
       if (disi.docID() == NO_MORE_DOCS) {
         return doc = NO_MORE_DOCS;
       }
-      return doc = RandomInts.randomIntBetween(random, target, disi.docID());
+      return doc = RandomNumbers.randomIntBetween(random, target, disi.docID());
     }
 
     @Override

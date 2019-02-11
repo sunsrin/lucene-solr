@@ -16,16 +16,19 @@
  */
 package org.apache.solr.cloud;
 
+import com.codahale.metrics.Timer;
 import java.lang.invoke.MethodHandles;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.TreeSet;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.Condition;
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Predicate;
-
 import org.apache.solr.common.cloud.SolrZkClient;
 import org.apache.solr.common.cloud.ZkNodeProps;
 import org.apache.solr.common.util.Pair;
-import org.apache.solr.util.stats.TimerContext;
 import org.apache.zookeeper.CreateMode;
 import org.apache.zookeeper.KeeperException;
 import org.apache.zookeeper.WatchedEvent;
@@ -35,20 +38,20 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * A {@link DistributedQueue} augmented with helper methods specific to the overseer task queues.
+ * A {@link ZkDistributedQueue} augmented with helper methods specific to the overseer task queues.
  * Methods specific to this subclass ignore superclass internal state and hit ZK directly.
  * This is inefficient!  But the API on this class is kind of muddy..
  */
-public class OverseerTaskQueue extends DistributedQueue {
-  private static final Logger LOG = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
+public class OverseerTaskQueue extends ZkDistributedQueue {
+  private static final Logger log = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
   
-  private final String response_prefix = "qnr-" ;
+  private static final String RESPONSE_PREFIX = "qnr-" ;
 
   public OverseerTaskQueue(SolrZkClient zookeeper, String dir) {
-    this(zookeeper, dir, new Overseer.Stats());
+    this(zookeeper, dir, new Stats());
   }
 
-  public OverseerTaskQueue(SolrZkClient zookeeper, String dir, Overseer.Stats stats) {
+  public OverseerTaskQueue(SolrZkClient zookeeper, String dir, Stats stats) {
     super(zookeeper, dir, stats);
   }
   
@@ -67,7 +70,7 @@ public class OverseerTaskQueue extends DistributedQueue {
           if (data != null) {
             ZkNodeProps message = ZkNodeProps.load(data);
             if (message.containsKey(requestIdKey)) {
-              LOG.debug(">>>> {}", message.get(requestIdKey));
+              log.debug("Looking for {}, found {}", message.get(requestIdKey), requestId);
               if(message.get(requestIdKey).equals(requestId)) return true;
             }
           }
@@ -85,15 +88,15 @@ public class OverseerTaskQueue extends DistributedQueue {
    */
   public void remove(QueueEvent event) throws KeeperException,
       InterruptedException {
-    TimerContext time = stats.time(dir + "_remove_event");
+    Timer.Context time = stats.time(dir + "_remove_event");
     try {
       String path = event.getId();
-      String responsePath = dir + "/" + response_prefix
+      String responsePath = dir + "/" + RESPONSE_PREFIX
           + path.substring(path.lastIndexOf("-") + 1);
       if (zookeeper.exists(responsePath, true)) {
         zookeeper.setData(responsePath, event.getBytes(), true);
       } else {
-        LOG.info("Response ZK path: " + responsePath + " doesn't exist."
+        log.info("Response ZK path: " + responsePath + " doesn't exist."
             + "  Requestor may have disconnected from ZooKeeper");
       }
       try {
@@ -108,24 +111,23 @@ public class OverseerTaskQueue extends DistributedQueue {
   /**
    * Watcher that blocks until a WatchedEvent occurs for a znode.
    */
-  private final class LatchWatcher implements Watcher {
+  static final class LatchWatcher implements Watcher {
 
-    private final Object lock;
+    private final Lock lock;
+    private final Condition eventReceived;
     private WatchedEvent event;
     private Event.EventType latchEventType;
-
-    LatchWatcher(Object lock) {
-      this(lock, null);
+    
+    LatchWatcher() {
+      this(null);
     }
-
+    
     LatchWatcher(Event.EventType eventType) {
-      this(new Object(), eventType);
-    }
-
-    LatchWatcher(Object lock, Event.EventType eventType) {
-      this.lock = lock;
+      this.lock = new ReentrantLock();
+      this.eventReceived = lock.newCondition();
       this.latchEventType = eventType;
     }
+
 
     @Override
     public void process(WatchedEvent event) {
@@ -134,19 +136,28 @@ public class OverseerTaskQueue extends DistributedQueue {
         return;
       }
       // If latchEventType is not null, only fire if the type matches
-      LOG.info("{} fired on path {} state {} latchEventType {}", event.getType(), event.getPath(), event.getState(), latchEventType);
+      log.debug("{} fired on path {} state {} latchEventType {}", event.getType(), event.getPath(), event.getState(), latchEventType);
       if (latchEventType == null || event.getType() == latchEventType) {
-        synchronized (lock) {
+        lock.lock();
+        try {
           this.event = event;
-          lock.notifyAll();
+          eventReceived.signalAll();
+        } finally {
+          lock.unlock();
         }
       }
     }
 
-    public void await(long timeout) throws InterruptedException {
-      synchronized (lock) {
-        if (this.event != null) return;
-        lock.wait(timeout);
+    public void await(long timeoutMs) throws InterruptedException {
+      assert timeoutMs > 0;
+      lock.lock();
+      try {
+        if (this.event != null) {
+          return;
+        }
+        eventReceived.await(timeoutMs, TimeUnit.MILLISECONDS);
+      } finally {
+        lock.unlock();
       }
     }
 
@@ -181,23 +192,20 @@ public class OverseerTaskQueue extends DistributedQueue {
    */
   public QueueEvent offer(byte[] data, long timeout) throws KeeperException,
       InterruptedException {
-    TimerContext time = stats.time(dir + "_offer");
+    Timer.Context time = stats.time(dir + "_offer");
     try {
       // Create and watch the response node before creating the request node;
       // otherwise we may miss the response.
       String watchID = createResponseNode();
 
-      Object lock = new Object();
-      LatchWatcher watcher = new LatchWatcher(lock);
+      LatchWatcher watcher = new LatchWatcher();
       Stat stat = zookeeper.exists(watchID, watcher, true);
 
       // create the request node
       createRequestNode(data, watchID);
 
-      synchronized (lock) {
-        if (stat != null && watcher.getWatchedEvent() == null) {
-          watcher.await(timeout);
-        }
+      if (stat != null) {
+        watcher.await(timeout);
       }
       byte[] bytes = zookeeper.getData(watchID, null, null, true);
       // create the event before deleting the node, otherwise we can get the deleted
@@ -217,7 +225,7 @@ public class OverseerTaskQueue extends DistributedQueue {
 
   String createResponseNode() throws KeeperException, InterruptedException {
     return createData(
-            dir + "/" + response_prefix,
+            dir + "/" + RESPONSE_PREFIX,
             null, CreateMode.EPHEMERAL_SEQUENTIAL);
   }
 
@@ -226,8 +234,8 @@ public class OverseerTaskQueue extends DistributedQueue {
       throws KeeperException, InterruptedException {
     ArrayList<QueueEvent> topN = new ArrayList<>();
 
-    LOG.debug("Peeking for top {} elements. ExcludeSet: {}", n, excludeSet);
-    TimerContext time;
+    log.debug("Peeking for top {} elements. ExcludeSet: {}", n, excludeSet);
+    Timer.Context time;
     if (waitMillis == Long.MAX_VALUE) time = stats.time(dir + "_peekTopN_wait_forever");
     else time = stats.time(dir + "_peekTopN_wait" + waitMillis);
 
@@ -244,13 +252,13 @@ public class OverseerTaskQueue extends DistributedQueue {
   }
 
   private static void printQueueEventsListElementIds(ArrayList<QueueEvent> topN) {
-    if (LOG.isDebugEnabled() && !topN.isEmpty()) {
+    if (log.isDebugEnabled() && !topN.isEmpty()) {
       StringBuilder sb = new StringBuilder("[");
       for (QueueEvent queueEvent : topN) {
         sb.append(queueEvent.getId()).append(", ");
       }
       sb.append("]");
-      LOG.debug("Returning topN elements: {}", sb.toString());
+      log.debug("Returning topN elements: {}", sb.toString());
     }
   }
 

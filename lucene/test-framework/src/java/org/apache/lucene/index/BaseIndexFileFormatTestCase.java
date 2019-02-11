@@ -25,9 +25,12 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.IdentityHashMap;
+import java.util.Iterator;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.TreeSet;
 
 import org.apache.lucene.analysis.Analyzer;
 import org.apache.lucene.analysis.MockAnalyzer;
@@ -147,6 +150,22 @@ abstract class BaseIndexFileFormatTestCase extends LuceneTestCase {
   /** Returns the codec to run tests against */
   protected abstract Codec getCodec();
 
+  /** Returns the major version that this codec is compatible with. */
+  protected int getCreatedVersionMajor() {
+    return Version.LATEST.major;
+  }
+
+  /** Set the created version of the given {@link Directory} and return it. */
+  protected final <D extends Directory> D applyCreatedVersionMajor(D d) throws IOException {
+    if (SegmentInfos.getLastCommitGeneration(d) != -1) {
+      throw new IllegalArgumentException("Cannot set the created version on a Directory that already has segments");
+    }
+    if (getCreatedVersionMajor() != Version.LATEST.major || random().nextBoolean()) {
+      new SegmentInfos(getCreatedVersionMajor()).commit(d);
+    }
+    return d;
+  }
+
   private Codec savedCodec;
 
   public void setUp() throws Exception {
@@ -195,7 +214,7 @@ abstract class BaseIndexFileFormatTestCase extends LuceneTestCase {
   /** The purpose of this test is to make sure that bulk merge doesn't accumulate useless data over runs. */
   public void testMergeStability() throws Exception {
     assumeTrue("merge is not stable", mergeIsStable());
-    Directory dir = newDirectory();
+    Directory dir = applyCreatedVersionMajor(newDirectory());
 
     // do not use newMergePolicy that might return a MockMergePolicy that ignores the no-CFS ratio
     // do not use RIW which will change things up!
@@ -214,7 +233,7 @@ abstract class BaseIndexFileFormatTestCase extends LuceneTestCase {
     w.close();
     DirectoryReader reader = DirectoryReader.open(dir);
 
-    Directory dir2 = newDirectory();
+    Directory dir2 = applyCreatedVersionMajor(newDirectory());
     mp = newTieredMergePolicy();
     mp.setNoCFSRatio(0);
     cfg = new IndexWriterConfig(new MockAnalyzer(random())).setUseCompoundFile(false).setMergePolicy(mp);
@@ -245,7 +264,7 @@ abstract class BaseIndexFileFormatTestCase extends LuceneTestCase {
       avoidCodecs.add(new MockRandomPostingsFormat().getName());
       Codec.setDefault(new RandomCodec(random(), avoidCodecs));
     }
-    Directory dir = newDirectory();
+    Directory dir = applyCreatedVersionMajor(newDirectory());
     IndexWriterConfig cfg = newIndexWriterConfig(new MockAnalyzer(random()));
     IndexWriter w = new IndexWriter(dir, cfg);
     // we need to index enough documents so that constant overhead doesn't dominate
@@ -271,12 +290,26 @@ abstract class BaseIndexFileFormatTestCase extends LuceneTestCase {
       new SimpleMergedSegmentWarmer(InfoStream.NO_OUTPUT).warm(reader);
     }
 
-    final long actualBytes = RamUsageTester.sizeOf(reader2, new Accumulator(reader2)) - RamUsageTester.sizeOf(reader1, new Accumulator(reader1));
-    final long expectedBytes = ((SegmentReader) reader2).ramBytesUsed() - ((SegmentReader) reader1).ramBytesUsed();
-    final long absoluteError = actualBytes - expectedBytes;
-    final double relativeError = (double) absoluteError / actualBytes;
-    final String message = "Actual RAM usage " + actualBytes + ", but got " + expectedBytes + ", " + 100*relativeError + "% error";
-    assertTrue(message, Math.abs(relativeError) < 0.20d || Math.abs(absoluteError) < 1000);
+    long act1 = RamUsageTester.sizeOf(reader2, new Accumulator(reader2));
+    long act2 = RamUsageTester.sizeOf(reader1, new Accumulator(reader1));
+    final long measuredBytes = act1 - act2;
+
+    long reported1 = ((SegmentReader) reader2).ramBytesUsed();
+    long reported2 = ((SegmentReader) reader1).ramBytesUsed();
+    final long reportedBytes = reported1 - reported2;
+
+    final long absoluteError = Math.abs(measuredBytes - reportedBytes);
+    final double relativeError = (double) absoluteError / measuredBytes;
+    final String message = String.format(Locale.ROOT,
+        "RamUsageTester reports %d bytes but ramBytesUsed() returned %d (%.1f error). " +
+        " [Measured: %d, %d. Reported: %d, %d]",
+        measuredBytes,
+        reportedBytes,
+        (100 * relativeError),
+        act1, act2,
+        reported1, reported2);
+
+    assertTrue(message, relativeError < 0.20d || absoluteError < 1000);
 
     reader1.close();
     reader2.close();
@@ -286,7 +319,7 @@ abstract class BaseIndexFileFormatTestCase extends LuceneTestCase {
   /** Calls close multiple times on closeable codec apis */
   public void testMultiClose() throws IOException {
     // first make a one doc index
-    Directory oneDocIndex = newDirectory();
+    Directory oneDocIndex = applyCreatedVersionMajor(newDirectory());
     IndexWriter iw = new IndexWriter(oneDocIndex, new IndexWriterConfig(new MockAnalyzer(random())));
     Document oneDoc = new Document();
     FieldType customType = new FieldType(TextField.TYPE_STORED);
@@ -303,11 +336,11 @@ abstract class BaseIndexFileFormatTestCase extends LuceneTestCase {
     Directory dir = newFSDirectory(createTempDir("justSoYouGetSomeChannelErrors"));
     Codec codec = getCodec();
     
-    SegmentInfo segmentInfo = new SegmentInfo(dir, Version.LATEST, "_0", 1, false, codec, Collections.emptyMap(), StringHelper.randomId(), new HashMap<>(), null);
+    SegmentInfo segmentInfo = new SegmentInfo(dir, Version.LATEST, Version.LATEST, "_0", 1, false, codec, Collections.emptyMap(), StringHelper.randomId(), new HashMap<>(), null);
     FieldInfo proto = oneDocReader.getFieldInfos().fieldInfo("field");
     FieldInfo field = new FieldInfo(proto.name, proto.number, proto.hasVectors(), proto.omitsNorms(), proto.hasPayloads(), 
                                     proto.getIndexOptions(), proto.getDocValuesType(), proto.getDocValuesGen(), new HashMap<>(),
-                                    proto.getPointDimensionCount(), proto.getPointNumBytes());
+                                    proto.getPointDataDimensionCount(), proto.getPointIndexDimensionCount(), proto.getPointNumBytes(), proto.isSoftDeletesField());
 
     FieldInfos fieldInfos = new FieldInfos(new FieldInfo[] { field } );
 
@@ -318,8 +351,48 @@ abstract class BaseIndexFileFormatTestCase extends LuceneTestCase {
     SegmentReadState readState = new SegmentReadState(dir, segmentInfo, fieldInfos, IOContext.READ);
 
     // PostingsFormat
+    NormsProducer fakeNorms = new NormsProducer() {
+
+      @Override
+      public void close() throws IOException {}
+
+      @Override
+      public long ramBytesUsed() {
+        return 0;
+      }
+
+      @Override
+      public NumericDocValues getNorms(FieldInfo field) throws IOException {
+        if (field.hasNorms() == false) {
+          return null;
+        }
+        return oneDocReader.getNormValues(field.name);
+      }
+
+      @Override
+      public void checkIntegrity() throws IOException {}
+      
+    };
     try (FieldsConsumer consumer = codec.postingsFormat().fieldsConsumer(writeState)) {
-      consumer.write(oneDocReader.fields());
+      final Fields fields = new Fields() {
+        TreeSet<String> indexedFields = new TreeSet<>(FieldInfos.getIndexedFields(oneDocReader));
+
+        @Override
+        public Iterator<String> iterator() {
+          return indexedFields.iterator();
+        }
+
+        @Override
+        public Terms terms(String field) throws IOException {
+          return oneDocReader.terms(field);
+        }
+
+        @Override
+        public int size() {
+          return indexedFields.size();
+        }
+      };
+      consumer.write(fields, fakeNorms);
       IOUtils.close(consumer);
       IOUtils.close(consumer);
     }
@@ -330,7 +403,55 @@ abstract class BaseIndexFileFormatTestCase extends LuceneTestCase {
     
     // DocValuesFormat
     try (DocValuesConsumer consumer = codec.docValuesFormat().fieldsConsumer(writeState)) {
-      consumer.addNumericField(field, Collections.singleton(5));
+      consumer.addNumericField(field,
+                               new EmptyDocValuesProducer() {
+                                 @Override
+                                 public NumericDocValues getNumeric(FieldInfo field) {
+                                   return new NumericDocValues() {
+                                     int docID = -1;
+                                 
+                                     @Override
+                                     public int docID() {
+                                       return docID;
+                                     }
+                                 
+                                     @Override
+                                     public int nextDoc() {
+                                       docID++;
+                                       if (docID == 1) {
+                                         docID = NO_MORE_DOCS;
+                                       }
+                                       return docID;
+                                     }
+
+                                     @Override
+                                     public int advance(int target) {
+                                       if (docID <= 0 && target == 0) {
+                                         docID = 0;
+                                       } else {
+                                         docID = NO_MORE_DOCS;
+                                       }
+                                       return docID;
+                                     }
+
+                                     @Override
+                                    public boolean advanceExact(int target) throws IOException {
+                                      docID = target;
+                                      return target == 0;
+                                    }
+
+                                     @Override
+                                     public long cost() {
+                                       return 1;
+                                     }
+
+                                     @Override
+                                     public long longValue() {
+                                       return 5;
+                                     }
+                                   };
+                                 }
+                               });
       IOUtils.close(consumer);
       IOUtils.close(consumer);
     }
@@ -341,7 +462,68 @@ abstract class BaseIndexFileFormatTestCase extends LuceneTestCase {
     
     // NormsFormat
     try (NormsConsumer consumer = codec.normsFormat().normsConsumer(writeState)) {
-      consumer.addNormsField(field, Collections.singleton(5));
+      consumer.addNormsField(field,
+                             new NormsProducer() {
+                                 @Override
+                                 public NumericDocValues getNorms(FieldInfo field) {
+                                   return new NumericDocValues() {
+                                     int docID = -1;
+                                 
+                                     @Override
+                                     public int docID() {
+                                       return docID;
+                                     }
+                                 
+                                     @Override
+                                     public int nextDoc() {
+                                       docID++;
+                                       if (docID == 1) {
+                                         docID = NO_MORE_DOCS;
+                                       }
+                                       return docID;
+                                     }
+
+                                     @Override
+                                     public int advance(int target) {
+                                       if (docID <= 0 && target == 0) {
+                                         docID = 0;
+                                       } else {
+                                         docID = NO_MORE_DOCS;
+                                       }
+                                       return docID;
+                                     }
+
+                                     @Override
+                                    public boolean advanceExact(int target) throws IOException {
+                                      docID = target;
+                                      return target == 0;
+                                    }
+
+                                     @Override
+                                     public long cost() {
+                                       return 1;
+                                     }
+
+                                     @Override
+                                     public long longValue() {
+                                       return 5;
+                                     }
+                                   };
+                                 }
+
+                               @Override
+                               public void checkIntegrity() {
+                               }
+
+                               @Override
+                               public void close() {
+                               }
+
+                               @Override
+                               public long ramBytesUsed() {
+                                 return 0;
+                               }
+                             });
       IOUtils.close(consumer);
       IOUtils.close(consumer);
     }
@@ -390,7 +572,7 @@ abstract class BaseIndexFileFormatTestCase extends LuceneTestCase {
   // codec does not corrupt the index or leak file handles.
   public void testRandomExceptions() throws Exception {
     // disable slow things: we don't rely upon sleeps here.
-    MockDirectoryWrapper dir = newMockDirectory();
+    MockDirectoryWrapper dir = applyCreatedVersionMajor(newMockDirectory());
     dir.setThrottling(MockDirectoryWrapper.Throttling.NEVER);
     dir.setUseSlowOpenClosers(false);
     dir.setRandomIOExceptionRate(0.001); // more rare
@@ -435,16 +617,11 @@ abstract class BaseIndexFileFormatTestCase extends LuceneTestCase {
           conf.setMergeScheduler(new SerialMergeScheduler());
           conf.setCodec(getCodec());
           iw = new IndexWriter(dir, conf);            
-        } catch (Exception e) {
-          if (e.getMessage() != null && e.getMessage().startsWith("a random IOException")) {
-            exceptionStream.println("\nTEST: got expected fake exc:" + e.getMessage());
-            e.printStackTrace(exceptionStream);
-            allowAlreadyClosed = true;
-          } else {
-            Rethrow.rethrow(e);
-          }
+        } catch (IOException e) {
+          handleFakeIOException(e, exceptionStream);
+          allowAlreadyClosed = true;
         }
-        
+
         if (random().nextInt(10) == 0) {
           // trigger flush:
           try {
@@ -476,14 +653,9 @@ abstract class BaseIndexFileFormatTestCase extends LuceneTestCase {
             conf.setMergeScheduler(new SerialMergeScheduler());
             conf.setCodec(getCodec());
             iw = new IndexWriter(dir, conf);            
-          } catch (Exception e) {
-            if (e.getMessage() != null && e.getMessage().startsWith("a random IOException")) {
-              exceptionStream.println("\nTEST: got expected fake exc:" + e.getMessage());
-              e.printStackTrace(exceptionStream);
-              allowAlreadyClosed = true;
-            } else {
-              Rethrow.rethrow(e);
-            }
+          } catch (IOException e) {
+            handleFakeIOException(e, exceptionStream);
+            allowAlreadyClosed = true;
           }
         }
       }
@@ -492,16 +664,11 @@ abstract class BaseIndexFileFormatTestCase extends LuceneTestCase {
         dir.setRandomIOExceptionRateOnOpen(0.0); // disable exceptions on openInput until next iteration: 
                                                  // or we make slowExists angry and trip a scarier assert!
         iw.close();
-      } catch (Exception e) {
-        if (e.getMessage() != null && e.getMessage().startsWith("a random IOException")) {
-          exceptionStream.println("\nTEST: got expected fake exc:" + e.getMessage());
-          e.printStackTrace(exceptionStream);
-          try {
-            iw.rollback();
-          } catch (Throwable t) {}
-        } else {
-          Rethrow.rethrow(e);
-        }
+      } catch (IOException e) {
+        handleFakeIOException(e, exceptionStream);
+        try {
+          iw.rollback();
+        } catch (Throwable t) {}
       }
       dir.close();
     } catch (Throwable t) {
@@ -516,5 +683,19 @@ abstract class BaseIndexFileFormatTestCase extends LuceneTestCase {
       System.out.println("TEST PASSED: dumping fake-exception-log:...");
       System.out.println(exceptionLog.toString("UTF-8"));
     }
+  }
+  
+  private void handleFakeIOException(IOException e, PrintStream exceptionStream) {
+    Throwable ex = e;
+    while (ex != null) {
+      if (ex.getMessage() != null && ex.getMessage().startsWith("a random IOException")) {
+        exceptionStream.println("\nTEST: got expected fake exc:" + ex.getMessage());
+        ex.printStackTrace(exceptionStream);
+        return;
+      }
+      ex = ex.getCause();
+    }
+    
+    Rethrow.rethrow(e);
   }
 }

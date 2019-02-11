@@ -19,14 +19,14 @@ package org.apache.lucene.util.bkd;
 import java.io.IOException;
 
 import org.apache.lucene.index.PointValues.IntersectVisitor;
+import org.apache.lucene.store.DataOutput;
 import org.apache.lucene.store.IndexInput;
-import org.apache.lucene.store.IndexOutput;
 
 class DocIdsWriter {
 
   private DocIdsWriter() {}
 
-  static void writeDocIds(int[] docIds, int start, int count, IndexOutput out) throws IOException {
+  static void writeDocIds(int[] docIds, int start, int count, DataOutput out) throws IOException {
     // docs can be sorted either when all docs in a block have the same value
     // or when a segment is sorted
     boolean sorted = true;
@@ -142,7 +142,7 @@ class DocIdsWriter {
     }
   }
 
-  static void readInts32(IndexInput in, int count, IntersectVisitor visitor) throws IOException {
+  private static void readInts32(IndexInput in, int count, IntersectVisitor visitor) throws IOException {
     for (int i = 0; i < count; i++) {
       visitor.visit(in.readInt());
     }

@@ -53,7 +53,7 @@ abstract public class SolrJettyTestBase extends SolrTestCaseJ4
   public static SolrClient client = null;
   public static String context;
 
-  public static JettySolrRunner createJetty(String solrHome, String configFile, String schemaFile, String context,
+  public static JettySolrRunner createAndStartJetty(String solrHome, String configFile, String schemaFile, String context,
                                             boolean stopAtShutdown, SortedMap<ServletHolder,String> extraServlets) 
       throws Exception { 
     // creates the data dir
@@ -65,7 +65,7 @@ abstract public class SolrJettyTestBase extends SolrTestCaseJ4
         .setContext(context)
         .stopAtShutdown(stopAtShutdown)
         .withServlets(extraServlets)
-        .withSSLConfig(sslConfig)
+        .withSSLConfig(sslConfig.buildServerSSLConfig())
         .build();
 
     Properties nodeProps = new Properties();
@@ -77,22 +77,22 @@ abstract public class SolrJettyTestBase extends SolrTestCaseJ4
       nodeProps.setProperty("solr.data.dir", createTempDir().toFile().getCanonicalPath());
     }
 
-    return createJetty(solrHome, nodeProps, jettyConfig);
+    return createAndStartJetty(solrHome, nodeProps, jettyConfig);
   }
 
-  public static JettySolrRunner createJetty(String solrHome, String configFile, String context) throws Exception {
-    return createJetty(solrHome, configFile, null, context, true, null);
+  public static JettySolrRunner createAndStartJetty(String solrHome, String configFile, String context) throws Exception {
+    return createAndStartJetty(solrHome, configFile, null, context, true, null);
   }
 
-  public static JettySolrRunner createJetty(String solrHome, JettyConfig jettyConfig) throws Exception {
-    return createJetty(solrHome, new Properties(), jettyConfig);
+  public static JettySolrRunner createAndStartJetty(String solrHome, JettyConfig jettyConfig) throws Exception {
+    return createAndStartJetty(solrHome, new Properties(), jettyConfig);
   }
 
-  public static JettySolrRunner createJetty(String solrHome) throws Exception {
-    return createJetty(solrHome, new Properties(), JettyConfig.builder().withSSLConfig(sslConfig).build());
+  public static JettySolrRunner createAndStartJetty(String solrHome) throws Exception {
+    return createAndStartJetty(solrHome, new Properties(), JettyConfig.builder().withSSLConfig(sslConfig.buildServerSSLConfig()).build());
   }
 
-  public static JettySolrRunner createJetty(String solrHome, Properties nodeProperties, JettyConfig jettyConfig) throws Exception {
+  public static JettySolrRunner createAndStartJetty(String solrHome, Properties nodeProperties, JettyConfig jettyConfig) throws Exception {
 
     initCore(null, null, solrHome);
 
@@ -110,8 +110,6 @@ abstract public class SolrJettyTestBase extends SolrTestCaseJ4
     nodeProps.setProperty("coreRootDirectory", coresDir.toString());
     nodeProps.setProperty("configSetBaseDir", solrHome);
 
-    ignoreException("maxWarmingSearchers");
-
     jetty = new JettySolrRunner(solrHome, nodeProps, jettyConfig);
     jetty.start();
     port = jetty.getLocalPort();
@@ -120,7 +118,7 @@ abstract public class SolrJettyTestBase extends SolrTestCaseJ4
   }
 
   @After
-  public void afterClass() throws Exception {
+  public synchronized void afterClass() throws Exception {
     if (client != null) client.close();
     client = null;
   }
@@ -134,13 +132,11 @@ abstract public class SolrJettyTestBase extends SolrTestCaseJ4
   }
 
 
-  public SolrClient getSolrClient() {
-    {
-      if (client == null) {
-        client = createNewSolrClient();
-      }
-      return client;
+  public synchronized SolrClient getSolrClient() {
+    if (client == null) {
+      client = createNewSolrClient();
     }
+    return client;
   }
 
   /**
@@ -154,8 +150,7 @@ abstract public class SolrJettyTestBase extends SolrTestCaseJ4
       try {
         // setup the client...
         String url = jetty.getBaseUrl().toString() + "/" + "collection1";
-        HttpSolrClient client = getHttpSolrClient(url);
-        client.setConnectionTimeout(DEFAULT_CONNECTION_TIMEOUT);
+        HttpSolrClient client = getHttpSolrClient(url, DEFAULT_CONNECTION_TIMEOUT);
         return client;
       }
       catch( Exception ex ) {

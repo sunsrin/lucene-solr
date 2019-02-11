@@ -125,7 +125,7 @@ public final class RunListenerPrintReproduceInfo extends RunListener {
 
   /** print some useful debugging information about the environment */
   private static void printDebuggingInformation() {
-    if (classEnvRule != null) {
+    if (classEnvRule != null && classEnvRule.isInitialized()) {
       System.err.println("NOTE: test params are: codec=" + classEnvRule.codec +
           ", sim=" + classEnvRule.similarity +
           ", locale=" + classEnvRule.locale.toLanguageTag() +
@@ -166,7 +166,9 @@ public final class RunListenerPrintReproduceInfo extends RunListener {
     if (TEST_NIGHTLY) addVmOpt(b, SYSPROP_NIGHTLY, TEST_NIGHTLY);
     if (TEST_WEEKLY) addVmOpt(b, SYSPROP_WEEKLY, TEST_WEEKLY);
     if (TEST_SLOW) addVmOpt(b, SYSPROP_SLOW, TEST_SLOW);
+    if (TEST_MONSTER) addVmOpt(b, SYSPROP_MONSTER, TEST_MONSTER);
     if (TEST_AWAITSFIX) addVmOpt(b, SYSPROP_AWAITSFIX, TEST_AWAITSFIX);
+    if (TEST_BADAPPLES) addVmOpt(b, SYSPROP_BADAPPLES, TEST_BADAPPLES);
 
     // Codec, postings, directories.
     if (!TEST_CODEC.equals("random")) addVmOpt(b, "tests.codec", TEST_CODEC);
@@ -176,7 +178,7 @@ public final class RunListenerPrintReproduceInfo extends RunListener {
 
     // Environment.
     if (!TEST_LINE_DOCS_FILE.equals(DEFAULT_LINE_DOCS_FILE)) addVmOpt(b, "tests.linedocsfile", TEST_LINE_DOCS_FILE);
-    if (classEnvRule != null) {
+    if (classEnvRule != null && classEnvRule.isInitialized()) {
       addVmOpt(b, "tests.locale", classEnvRule.locale.toLanguageTag());
       if (classEnvRule.timeZone != null) {
         addVmOpt(b, "tests.timezone", classEnvRule.timeZone.getID());

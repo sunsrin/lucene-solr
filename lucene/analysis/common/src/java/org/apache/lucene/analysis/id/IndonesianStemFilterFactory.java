@@ -20,7 +20,6 @@ package org.apache.lucene.analysis.id;
 import java.util.Map;
 
 import org.apache.lucene.analysis.TokenStream;
-import org.apache.lucene.analysis.id.IndonesianStemFilter;
 import org.apache.lucene.analysis.util.TokenFilterFactory;
 
 /** 
@@ -33,6 +32,7 @@ import org.apache.lucene.analysis.util.TokenFilterFactory;
  *     &lt;filter class="solr.IndonesianStemFilterFactory" stemDerivational="true"/&gt;
  *   &lt;/analyzer&gt;
  * &lt;/fieldType&gt;</pre>
+ * @since 3.1.0
  */
 public class IndonesianStemFilterFactory extends TokenFilterFactory {
   private final boolean stemDerivational;

@@ -18,7 +18,6 @@ package org.apache.solr.search;
 
 import org.apache.solr.BaseDistributedSearchTestCase;
 import org.apache.solr.SolrTestCaseJ4;
-import org.apache.solr.SolrTestCaseJ4.SuppressObjectReleaseTracker;
 import org.apache.solr.client.solrj.response.QueryResponse;
 import org.apache.solr.common.params.ModifiableSolrParams;
 import org.apache.solr.common.util.NamedList;
@@ -35,7 +34,6 @@ import com.carrotsearch.randomizedtesting.annotations.ThreadLeakScope.Scope;
  */
 
 @SolrTestCaseJ4.SuppressSSL(bugUrl="https://issues.apache.org/jira/browse/SOLR-8433")
-@SuppressObjectReleaseTracker(bugUrl="https://issues.apache.org/jira/browse/SOLR-8899")
 @ThreadLeakScope(Scope.NONE)
 public class AnalyticsMergeStrategyTest extends BaseDistributedSearchTestCase {
 
@@ -69,7 +67,7 @@ public class AnalyticsMergeStrategyTest extends BaseDistributedSearchTestCase {
     commit();
 
     /*
-    *  The count qparser plugin is pointing to the TestAnalyticsQParserPlugin. This class defines a simple AnalyticsQuery and
+    *  The count qparser plugin is pointing to AnalyticsTestQParserPlugin. This class defines a simple AnalyticsQuery and
     *  has two merge strategies. If the iterate local param is true then an InterativeMergeStrategy is used.
     */
 

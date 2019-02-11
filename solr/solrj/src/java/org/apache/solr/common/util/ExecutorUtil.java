@@ -71,49 +71,12 @@ public class ExecutorUtil {
     public void clean(AtomicReference<?> ctx);
   }
 
-  // ** This will interrupt the threads! ** Lucene and Solr do not like this because it can close channels, so only use
-  // this if you know what you are doing - you probably want shutdownAndAwaitTermination.
-  // Marked as Deprecated to discourage use.
-  @Deprecated
-  public static void shutdownWithInterruptAndAwaitTermination(ExecutorService pool) {
-    pool.shutdownNow(); // Cancel currently executing tasks - NOTE: this interrupts!
-    boolean shutdown = false;
-    while (!shutdown) {
-      try {
-        // Wait a while for existing tasks to terminate
-        shutdown = pool.awaitTermination(60, TimeUnit.SECONDS);
-      } catch (InterruptedException ie) {
-        // Preserve interrupt status
-        Thread.currentThread().interrupt();
-      }
-    }
-  }
-  
-  // ** This will interrupt the threads! ** Lucene and Solr do not like this because it can close channels, so only use
-  // this if you know what you are doing - you probably want shutdownAndAwaitTermination.
-  // Marked as Deprecated to discourage use.
-  @Deprecated
-  public static void shutdownAndAwaitTerminationWithInterrupt(ExecutorService pool) {
-    pool.shutdown(); // Disable new tasks from being submitted
-    boolean shutdown = false;
-    boolean interrupted = false;
-    while (!shutdown) {
-      try {
-        // Wait a while for existing tasks to terminate
-        shutdown = pool.awaitTermination(60, TimeUnit.SECONDS);
-      } catch (InterruptedException ie) {
-        // Preserve interrupt status
-        Thread.currentThread().interrupt();
-      }
-      if (!shutdown && !interrupted) {
-        pool.shutdownNow(); // Cancel currently executing tasks - NOTE: this interrupts!
-        interrupted = true;
-      }
-    }
-  }
-
   public static void shutdownAndAwaitTermination(ExecutorService pool) {
     pool.shutdown(); // Disable new tasks from being submitted
+    awaitTermination(pool);
+  }
+
+  public static void awaitTermination(ExecutorService pool) {
     boolean shutdown = false;
     while (!shutdown) {
       try {
@@ -142,7 +105,7 @@ public class ExecutorUtil {
   public static ExecutorService newMDCAwareSingleThreadExecutor(ThreadFactory threadFactory) {
     return new MDCAwareThreadPoolExecutor(1, 1,
             0L, TimeUnit.MILLISECONDS,
-            new LinkedBlockingQueue<Runnable>(),
+            new LinkedBlockingQueue<>(),
             threadFactory);
   }
 
@@ -159,7 +122,14 @@ public class ExecutorUtil {
   public static ExecutorService newMDCAwareCachedThreadPool(ThreadFactory threadFactory) {
     return new MDCAwareThreadPoolExecutor(0, Integer.MAX_VALUE,
         60L, TimeUnit.SECONDS,
-        new SynchronousQueue<Runnable>(),
+        new SynchronousQueue<>(),
+        threadFactory);
+  }
+
+  public static ExecutorService newMDCAwareCachedThreadPool(int maxThreads, ThreadFactory threadFactory) {
+    return new MDCAwareThreadPoolExecutor(0, maxThreads,
+        60L, TimeUnit.SECONDS,
+        new LinkedBlockingQueue<>(maxThreads),
         threadFactory);
   }
 
@@ -168,20 +138,30 @@ public class ExecutorUtil {
 
     private static final int MAX_THREAD_NAME_LEN = 512;
 
+    private final boolean enableSubmitterStackTrace;
+
     public MDCAwareThreadPoolExecutor(int corePoolSize, int maximumPoolSize, long keepAliveTime, TimeUnit unit, BlockingQueue<Runnable> workQueue, ThreadFactory threadFactory, RejectedExecutionHandler handler) {
       super(corePoolSize, maximumPoolSize, keepAliveTime, unit, workQueue, threadFactory, handler);
+      this.enableSubmitterStackTrace = true;
     }
 
     public MDCAwareThreadPoolExecutor(int corePoolSize, int maximumPoolSize, long keepAliveTime, TimeUnit unit, BlockingQueue<Runnable> workQueue) {
       super(corePoolSize, maximumPoolSize, keepAliveTime, unit, workQueue);
+      this.enableSubmitterStackTrace = true;
     }
 
     public MDCAwareThreadPoolExecutor(int corePoolSize, int maximumPoolSize, long keepAliveTime, TimeUnit unit, BlockingQueue<Runnable> workQueue, ThreadFactory threadFactory) {
+      this(corePoolSize, maximumPoolSize, keepAliveTime, unit, workQueue, threadFactory, true);
+    }
+
+    public MDCAwareThreadPoolExecutor(int corePoolSize, int maximumPoolSize, long keepAliveTime, TimeUnit unit, BlockingQueue<Runnable> workQueue, ThreadFactory threadFactory, boolean enableSubmitterStackTrace) {
       super(corePoolSize, maximumPoolSize, keepAliveTime, unit, workQueue, threadFactory);
+      this.enableSubmitterStackTrace = enableSubmitterStackTrace;
     }
 
     public MDCAwareThreadPoolExecutor(int corePoolSize, int maximumPoolSize, long keepAliveTime, TimeUnit unit, BlockingQueue<Runnable> workQueue, RejectedExecutionHandler handler) {
       super(corePoolSize, maximumPoolSize, keepAliveTime, unit, workQueue, handler);
+      this.enableSubmitterStackTrace = true;
     }
 
     @Override
@@ -201,7 +181,7 @@ public class ExecutorUtil {
 
       String ctxStr = contextString.toString().replace("/", "//");
       final String submitterContextStr = ctxStr.length() <= MAX_THREAD_NAME_LEN ? ctxStr : ctxStr.substring(0, MAX_THREAD_NAME_LEN);
-      final Exception submitterStackTrace = new Exception("Submitter stack trace");
+      final Exception submitterStackTrace = enableSubmitterStackTrace ? new Exception("Submitter stack trace") : null;
       final List<InheritableThreadLocalProvider> providersCopy = providers;
       final ArrayList<AtomicReference> ctx = providersCopy.isEmpty() ? null : new ArrayList<>(providersCopy.size());
       if (ctx != null) {
@@ -231,7 +211,11 @@ public class ExecutorUtil {
           if (t instanceof OutOfMemoryError) {
             throw t;
           }
-          log.error("Uncaught exception {} thrown by thread: {}", t, currentThread.getName(), submitterStackTrace);
+          if (enableSubmitterStackTrace)  {
+            log.error("Uncaught exception {} thrown by thread: {}", t, currentThread.getName(), submitterStackTrace);
+          } else  {
+            log.error("Uncaught exception {} thrown by thread: {}", t, currentThread.getName());
+          }
           throw t;
         } finally {
           isServerPool.remove();

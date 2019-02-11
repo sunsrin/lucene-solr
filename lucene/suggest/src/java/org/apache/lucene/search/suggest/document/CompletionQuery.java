@@ -27,14 +27,14 @@ import org.apache.lucene.search.Query;
 import org.apache.lucene.search.suggest.BitsProducer;
 
 import static org.apache.lucene.search.suggest.document.CompletionAnalyzer.HOLE_CHARACTER;
-import static org.apache.lucene.search.suggest.document.CompletionAnalyzer.SEP_LABEL;
+import static org.apache.lucene.analysis.miscellaneous.ConcatenateGraphFilter.SEP_LABEL;
 
 /**
  * Abstract {@link Query} that match documents containing terms with a specified prefix
  * filtered by {@link BitsProducer}. This should be used to query against any {@link SuggestField}s
  * or {@link ContextSuggestField}s of documents.
  * <p>
- * Use {@link SuggestIndexSearcher#suggest(CompletionQuery, int)} to execute any query
+ * Use {@link SuggestIndexSearcher#suggest(CompletionQuery, int, boolean)} to execute any query
  * that provides a concrete implementation of this query. Example below shows using this query
  * to retrieve the top 5 documents.
  *

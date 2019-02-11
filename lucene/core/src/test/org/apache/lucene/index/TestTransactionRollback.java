@@ -93,7 +93,7 @@ public class TestTransactionRollback extends LuceneTestCase {
 
     //Perhaps not the most efficient approach but meets our
     //needs here.
-    final Bits liveDocs = MultiFields.getLiveDocs(r);
+    final Bits liveDocs = MultiBits.getLiveDocs(r);
     for (int i = 0; i < r.maxDoc(); i++) {
       if (liveDocs == null || liveDocs.get(i)) {
         String sval=r.document(i).get(FIELD_RECORD_ID);
@@ -157,7 +157,7 @@ public class TestTransactionRollback extends LuceneTestCase {
   }
 
   // Rolls back to previous commit point
-  class RollbackDeletionPolicy extends IndexDeletionPolicy {
+  static class RollbackDeletionPolicy extends IndexDeletionPolicy {
     private int rollbackPoint;
 
     public RollbackDeletionPolicy(int rollbackPoint) {
@@ -197,7 +197,7 @@ public class TestTransactionRollback extends LuceneTestCase {
     }
   }
 
-  class DeleteLastCommitPolicy extends IndexDeletionPolicy {
+  static class DeleteLastCommitPolicy extends IndexDeletionPolicy {
 
     @Override
     public void onCommit(List<? extends IndexCommit> commits) throws IOException {}
@@ -222,7 +222,7 @@ public class TestTransactionRollback extends LuceneTestCase {
   }
 
   // Keeps all commit points (used to build index)
-  class KeepAllDeletionPolicy extends IndexDeletionPolicy {
+  static class KeepAllDeletionPolicy extends IndexDeletionPolicy {
     @Override
     public void onCommit(List<? extends IndexCommit> commits) throws IOException {}
     @Override

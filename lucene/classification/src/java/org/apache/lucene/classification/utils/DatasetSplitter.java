@@ -35,6 +35,7 @@ import org.apache.lucene.search.IndexSearcher;
 import org.apache.lucene.search.MatchAllDocsQuery;
 import org.apache.lucene.search.ScoreDoc;
 import org.apache.lucene.search.Sort;
+import org.apache.lucene.search.TotalHits;
 import org.apache.lucene.search.grouping.GroupDocs;
 import org.apache.lucene.search.grouping.GroupingSearch;
 import org.apache.lucene.search.grouping.TopGroups;
@@ -94,7 +95,8 @@ public class DatasetSplitter {
         }
       }
       if (classValues == null) {
-        throw new IllegalStateException("field \"" + classFieldName + "\" must have sorted (set) doc values");
+        // approximate with no. of terms
+        noOfClasses += leave.reader().terms(classFieldName).size();
       }
       noOfClasses += valueCount;
     }
@@ -120,8 +122,9 @@ public class DatasetSplitter {
       int b = 0;
 
       // iterate over existing documents
-      for (GroupDocs group : topGroups.groups) {
-        int totalHits = group.totalHits;
+      for (GroupDocs<Object> group : topGroups.groups) {
+        assert group.totalHits.relation == TotalHits.Relation.EQUAL_TO;
+        long totalHits = group.totalHits.value;
         double testSize = totalHits * testRatio;
         int tc = 0;
         double cvSize = totalHits * crossValidationRatio;

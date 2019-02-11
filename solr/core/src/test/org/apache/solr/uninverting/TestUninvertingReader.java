@@ -36,14 +36,15 @@ import org.apache.lucene.index.DirectoryReader;
 import org.apache.lucene.index.DocValues;
 import org.apache.lucene.index.DocValuesType;
 import org.apache.lucene.index.FieldInfo;
+import org.apache.lucene.index.FieldInfos;
 import org.apache.lucene.index.IndexWriter;
 import org.apache.lucene.index.LeafReader;
 import org.apache.lucene.index.LeafReaderContext;
 import org.apache.lucene.index.SortedSetDocValues;
-import org.apache.lucene.legacy.LegacyFieldType;
-import org.apache.lucene.legacy.LegacyIntField;
-import org.apache.lucene.legacy.LegacyLongField;
-import org.apache.lucene.legacy.LegacyNumericUtils;
+import org.apache.solr.legacy.LegacyFieldType;
+import org.apache.solr.legacy.LegacyIntField;
+import org.apache.solr.legacy.LegacyLongField;
+import org.apache.solr.legacy.LegacyNumericUtils;
 import org.apache.lucene.store.Directory;
 import org.apache.lucene.util.BytesRef;
 import org.apache.lucene.util.LuceneTestCase;
@@ -75,11 +76,11 @@ public class TestUninvertingReader extends LuceneTestCase {
     SortedSetDocValues v = ar.getSortedSetDocValues("foo");
     assertEquals(2, v.getValueCount());
     
-    v.setDocument(0);
+    assertEquals(0, v.nextDoc());
     assertEquals(1, v.nextOrd());
     assertEquals(SortedSetDocValues.NO_MORE_ORDS, v.nextOrd());
     
-    v.setDocument(1);
+    assertEquals(1, v.nextDoc());
     assertEquals(0, v.nextOrd());
     assertEquals(1, v.nextOrd());
     assertEquals(SortedSetDocValues.NO_MORE_ORDS, v.nextOrd());
@@ -117,11 +118,11 @@ public class TestUninvertingReader extends LuceneTestCase {
     SortedSetDocValues v = ar.getSortedSetDocValues("foo");
     assertEquals(2, v.getValueCount());
     
-    v.setDocument(0);
+    assertEquals(0, v.nextDoc());
     assertEquals(1, v.nextOrd());
     assertEquals(SortedSetDocValues.NO_MORE_ORDS, v.nextOrd());
     
-    v.setDocument(1);
+    assertEquals(1, v.nextDoc());
     assertEquals(0, v.nextOrd());
     assertEquals(1, v.nextOrd());
     assertEquals(SortedSetDocValues.NO_MORE_ORDS, v.nextOrd());
@@ -158,11 +159,11 @@ public class TestUninvertingReader extends LuceneTestCase {
     SortedSetDocValues v = ar.getSortedSetDocValues("foo");
     assertEquals(2, v.getValueCount());
     
-    v.setDocument(0);
+    assertEquals(0, v.nextDoc());
     assertEquals(1, v.nextOrd());
     assertEquals(SortedSetDocValues.NO_MORE_ORDS, v.nextOrd());
     
-    v.setDocument(1);
+    assertEquals(1, v.nextDoc());
     assertEquals(0, v.nextOrd());
     assertEquals(1, v.nextOrd());
     assertEquals(SortedSetDocValues.NO_MORE_ORDS, v.nextOrd());
@@ -199,11 +200,11 @@ public class TestUninvertingReader extends LuceneTestCase {
     SortedSetDocValues v = ar.getSortedSetDocValues("foo");
     assertEquals(2, v.getValueCount());
     
-    v.setDocument(0);
+    assertEquals(0, v.nextDoc());
     assertEquals(1, v.nextOrd());
     assertEquals(SortedSetDocValues.NO_MORE_ORDS, v.nextOrd());
     
-    v.setDocument(1);
+    assertEquals(1, v.nextDoc());
     assertEquals(0, v.nextOrd());
     assertEquals(1, v.nextOrd());
     assertEquals(SortedSetDocValues.NO_MORE_ORDS, v.nextOrd());
@@ -367,24 +368,31 @@ public class TestUninvertingReader extends LuceneTestCase {
     uninvertingMap.put("dv", Type.LEGACY_INTEGER);
     uninvertingMap.put("dint", Type.INTEGER_POINT);
 
-    DirectoryReader ir = UninvertingReader.wrap(DirectoryReader.open(dir), 
-                         uninvertingMap);
+    DirectoryReader ir = UninvertingReader.wrap(DirectoryReader.open(dir), uninvertingMap);
     LeafReader leafReader = ir.leaves().get(0).reader();
+    FieldInfos fieldInfos = leafReader.getFieldInfos();
+    LeafReader originalLeafReader = ((UninvertingReader)leafReader).getDelegate();
 
-    FieldInfo intFInfo = leafReader.getFieldInfos().fieldInfo("int");
+    assertNotSame(originalLeafReader.getFieldInfos(), fieldInfos);
+    assertSame("do not rebuild FieldInfo for unaffected fields",
+        originalLeafReader.getFieldInfos().fieldInfo("id"), fieldInfos.fieldInfo("id"));
+
+    FieldInfo intFInfo = fieldInfos.fieldInfo("int");
     assertEquals(DocValuesType.NUMERIC, intFInfo.getDocValuesType());
-    assertEquals(0, intFInfo.getPointDimensionCount());
+    assertEquals(0, intFInfo.getPointDataDimensionCount());
+    assertEquals(0, intFInfo.getPointIndexDimensionCount());
     assertEquals(0, intFInfo.getPointNumBytes());
 
-    FieldInfo dintFInfo = leafReader.getFieldInfos().fieldInfo("dint");
+    FieldInfo dintFInfo = fieldInfos.fieldInfo("dint");
     assertEquals(DocValuesType.NUMERIC, dintFInfo.getDocValuesType());
-    assertEquals(1, dintFInfo.getPointDimensionCount());
+    assertEquals(1, dintFInfo.getPointDataDimensionCount());
+    assertEquals(1, dintFInfo.getPointIndexDimensionCount());
     assertEquals(4, dintFInfo.getPointNumBytes());
 
-    FieldInfo dvFInfo = leafReader.getFieldInfos().fieldInfo("dv");
+    FieldInfo dvFInfo = fieldInfos.fieldInfo("dv");
     assertEquals(DocValuesType.NUMERIC, dvFInfo.getDocValuesType());
 
-    FieldInfo storedFInfo = leafReader.getFieldInfos().fieldInfo("stored");
+    FieldInfo storedFInfo = fieldInfos.fieldInfo("stored");
     assertEquals(DocValuesType.NONE, storedFInfo.getDocValuesType());
 
     TestUtil.checkReader(ir);

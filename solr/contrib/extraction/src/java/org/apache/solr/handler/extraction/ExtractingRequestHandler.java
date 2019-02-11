@@ -16,14 +16,9 @@
  */
 package org.apache.solr.handler.extraction;
 
-
 import java.io.File;
 import java.io.IOException;
-import java.lang.invoke.MethodHandles;
-import java.util.Collection;
-import java.util.HashSet;
-import java.util.Iterator;
-import java.util.Map;
+import java.io.InputStream;
 
 import org.apache.solr.common.SolrException;
 import org.apache.solr.common.SolrException.ErrorCode;
@@ -37,10 +32,8 @@ import org.apache.solr.security.PermissionNameProvider;
 import org.apache.solr.update.processor.UpdateRequestProcessor;
 import org.apache.solr.util.plugin.SolrCoreAware;
 import org.apache.tika.config.TikaConfig;
-import org.apache.tika.mime.MimeTypeException;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-
+import org.apache.tika.exception.TikaException;
+import org.xml.sax.SAXException;
 
 /**
  * Handler for rich documents like PDF or Word or any other file format that Tika handles that need the text to be extracted
@@ -48,19 +41,13 @@ import org.slf4j.LoggerFactory;
  */
 public class ExtractingRequestHandler extends ContentStreamHandlerBase implements SolrCoreAware , PermissionNameProvider {
 
-  private static final Logger log = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
-
   public static final String PARSE_CONTEXT_CONFIG = "parseContext.config";
   public static final String CONFIG_LOCATION = "tika.config";
-  public static final String DATE_FORMATS = "date.formats";
 
   protected TikaConfig config;
   protected ParseContextConfig parseContextConfig;
 
-
-  protected Collection<String> dateFormats = ExtractionDateUtil.DEFAULT_DATE_FORMATS;
   protected SolrContentHandlerFactory factory;
-
 
   @Override
   public PermissionNameProvider.Name getPermissionName(AuthorizationContext request) {
@@ -97,22 +84,11 @@ public class ExtractingRequestHandler extends ContentStreamHandlerBase implement
           throw new SolrException(ErrorCode.SERVER_ERROR, e);
         }
       }
-
-      NamedList configDateFormats = (NamedList) initArgs.get(DATE_FORMATS);
-      if (configDateFormats != null && configDateFormats.size() > 0) {
-        dateFormats = new HashSet<>();
-        Iterator<Map.Entry> it = configDateFormats.iterator();
-        while (it.hasNext()) {
-          String format = (String) it.next().getValue();
-          log.info("Adding Date Format: " + format);
-          dateFormats.add(format);
-        }
-      }
     }
     if (config == null) {
-      try {
-        config = getDefaultConfig(core.getResourceLoader().getClassLoader());
-      } catch (MimeTypeException | IOException e) {
+      try (InputStream is = core.getResourceLoader().getClassLoader().getResourceAsStream("solr-default-tika-config.xml")){
+        config = new TikaConfig(is);
+      } catch (IOException | SAXException | TikaException e) {
         throw new SolrException(ErrorCode.SERVER_ERROR, e);
       }
     }
@@ -122,14 +98,9 @@ public class ExtractingRequestHandler extends ContentStreamHandlerBase implement
     factory = createFactory();
   }
 
-  private TikaConfig getDefaultConfig(ClassLoader classLoader) throws MimeTypeException, IOException {
-    return new TikaConfig(classLoader);
-  }
-
   protected SolrContentHandlerFactory createFactory() {
-    return new SolrContentHandlerFactory(dateFormats);
+    return new SolrContentHandlerFactory();
   }
-
 
   @Override
   protected ContentStreamLoader newLoader(SolrQueryRequest req, UpdateRequestProcessor processor) {
@@ -142,5 +113,3 @@ public class ExtractingRequestHandler extends ContentStreamHandlerBase implement
     return "Add/Update Rich document";
   }
 }
-
-

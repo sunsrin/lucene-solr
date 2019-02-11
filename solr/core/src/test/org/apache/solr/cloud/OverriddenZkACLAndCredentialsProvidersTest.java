@@ -71,7 +71,7 @@ public class OverriddenZkACLAndCredentialsProvidersTest extends SolrTestCaseJ4 {
         + "zookeeper/server1/data";
     log.info("ZooKeeper dataDir:" + zkDir);
     zkServer = new ZkTestServer(zkDir);
-    zkServer.run();
+    zkServer.run(false);
     
     System.setProperty("zkHost", zkServer.getZkAddress());
     
@@ -214,7 +214,7 @@ public class OverriddenZkACLAndCredentialsProvidersTest extends SolrTestCaseJ4 {
     }
   }
   
-  private class SolrZkClientFactoryUsingCompletelyNewProviders {
+  private static class SolrZkClientFactoryUsingCompletelyNewProviders {
     
     final String digestUsername;
     final String digestPassword;
@@ -274,7 +274,7 @@ public class OverriddenZkACLAndCredentialsProvidersTest extends SolrTestCaseJ4 {
     
   }
   
-  private class SolrZkClientUsingVMParamsProvidersButWithDifferentVMParamsNames extends SolrZkClient {
+  private static class SolrZkClientUsingVMParamsProvidersButWithDifferentVMParamsNames extends SolrZkClient {
     
     public SolrZkClientUsingVMParamsProvidersButWithDifferentVMParamsNames(String zkServerAddress, int zkClientTimeout) {
       super(zkServerAddress, zkClientTimeout);

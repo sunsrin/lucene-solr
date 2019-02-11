@@ -17,6 +17,7 @@
 package org.apache.lucene.index;
 
 
+import java.io.Closeable;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -25,10 +26,13 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.CopyOnWriteArraySet;
 
 import org.apache.lucene.store.AlreadyClosedException;
 import org.apache.lucene.store.Directory;
 import org.apache.lucene.store.IOContext;
+import org.apache.lucene.util.Bits;
 import org.apache.lucene.util.IOUtils;
 
 /** Default implementation of {@link DirectoryReader}. */
@@ -59,7 +63,7 @@ public final class StandardDirectoryReader extends DirectoryReader {
         boolean success = false;
         try {
           for (int i = sis.size()-1; i >= 0; i--) {
-            readers[i] = new SegmentReader(sis.info(i), IOContext.READ);
+            readers[i] = new SegmentReader(sis.info(i), sis.getIndexCreatedVersionMajor(), IOContext.READ);
           }
 
           // This may throw CorruptIndexException if there are too many docs, so
@@ -89,7 +93,6 @@ public final class StandardDirectoryReader extends DirectoryReader {
 
     final SegmentInfos segmentInfos = infos.clone();
     int infosUpto = 0;
-    boolean success = false;
     try {
       for (int i = 0; i < numSegments; i++) {
         // NOTE: important that we use infos not
@@ -98,10 +101,10 @@ public final class StandardDirectoryReader extends DirectoryReader {
         // IndexWriter's segmentInfos:
         final SegmentCommitInfo info = infos.info(i);
         assert info.info.dir == dir;
-        final ReadersAndUpdates rld = writer.readerPool.get(info, true);
+        final ReadersAndUpdates rld = writer.getPooledInstance(info, true);
         try {
           final SegmentReader reader = rld.getReadOnlyClone(IOContext.READ);
-          if (reader.numDocs() > 0 || writer.getKeepFullyDeletedSegments()) {
+          if (reader.numDocs() > 0 || writer.getConfig().mergePolicy.keepFullyDeletedSegment(() -> reader)) {
             // Steal the ref:
             readers.add(reader);
             infosUpto++;
@@ -110,28 +113,23 @@ public final class StandardDirectoryReader extends DirectoryReader {
             segmentInfos.remove(infosUpto);
           }
         } finally {
-          writer.readerPool.release(rld);
+          writer.release(rld);
         }
       }
-      
+
       writer.incRefDeleter(segmentInfos);
-      
+
       StandardDirectoryReader result = new StandardDirectoryReader(dir,
-                                                                   readers.toArray(new SegmentReader[readers.size()]), writer,
-                                                                   segmentInfos, applyAllDeletes, writeAllDeletes);
-      success = true;
+          readers.toArray(new SegmentReader[readers.size()]), writer,
+          segmentInfos, applyAllDeletes, writeAllDeletes);
       return result;
-    } finally {
-      if (!success) {
-        for (SegmentReader r : readers) {
-          try {
-            r.decRef();
-          } catch (Throwable th) {
-            // ignore any exception that is thrown here to not mask any original
-            // exception. 
-          }
-        }
+    } catch (Throwable t) {
+      try {
+        IOUtils.applyToAll(readers, SegmentReader::decRef);
+      } catch (Throwable t1) {
+        t.addSuppressed(t1);
       }
+      throw t;
     }
   }
 
@@ -177,16 +175,17 @@ public final class StandardDirectoryReader extends DirectoryReader {
       try {
         SegmentReader newReader;
         if (oldReader == null || commitInfo.info.getUseCompoundFile() != oldReader.getSegmentInfo().info.getUseCompoundFile()) {
-
           // this is a new reader; in case we hit an exception we can decRef it safely
-          newReader = new SegmentReader(commitInfo, IOContext.READ);
+          newReader = new SegmentReader(commitInfo, infos.getIndexCreatedVersionMajor(), IOContext.READ);
           newReaders[i] = newReader;
         } else {
           if (oldReader.isNRT) {
             // We must load liveDocs/DV updates from disk:
-            newReaders[i] = new SegmentReader(commitInfo, oldReader);
+            Bits liveDocs = commitInfo.hasDeletions() ? commitInfo.info.getCodec().liveDocsFormat()
+                .readLiveDocs(commitInfo.info.dir, commitInfo, IOContext.READONCE) : null;
+            newReaders[i] = new SegmentReader(commitInfo, oldReader, liveDocs, liveDocs,
+                commitInfo.info.maxDoc() - commitInfo.getDelCount(), false);
           } else {
-            
             if (oldReader.getSegmentInfo().getDelGen() == commitInfo.getDelGen()
                 && oldReader.getSegmentInfo().getFieldInfosGen() == commitInfo.getFieldInfosGen()) {
               // No change; this reader will be shared between
@@ -200,10 +199,14 @@ public final class StandardDirectoryReader extends DirectoryReader {
 
               if (oldReader.getSegmentInfo().getDelGen() == commitInfo.getDelGen()) {
                 // only DV updates
-                newReaders[i] = new SegmentReader(commitInfo, oldReader, oldReader.getLiveDocs(), oldReader.numDocs());
+                newReaders[i] = new SegmentReader(commitInfo, oldReader, oldReader.getLiveDocs(),
+                    oldReader.getHardLiveDocs(), oldReader.numDocs(), false); // this is not an NRT reader!
               } else {
                 // both DV and liveDocs have changed
-                newReaders[i] = new SegmentReader(commitInfo, oldReader);
+                Bits liveDocs = commitInfo.hasDeletions() ? commitInfo.info.getCodec().liveDocsFormat()
+                    .readLiveDocs(commitInfo.info.dir, commitInfo, IOContext.READONCE) : null;
+                newReaders[i] = new SegmentReader(commitInfo, oldReader, liveDocs, liveDocs,
+                    commitInfo.info.maxDoc() - commitInfo.getDelCount(), false);
               }
             }
           }
@@ -363,33 +366,26 @@ public final class StandardDirectoryReader extends DirectoryReader {
   }
 
   @Override
+  @SuppressWarnings("try")
   protected void doClose() throws IOException {
-    Throwable firstExc = null;
-    for (final LeafReader r : getSequentialSubReaders()) {
-      // try to close each reader, even if an exception is thrown
-      try {
-        r.decRef();
-      } catch (Throwable t) {
-        if (firstExc == null) {
-          firstExc = t;
+    Closeable decRefDeleter = () -> {
+      if (writer != null) {
+        try {
+          writer.decRefDeleter(segmentInfos);
+        } catch (AlreadyClosedException ex) {
+          // This is OK, it just means our original writer was
+          // closed before we were, and this may leave some
+          // un-referenced files in the index, which is
+          // harmless.  The next time IW is opened on the
+          // index, it will delete them.
         }
       }
+    };
+    try (Closeable finalizer = decRefDeleter) {
+      // try to close each reader, even if an exception is thrown
+      final List<? extends LeafReader> sequentialSubReaders = getSequentialSubReaders();
+      IOUtils.applyToAll(sequentialSubReaders, LeafReader::decRef);
     }
-
-    if (writer != null) {
-      try {
-        writer.decRefDeleter(segmentInfos);
-      } catch (AlreadyClosedException ex) {
-        // This is OK, it just means our original writer was
-        // closed before we were, and this may leave some
-        // un-referenced files in the index, which is
-        // harmless.  The next time IW is opened on the
-        // index, it will delete them.
-      }
-    }
-
-    // throw the first exception
-    IOUtils.reThrow(firstExc);
   }
 
   @Override
@@ -468,5 +464,35 @@ public final class StandardDirectoryReader extends DirectoryReader {
     StandardDirectoryReader getReader() {
       return reader;
     }
+  }
+
+  private final Set<ClosedListener> readerClosedListeners = new CopyOnWriteArraySet<>();
+
+  private final CacheHelper cacheHelper = new CacheHelper() {
+    private final CacheKey cacheKey = new CacheKey();
+
+    @Override
+    public CacheKey getKey() {
+      return cacheKey;
+    }
+
+    @Override
+    public void addClosedListener(ClosedListener listener) {
+      ensureOpen();
+      readerClosedListeners.add(listener);
+    }
+
+  };
+
+  @Override
+  void notifyReaderClosedListeners() throws IOException {
+    synchronized(readerClosedListeners) {
+      IOUtils.applyToAll(readerClosedListeners, l -> l.onClose(cacheHelper.getKey()));
+    }
+  }
+
+  @Override
+  public CacheHelper getReaderCacheHelper() {
+    return cacheHelper;
   }
 }

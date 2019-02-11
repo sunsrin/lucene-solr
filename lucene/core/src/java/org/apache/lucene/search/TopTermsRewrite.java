@@ -25,7 +25,7 @@ import java.util.PriorityQueue;
 
 import org.apache.lucene.index.IndexReader;
 import org.apache.lucene.index.Term;
-import org.apache.lucene.index.TermContext;
+import org.apache.lucene.index.TermStates;
 import org.apache.lucene.index.TermState;
 import org.apache.lucene.index.TermsEnum;
 import org.apache.lucene.util.ArrayUtil;
@@ -82,7 +82,7 @@ public abstract class TopTermsRewrite<B> extends TermCollectingRewrite<B> {
 
         // lazy init the initial ScoreTerm because comparator is not known on ctor:
         if (st == null)
-          st = new ScoreTerm(new TermContext(topReaderContext));
+          st = new ScoreTerm(new TermStates(topReaderContext));
         boostAtt = termsEnum.attributes().addAttribute(BoostAttribute.class);
       }
     
@@ -139,7 +139,7 @@ public abstract class TopTermsRewrite<B> extends TermCollectingRewrite<B> {
             visitedTerms.remove(st.bytes.get());
             st.termState.clear(); // reset the termstate! 
           } else {
-            st = new ScoreTerm(new TermContext(topReaderContext));
+            st = new ScoreTerm(new TermStates(topReaderContext));
           }
           assert stQueue.size() <= maxSize : "the PQ size must be limited to maxSize";
           // set maxBoostAtt with values to help FuzzyTermsEnum to optimize
@@ -160,7 +160,9 @@ public abstract class TopTermsRewrite<B> extends TermCollectingRewrite<B> {
 
     for (final ScoreTerm st : scoreTerms) {
       final Term term = new Term(query.field, st.bytes.toBytesRef());
-      addClause(b, term, st.termState.docFreq(), st.boost, st.termState); // add to query
+      // We allow negative term scores (fuzzy query does this, for example) while collecting the terms,
+      // but truncate such boosts to 0.0f when building the query:
+      addClause(b, term, st.termState.docFreq(), Math.max(0.0f, st.boost), st.termState); // add to query
     }
     return build(b);
   }
@@ -191,8 +193,8 @@ public abstract class TopTermsRewrite<B> extends TermCollectingRewrite<B> {
   static final class ScoreTerm implements Comparable<ScoreTerm> {
     public final BytesRefBuilder bytes = new BytesRefBuilder();
     public float boost;
-    public final TermContext termState;
-    public ScoreTerm(TermContext termState) {
+    public final TermStates termState;
+    public ScoreTerm(TermStates termState) {
       this.termState = termState;
     }
     

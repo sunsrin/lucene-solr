@@ -45,6 +45,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Random;
 import java.util.Set;
+import java.util.function.Function;
+import java.util.function.Predicate;
 import java.util.regex.Pattern;
 
 import org.apache.lucene.analysis.Analyzer;
@@ -54,8 +56,6 @@ import org.apache.lucene.analysis.CharArrayMap;
 import org.apache.lucene.analysis.CharArraySet;
 import org.apache.lucene.analysis.CharFilter;
 import org.apache.lucene.analysis.CrankyTokenFilter;
-import org.apache.lucene.analysis.MockGraphTokenFilter;
-import org.apache.lucene.analysis.MockRandomLookaheadTokenFilter;
 import org.apache.lucene.analysis.MockTokenFilter;
 import org.apache.lucene.analysis.MockTokenizer;
 import org.apache.lucene.analysis.TokenFilter;
@@ -71,29 +71,41 @@ import org.apache.lucene.analysis.compound.TestCompoundWordTokenFilter;
 import org.apache.lucene.analysis.compound.hyphenation.HyphenationTree;
 import org.apache.lucene.analysis.hunspell.Dictionary;
 import org.apache.lucene.analysis.hunspell.TestHunspellStemFilter;
+import org.apache.lucene.analysis.minhash.MinHashFilter;
+import org.apache.lucene.analysis.miscellaneous.ConcatenateGraphFilter;
+import org.apache.lucene.analysis.miscellaneous.ConditionalTokenFilter;
+import org.apache.lucene.analysis.miscellaneous.DelimitedTermFrequencyTokenFilter;
+import org.apache.lucene.analysis.miscellaneous.FingerprintFilter;
 import org.apache.lucene.analysis.miscellaneous.HyphenatedWordsFilter;
 import org.apache.lucene.analysis.miscellaneous.LimitTokenCountFilter;
 import org.apache.lucene.analysis.miscellaneous.LimitTokenOffsetFilter;
 import org.apache.lucene.analysis.miscellaneous.LimitTokenPositionFilter;
-import org.apache.lucene.analysis.miscellaneous.StemmerOverrideFilter.StemmerOverrideMap;
 import org.apache.lucene.analysis.miscellaneous.StemmerOverrideFilter;
+import org.apache.lucene.analysis.miscellaneous.StemmerOverrideFilter.StemmerOverrideMap;
 import org.apache.lucene.analysis.miscellaneous.WordDelimiterFilter;
+import org.apache.lucene.analysis.miscellaneous.WordDelimiterGraphFilter;
 import org.apache.lucene.analysis.path.PathHierarchyTokenizer;
 import org.apache.lucene.analysis.path.ReversePathHierarchyTokenizer;
 import org.apache.lucene.analysis.payloads.IdentityEncoder;
 import org.apache.lucene.analysis.payloads.PayloadEncoder;
+import org.apache.lucene.analysis.shingle.FixedShingleFilter;
+import org.apache.lucene.analysis.shingle.ShingleFilter;
 import org.apache.lucene.analysis.snowball.TestSnowball;
 import org.apache.lucene.analysis.standard.StandardTokenizer;
 import org.apache.lucene.analysis.synonym.SynonymMap;
 import org.apache.lucene.analysis.wikipedia.WikipediaTokenizer;
-import org.apache.lucene.store.RAMDirectory;
+import org.apache.lucene.store.ByteBuffersDirectory;
 import org.apache.lucene.util.AttributeFactory;
 import org.apache.lucene.util.AttributeSource;
 import org.apache.lucene.util.CharsRef;
 import org.apache.lucene.util.Rethrow;
 import org.apache.lucene.util.TestUtil;
 import org.apache.lucene.util.Version;
+import org.apache.lucene.util.automaton.Automaton;
+import org.apache.lucene.util.automaton.AutomatonTestUtil;
 import org.apache.lucene.util.automaton.CharacterRunAutomaton;
+import org.apache.lucene.util.automaton.Operations;
+import org.apache.lucene.util.automaton.RegExp;
 import org.junit.AfterClass;
 import org.junit.BeforeClass;
 import org.tartarus.snowball.SnowballProgram;
@@ -106,15 +118,27 @@ public class TestRandomChains extends BaseTokenStreamTestCase {
   static List<Constructor<? extends TokenFilter>> tokenfilters;
   static List<Constructor<? extends CharFilter>> charfilters;
 
-  private static interface Predicate<T> {
-    boolean apply(T o);
-  }
+  private static final Predicate<Object[]> ALWAYS = (objects -> true);
 
-  private static final Predicate<Object[]> ALWAYS = new Predicate<Object[]>() {
-    public boolean apply(Object[] args) {
-      return true;
-    };
-  };
+  private static final Set<Class<?>> avoidConditionals = new HashSet<>();
+  static {
+    // These filters needs to consume the whole tokenstream, so conditionals don't make sense here
+    avoidConditionals.add(FingerprintFilter.class);
+    avoidConditionals.add(MinHashFilter.class);
+    avoidConditionals.add(ConcatenateGraphFilter.class);
+    // ShingleFilter doesn't handle input graphs correctly, so wrapping it in a condition can
+    // expose inconsistent offsets
+    // https://issues.apache.org/jira/browse/LUCENE-4170
+    avoidConditionals.add(ShingleFilter.class);
+    avoidConditionals.add(FixedShingleFilter.class);
+    // FlattenGraphFilter changes the output graph entirely, so wrapping it in a condition
+    // can break position lengths
+    avoidConditionals.add(FlattenGraphFilter.class);
+    // LimitToken*Filters don't set end offsets correctly
+    avoidConditionals.add(LimitTokenOffsetFilter.class);
+    avoidConditionals.add(LimitTokenCountFilter.class);
+    avoidConditionals.add(LimitTokenPositionFilter.class);
+  }
 
   private static final Map<Constructor<?>,Predicate<Object[]>> brokenConstructors = new HashMap<>();
   static {
@@ -124,80 +148,63 @@ public class TestRandomChains extends BaseTokenStreamTestCase {
           ALWAYS);
       brokenConstructors.put(
           LimitTokenCountFilter.class.getConstructor(TokenStream.class, int.class, boolean.class),
-          new Predicate<Object[]>() {
-            @Override
-            public boolean apply(Object[] args) {
+          args -> {
               assert args.length == 3;
               return !((Boolean) args[2]); // args are broken if consumeAllTokens is false
-            }
           });
       brokenConstructors.put(
           LimitTokenOffsetFilter.class.getConstructor(TokenStream.class, int.class),
           ALWAYS);
       brokenConstructors.put(
           LimitTokenOffsetFilter.class.getConstructor(TokenStream.class, int.class, boolean.class),
-          new Predicate<Object[]>() {
-            @Override
-            public boolean apply(Object[] args) {
+          args -> {
               assert args.length == 3;
               return !((Boolean) args[2]); // args are broken if consumeAllTokens is false
-            }
           });
       brokenConstructors.put(
           LimitTokenPositionFilter.class.getConstructor(TokenStream.class, int.class),
           ALWAYS);
       brokenConstructors.put(
           LimitTokenPositionFilter.class.getConstructor(TokenStream.class, int.class, boolean.class),
-          new Predicate<Object[]>() {
-            @Override
-            public boolean apply(Object[] args) {
+          args -> {
               assert args.length == 3;
               return !((Boolean) args[2]); // args are broken if consumeAllTokens is false
-            }
           });
       for (Class<?> c : Arrays.<Class<?>>asList(
-          // TODO: can we promote some of these to be only
-          // offsets offenders?
-          // doesn't actual reset itself!
+          // doesn't actual reset itself!  TODO this statement is probably obsolete as of LUCENE-6121 ?
           CachingTokenFilter.class,
+          // LUCENE-8092: doesn't handle graph inputs
+          CJKBigramFilter.class,
+          // TODO: LUCENE-4983
+          CommonGramsFilter.class,
+          // TODO: doesn't handle graph inputs
+          CommonGramsQueryFilter.class,
           // Not broken, simulates brokenness:
           CrankyTokenFilter.class,
+          // TODO: doesn't handle graph inputs (or even look at positionIncrement)
+          HyphenatedWordsFilter.class,
+          // broken offsets
+          PathHierarchyTokenizer.class,
+          // broken offsets
+          ReversePathHierarchyTokenizer.class,
           // Not broken: we forcefully add this, so we shouldn't
           // also randomly pick it:
           ValidatingTokenFilter.class, 
+          // TODO: it seems to mess up offsets!?
+          WikipediaTokenizer.class,
           // TODO: needs to be a tokenizer, doesnt handle graph inputs properly (a shingle or similar following will then cause pain)
-          WordDelimiterFilter.class)) {
+          WordDelimiterFilter.class,
+          // Cannot correct offsets when a char filter had changed them:
+          WordDelimiterGraphFilter.class,
+          // requires a special encoded token value, so it may fail with random data:
+          DelimitedTermFrequencyTokenFilter.class,
+          // clones of core's filters:
+          org.apache.lucene.analysis.core.StopFilter.class,
+          org.apache.lucene.analysis.core.LowerCaseFilter.class)) {
         for (Constructor<?> ctor : c.getConstructors()) {
           brokenConstructors.put(ctor, ALWAYS);
         }
       }  
-    } catch (Exception e) {
-      throw new Error(e);
-    }
-  }
-
-  // TODO: also fix these and remove (maybe):
-  // Classes/options that don't produce consistent graph offsets:
-  private static final Map<Constructor<?>,Predicate<Object[]>> brokenOffsetsConstructors = new HashMap<>();
-  static {
-    try {
-      for (Class<?> c : Arrays.<Class<?>>asList(
-          ReversePathHierarchyTokenizer.class,
-          PathHierarchyTokenizer.class,
-          // TODO: it seems to mess up offsets!?
-          WikipediaTokenizer.class,
-          // TODO: doesn't handle graph inputs
-          CJKBigramFilter.class,
-          // TODO: doesn't handle graph inputs (or even look at positionIncrement)
-          HyphenatedWordsFilter.class,
-          // TODO: LUCENE-4983
-          CommonGramsFilter.class,
-          // TODO: doesn't handle graph inputs
-          CommonGramsQueryFilter.class)) {
-        for (Constructor<?> ctor : c.getConstructors()) {
-          brokenOffsetsConstructors.put(ctor, ALWAYS);
-        }
-      }
     } catch (Exception e) {
       throw new Error(e);
     }
@@ -226,6 +233,10 @@ public class TestRandomChains extends BaseTokenStreamTestCase {
         if (ctor.isSynthetic() || ctor.isAnnotationPresent(Deprecated.class) || brokenConstructors.get(ctor) == ALWAYS) {
           continue;
         }
+        // conditional filters are tested elsewhere
+        if (ConditionalTokenFilter.class.isAssignableFrom(c)) {
+          continue;
+        }
         if (Tokenizer.class.isAssignableFrom(c)) {
           assertTrue(ctor.toGenericString() + " has unsupported parameter types",
             allowedTokenizerArgs.containsAll(Arrays.asList(ctor.getParameterTypes())));
@@ -244,12 +255,7 @@ public class TestRandomChains extends BaseTokenStreamTestCase {
       }
     }
     
-    final Comparator<Constructor<?>> ctorComp = new Comparator<Constructor<?>>() {
-      @Override
-      public int compare(Constructor<?> arg0, Constructor<?> arg1) {
-        return arg0.toGenericString().compareTo(arg1.toGenericString());
-      }
-    };
+    final Comparator<Constructor<?>> ctorComp = (arg0, arg1) -> arg0.toGenericString().compareTo(arg1.toGenericString());
     Collections.sort(tokenizers, ctorComp);
     Collections.sort(tokenfilters, ctorComp);
     Collections.sort(charfilters, ctorComp);
@@ -315,21 +321,14 @@ public class TestRandomChains extends BaseTokenStreamTestCase {
     }
   }
   
-  private static interface ArgProducer {
-    Object create(Random random);
-  }
-  
-  private static final Map<Class<?>,ArgProducer> argProducers = new IdentityHashMap<Class<?>,ArgProducer>() {{
-    put(int.class, new ArgProducer() {
-      @Override public Object create(Random random) {
+  private static final Map<Class<?>,Function<Random,Object>> argProducers = new IdentityHashMap<Class<?>,Function<Random,Object>>() {{
+    put(int.class, random ->  {
         // TODO: could cause huge ram usage to use full int range for some filters
         // (e.g. allocate enormous arrays)
         // return Integer.valueOf(random.nextInt());
         return Integer.valueOf(TestUtil.nextInt(random, -50, 50));
-      }
     });
-    put(char.class, new ArgProducer() {
-      @Override public Object create(Random random) {
+    put(char.class, random ->  {
         // TODO: fix any filters that care to throw IAE instead.
         // also add a unicode validating filter to validate termAtt?
         // return Character.valueOf((char)random.nextInt(65536));
@@ -339,49 +338,19 @@ public class TestRandomChains extends BaseTokenStreamTestCase {
             return Character.valueOf(c);
           }
         }
-      }
     });
-    put(float.class, new ArgProducer() {
-      @Override public Object create(Random random) {
-        return Float.valueOf(random.nextFloat());
-      }
-    });
-    put(boolean.class, new ArgProducer() {
-      @Override public Object create(Random random) {
-        return Boolean.valueOf(random.nextBoolean());
-      }
-    });
-    put(byte.class, new ArgProducer() {
-      @Override public Object create(Random random) {
-        // this wraps to negative when casting to byte
-        return Byte.valueOf((byte) random.nextInt(256));
-      }
-    });
-    put(byte[].class, new ArgProducer() {
-      @Override public Object create(Random random) {
+    put(float.class, Random::nextFloat);
+    put(boolean.class, Random::nextBoolean);
+    put(byte.class, random -> (byte) random.nextInt(256));
+    put(byte[].class, random ->  {
         byte bytes[] = new byte[random.nextInt(256)];
         random.nextBytes(bytes);
         return bytes;
-      }
     });
-    put(Random.class, new ArgProducer() {
-      @Override public Object create(Random random) {
-        return new Random(random.nextLong());
-      }
-    });
-    put(Version.class, new ArgProducer() {
-      @Override public Object create(Random random) {
-        // we expect bugs in emulating old versions
-        return Version.LATEST;
-      }
-    });
-    put(AttributeFactory.class, new ArgProducer() {
-      @Override public Object create(Random random) {
-        return newAttributeFactory(random);
-      }
-    });
-    put(Set.class, new ArgProducer() {
-      @Override public Object create(Random random) {
+    put(Random.class, random ->  new Random(random.nextLong()));
+    put(Version.class, random -> Version.LATEST);
+    put(AttributeFactory.class, BaseTokenStreamTestCase::newAttributeFactory);
+    put(Set.class,random ->  {
         // TypeTokenFilter
         Set<String> set = new HashSet<>();
         int num = random.nextInt(5);
@@ -389,10 +358,8 @@ public class TestRandomChains extends BaseTokenStreamTestCase {
           set.add(StandardTokenizer.TOKEN_TYPES[random.nextInt(StandardTokenizer.TOKEN_TYPES.length)]);
         }
         return set;
-      }
     });
-    put(Collection.class, new ArgProducer() {
-      @Override public Object create(Random random) {
+    put(Collection.class, random ->  {
         // CapitalizationFilter
         Collection<char[]> col = new ArrayList<>();
         int num = random.nextInt(5);
@@ -400,10 +367,8 @@ public class TestRandomChains extends BaseTokenStreamTestCase {
           col.add(TestUtil.randomSimpleString(random).toCharArray());
         }
         return col;
-      }
     });
-    put(CharArraySet.class, new ArgProducer() {
-      @Override public Object create(Random random) {
+    put(CharArraySet.class, random ->  {
         int num = random.nextInt(10);
         CharArraySet set = new CharArraySet(num, random.nextBoolean());
         for (int i = 0; i < num; i++) {
@@ -411,41 +376,24 @@ public class TestRandomChains extends BaseTokenStreamTestCase {
           set.add(TestUtil.randomSimpleString(random));
         }
         return set;
-      }
     });
-    put(Pattern.class, new ArgProducer() {
-      @Override public Object create(Random random) {
-        // TODO: don't want to make the exponentially slow ones Dawid documents
-        // in TestPatternReplaceFilter, so dont use truly random patterns (for now)
-        return Pattern.compile("a");
-      }
-    });
-    
-    put(Pattern[].class, new ArgProducer() {
-      @Override public Object create(Random random) {
-        return new Pattern[] {Pattern.compile("([a-z]+)"), Pattern.compile("([0-9]+)")};
-      }
-    });
-    put(PayloadEncoder.class, new ArgProducer() {
-      @Override public Object create(Random random) {
-        return new IdentityEncoder(); // the other encoders will throw exceptions if tokens arent numbers?
-      }
-    });
-    put(Dictionary.class, new ArgProducer() {
-      @Override public Object create(Random random) {
+    // TODO: don't want to make the exponentially slow ones Dawid documents
+    // in TestPatternReplaceFilter, so dont use truly random patterns (for now)
+    put(Pattern.class, random ->  Pattern.compile("a"));
+    put(Pattern[].class, random -> new Pattern[] {Pattern.compile("([a-z]+)"), Pattern.compile("([0-9]+)")});
+    put(PayloadEncoder.class, random -> new IdentityEncoder()); // the other encoders will throw exceptions if tokens arent numbers?
+    put(Dictionary.class, random -> {
         // TODO: make nastier
         InputStream affixStream = TestHunspellStemFilter.class.getResourceAsStream("simple.aff");
         InputStream dictStream = TestHunspellStemFilter.class.getResourceAsStream("simple.dic");
         try {
-          return new Dictionary(new RAMDirectory(), "dictionary", affixStream, dictStream);
+          return new Dictionary(new ByteBuffersDirectory(), "dictionary", affixStream, dictStream);
         } catch (Exception ex) {
           Rethrow.rethrow(ex);
           return null; // unreachable code
         }
-      }
     });
-    put(HyphenationTree.class, new ArgProducer() {
-      @Override public Object create(Random random) {
+    put(HyphenationTree.class, random -> {
         // TODO: make nastier
         try {
           InputSource is = new InputSource(TestCompoundWordTokenFilter.class.getResource("da_UTF8.xml").toExternalForm());
@@ -455,10 +403,8 @@ public class TestRandomChains extends BaseTokenStreamTestCase {
           Rethrow.rethrow(ex);
           return null; // unreachable code
         }
-      }
     });
-    put(SnowballProgram.class, new ArgProducer() {
-      @Override public Object create(Random random) {
+    put(SnowballProgram.class, random ->  {
         try {
           String lang = TestSnowball.SNOWBALL_LANGS[random.nextInt(TestSnowball.SNOWBALL_LANGS.length)];
           Class<? extends SnowballProgram> clazz = Class.forName("org.tartarus.snowball.ext." + lang + "Stemmer").asSubclass(SnowballProgram.class);
@@ -467,10 +413,8 @@ public class TestRandomChains extends BaseTokenStreamTestCase {
           Rethrow.rethrow(ex);
           return null; // unreachable code
         }
-      }
     });
-    put(String.class, new ArgProducer() {
-      @Override public Object create(Random random) {
+    put(String.class, random ->  {
         // TODO: make nastier
         if (random.nextBoolean()) {
           // a token type
@@ -478,10 +422,8 @@ public class TestRandomChains extends BaseTokenStreamTestCase {
         } else {
           return TestUtil.randomSimpleString(random);
         }
-      }
     });
-    put(NormalizeCharMap.class, new ArgProducer() {
-      @Override public Object create(Random random) {
+    put(NormalizeCharMap.class, random -> {
         NormalizeCharMap.Builder builder = new NormalizeCharMap.Builder();
         // we can't add duplicate keys, or NormalizeCharMap gets angry
         Set<String> keys = new HashSet<>();
@@ -497,10 +439,8 @@ public class TestRandomChains extends BaseTokenStreamTestCase {
           }
         }
         return builder.build();
-      }
     });
-    put(CharacterRunAutomaton.class, new ArgProducer() {
-      @Override public Object create(Random random) {
+    put(CharacterRunAutomaton.class, random -> {
         // TODO: could probably use a purely random automaton
         switch(random.nextInt(5)) {
           case 0: return MockTokenizer.KEYWORD;
@@ -509,10 +449,8 @@ public class TestRandomChains extends BaseTokenStreamTestCase {
           case 3: return MockTokenFilter.EMPTY_STOPSET;
           default: return MockTokenFilter.ENGLISH_STOPSET;
         }
-      }
     });
-    put(CharArrayMap.class, new ArgProducer() {
-      @Override public Object create(Random random) {
+    put(CharArrayMap.class, random -> {
         int num = random.nextInt(10);
         CharArrayMap<String> map = new CharArrayMap<>(num, random.nextBoolean());
         for (int i = 0; i < num; i++) {
@@ -520,10 +458,8 @@ public class TestRandomChains extends BaseTokenStreamTestCase {
           map.put(TestUtil.randomSimpleString(random), TestUtil.randomSimpleString(random));
         }
         return map;
-      }
     });
-    put(StemmerOverrideMap.class, new ArgProducer() {
-      @Override public Object create(Random random) {
+    put(StemmerOverrideMap.class, random -> {
         int num = random.nextInt(10);
         StemmerOverrideFilter.Builder builder = new StemmerOverrideFilter.Builder(random.nextBoolean());
         for (int i = 0; i < num; i++) {
@@ -542,11 +478,10 @@ public class TestRandomChains extends BaseTokenStreamTestCase {
         } catch (Exception ex) {
           Rethrow.rethrow(ex);
           return null; // unreachable code
-        }
       }
     });
-    put(SynonymMap.class, new ArgProducer() {
-      @Override public Object create(Random random) {
+    put(SynonymMap.class, new Function<Random, Object>() {
+      @Override public Object apply(Random random) {
         SynonymMap.Builder b = new SynonymMap.Builder(random.nextBoolean());
         final int numEntries = atLeast(10);
         for (int j = 0; j < numEntries; j++) {
@@ -575,12 +510,12 @@ public class TestRandomChains extends BaseTokenStreamTestCase {
         }
       }    
     });
-    put(DateFormat.class, new ArgProducer() {
-      @Override
-      public Object create(Random random) {
+    put(DateFormat.class, random -> {
         if (random.nextBoolean()) return null;
         return DateFormat.getDateInstance(DateFormat.DEFAULT, randomLocale(random));
-      }
+    });
+    put(Automaton.class, random -> {
+        return Operations.determinize(new RegExp(AutomatonTestUtil.randomRegexp(random), RegExp.NONE).toAutomaton(), Operations.DEFAULT_MAX_DETERMINIZED_STATES);
     });
   }};
   
@@ -591,7 +526,8 @@ public class TestRandomChains extends BaseTokenStreamTestCase {
     allowedTokenizerArgs.add(Reader.class);
     allowedTokenizerArgs.add(AttributeFactory.class);
     allowedTokenizerArgs.add(AttributeSource.class);
-    
+    allowedTokenizerArgs.add(Automaton.class);
+
     allowedTokenFilterArgs = Collections.newSetFromMap(new IdentityHashMap<Class<?>,Boolean>());
     allowedTokenFilterArgs.addAll(argProducers.keySet());
     allowedTokenFilterArgs.add(TokenStream.class);
@@ -605,9 +541,9 @@ public class TestRandomChains extends BaseTokenStreamTestCase {
   
   @SuppressWarnings("unchecked")
   static <T> T newRandomArg(Random random, Class<T> paramType) {
-    final ArgProducer producer = argProducers.get(paramType);
+    final Function<Random,Object> producer = argProducers.get(paramType);
     assertNotNull("No producer for arguments of type " + paramType.getName() + " found", producer);
-    return (T) producer.create(random);
+    return (T) producer.apply(random);
   }
   
   static Object[] newTokenizerArgs(Random random, Class<?>[] paramTypes) {
@@ -656,25 +592,17 @@ public class TestRandomChains extends BaseTokenStreamTestCase {
 
   static class MockRandomAnalyzer extends Analyzer {
     final long seed;
-    
+
     MockRandomAnalyzer(long seed) {
       this.seed = seed;
     }
 
-    public boolean offsetsAreCorrect() {
-      // TODO: can we not do the full chain here!?
-      Random random = new Random(seed);
-      TokenizerSpec tokenizerSpec = newTokenizer(random);
-      TokenFilterSpec filterSpec = newFilterChain(random, tokenizerSpec.tokenizer, tokenizerSpec.offsetsAreCorrect);
-      return filterSpec.offsetsAreCorrect;
-    }
-    
     @Override
     protected TokenStreamComponents createComponents(String fieldName) {
       Random random = new Random(seed);
       TokenizerSpec tokenizerSpec = newTokenizer(random);
       //System.out.println("seed=" + seed + ",create tokenizer=" + tokenizerSpec.toString);
-      TokenFilterSpec filterSpec = newFilterChain(random, tokenizerSpec.tokenizer, tokenizerSpec.offsetsAreCorrect);
+      TokenFilterSpec filterSpec = newFilterChain(random, tokenizerSpec.tokenizer);
       //System.out.println("seed=" + seed + ",create filter=" + filterSpec.toString);
       return new TokenStreamComponents(tokenizerSpec.tokenizer, filterSpec.stream);
     }
@@ -699,16 +627,14 @@ public class TestRandomChains extends BaseTokenStreamTestCase {
       sb.append("\n");
       sb.append("tokenizer=");
       sb.append(tokenizerSpec.toString);
-      TokenFilterSpec tokenFilterSpec = newFilterChain(random, tokenizerSpec.tokenizer, tokenizerSpec.offsetsAreCorrect);
+      TokenFilterSpec tokenFilterSpec = newFilterChain(random, tokenizerSpec.tokenizer);
       sb.append("\n");
       sb.append("filters=");
       sb.append(tokenFilterSpec.toString);
-      sb.append("\n");
-      sb.append("offsetsAreCorrect=" + tokenFilterSpec.offsetsAreCorrect);
       return sb.toString();
     }
     
-    private <T> T createComponent(Constructor<T> ctor, Object[] args, StringBuilder descr) {
+    private <T> T createComponent(Constructor<T> ctor, Object[] args, StringBuilder descr, boolean isConditional) {
       try {
         final T instance = ctor.newInstance(args);
         /*
@@ -717,6 +643,9 @@ public class TestRandomChains extends BaseTokenStreamTestCase {
         }
         */
         descr.append("\n  ");
+        if (isConditional) {
+          descr.append("Conditional:");
+        }
         descr.append(ctor.getDeclaringClass().getName());
         String params = Arrays.deepToString(args);
         params = params.substring(1, params.length()-1);
@@ -742,12 +671,7 @@ public class TestRandomChains extends BaseTokenStreamTestCase {
 
     private boolean broken(Constructor<?> ctor, Object[] args) {
       final Predicate<Object[]> pred = brokenConstructors.get(ctor);
-      return pred != null && pred.apply(args);
-    }
-
-    private boolean brokenOffsets(Constructor<?> ctor, Object[] args) {
-      final Predicate<Object[]> pred = brokenOffsetsConstructors.get(ctor);
-      return pred != null && pred.apply(args);
+      return pred != null && pred.test(args);
     }
 
     // create a new random tokenizer from classpath
@@ -760,9 +684,8 @@ public class TestRandomChains extends BaseTokenStreamTestCase {
         if (broken(ctor, args)) {
           continue;
         }
-        spec.tokenizer = createComponent(ctor, args, descr);
+        spec.tokenizer = createComponent(ctor, args, descr, false);
         if (spec.tokenizer != null) {
-          spec.offsetsAreCorrect &= !brokenOffsets(ctor, args);
           spec.toString = descr.toString();
         }
       }
@@ -781,7 +704,7 @@ public class TestRandomChains extends BaseTokenStreamTestCase {
           if (broken(ctor, args)) {
             continue;
           }
-          reader = createComponent(ctor, args, descr);
+          reader = createComponent(ctor, args, descr, false);
           if (reader != null) {
             spec.reader = reader;
             break;
@@ -792,9 +715,8 @@ public class TestRandomChains extends BaseTokenStreamTestCase {
       return spec;
     }
     
-    private TokenFilterSpec newFilterChain(Random random, Tokenizer tokenizer, boolean offsetsAreCorrect) {
+    private TokenFilterSpec newFilterChain(Random random, Tokenizer tokenizer) {
       TokenFilterSpec spec = new TokenFilterSpec();
-      spec.offsetsAreCorrect = offsetsAreCorrect;
       spec.stream = tokenizer;
       StringBuilder descr = new StringBuilder();
       int numFilters = random.nextInt(5);
@@ -803,28 +725,48 @@ public class TestRandomChains extends BaseTokenStreamTestCase {
         // Insert ValidatingTF after each stage so we can
         // catch problems right after the TF that "caused"
         // them:
-        spec.stream = new ValidatingTokenFilter(spec.stream, "stage " + i, spec.offsetsAreCorrect);
+        spec.stream = new ValidatingTokenFilter(spec.stream, "stage " + i);
 
         while (true) {
           final Constructor<? extends TokenFilter> ctor = tokenfilters.get(random.nextInt(tokenfilters.size()));
-          
-          // hack: MockGraph/MockLookahead has assertions that will trip if they follow
-          // an offsets violator. so we cant use them after e.g. wikipediatokenizer
-          if (!spec.offsetsAreCorrect &&
-              (ctor.getDeclaringClass().equals(MockGraphTokenFilter.class)
-               || ctor.getDeclaringClass().equals(MockRandomLookaheadTokenFilter.class))) {
-            continue;
-          }
-          
-          final Object args[] = newFilterArgs(random, spec.stream, ctor.getParameterTypes());
-          if (broken(ctor, args)) {
-            continue;
-          }
-          final TokenFilter flt = createComponent(ctor, args, descr);
-          if (flt != null) {
-            spec.offsetsAreCorrect &= !brokenOffsets(ctor, args);
-            spec.stream = flt;
+          if (random.nextBoolean() && avoidConditionals.contains(ctor.getDeclaringClass()) == false) {
+            long seed = random.nextLong();
+            spec.stream = new ConditionalTokenFilter(spec.stream, in -> {
+              final Object args[] = newFilterArgs(random, in, ctor.getParameterTypes());
+              if (broken(ctor, args)) {
+                return in;
+              }
+              TokenStream ts = createComponent(ctor, args, descr, true);
+              if (ts == null) {
+                return in;
+              }
+              return ts;
+            }) {
+              Random random = new Random(seed);
+
+              @Override
+              public void reset() throws IOException {
+                super.reset();
+                random = new Random(seed);
+              }
+
+              @Override
+              protected boolean shouldFilter() throws IOException {
+                return random.nextBoolean();
+              }
+            };
             break;
+          }
+          else {
+            final Object args[] = newFilterArgs(random, spec.stream, ctor.getParameterTypes());
+            if (broken(ctor, args)) {
+              continue;
+            }
+            final TokenFilter flt = createComponent(ctor, args, descr, false);
+            if (flt != null) {
+              spec.stream = flt;
+              break;
+            }
           }
         }
       }
@@ -832,7 +774,7 @@ public class TestRandomChains extends BaseTokenStreamTestCase {
       // Insert ValidatingTF after each stage so we can
       // catch problems right after the TF that "caused"
       // them:
-      spec.stream = new ValidatingTokenFilter(spec.stream, "last stage", spec.offsetsAreCorrect);
+      spec.stream = new ValidatingTokenFilter(spec.stream, "last stage");
 
       spec.toString = descr.toString();
       return spec;
@@ -905,20 +847,18 @@ public class TestRandomChains extends BaseTokenStreamTestCase {
   static class TokenizerSpec {
     Tokenizer tokenizer;
     String toString;
-    boolean offsetsAreCorrect = true;
   }
   
   static class TokenFilterSpec {
     TokenStream stream;
     String toString;
-    boolean offsetsAreCorrect = true;
   }
   
   static class CharFilterSpec {
     Reader reader;
     String toString;
   }
-  
+
   public void testRandomChains() throws Throwable {
     int numIterations = TEST_NIGHTLY ? atLeast(20) : 3;
     Random random = random();

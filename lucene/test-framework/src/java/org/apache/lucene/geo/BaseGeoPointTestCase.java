@@ -37,16 +37,13 @@ import org.apache.lucene.document.Field;
 import org.apache.lucene.document.NumericDocValuesField;
 import org.apache.lucene.document.StoredField;
 import org.apache.lucene.document.StringField;
-import org.apache.lucene.geo.Rectangle;
-import org.apache.lucene.geo.GeoUtils;
-import org.apache.lucene.geo.Polygon;
 import org.apache.lucene.index.DirectoryReader;
 import org.apache.lucene.index.IndexReader;
 import org.apache.lucene.index.IndexWriter;
 import org.apache.lucene.index.IndexWriterConfig;
 import org.apache.lucene.index.LeafReaderContext;
+import org.apache.lucene.index.MultiBits;
 import org.apache.lucene.index.MultiDocValues;
-import org.apache.lucene.index.MultiFields;
 import org.apache.lucene.index.NumericDocValues;
 import org.apache.lucene.index.RandomIndexWriter;
 import org.apache.lucene.index.SegmentReadState;
@@ -57,6 +54,7 @@ import org.apache.lucene.search.IndexSearcher;
 import org.apache.lucene.search.MatchNoDocsQuery;
 import org.apache.lucene.search.Query;
 import org.apache.lucene.search.ScoreDoc;
+import org.apache.lucene.search.ScoreMode;
 import org.apache.lucene.search.SimpleCollector;
 import org.apache.lucene.search.Sort;
 import org.apache.lucene.search.TopDocs;
@@ -101,7 +99,12 @@ public abstract class BaseGeoPointTestCase extends LuceneTestCase {
   protected Polygon nextPolygon() {
     return org.apache.lucene.geo.GeoTestUtil.nextPolygon();
   }
-  
+
+  /** Whether this impl supports polygons. */
+  protected boolean supportsPolygons() {
+    return true;
+  }
+
   /** Valid values that should not cause exception */
   public void testIndexExtremeValues() {
     Document document = new Document();
@@ -287,6 +290,7 @@ public abstract class BaseGeoPointTestCase extends LuceneTestCase {
   
   /** test we can search for a polygon */
   public void testPolygonBasics() throws Exception {
+    assumeTrue("Impl does not support polygons", supportsPolygons());
     Directory dir = newDirectory();
     RandomIndexWriter writer = new RandomIndexWriter(random(), dir);
 
@@ -309,6 +313,7 @@ public abstract class BaseGeoPointTestCase extends LuceneTestCase {
   
   /** test we can search for a polygon with a hole (but still includes the doc) */
   public void testPolygonHole() throws Exception {
+    assumeTrue("Impl does not support polygons", supportsPolygons());
     Directory dir = newDirectory();
     RandomIndexWriter writer = new RandomIndexWriter(random(), dir);
 
@@ -333,6 +338,7 @@ public abstract class BaseGeoPointTestCase extends LuceneTestCase {
   
   /** test we can search for a polygon with a hole (that excludes the doc) */
   public void testPolygonHoleExcludes() throws Exception {
+    assumeTrue("Impl does not support polygons", supportsPolygons());
     Directory dir = newDirectory();
     RandomIndexWriter writer = new RandomIndexWriter(random(), dir);
 
@@ -357,6 +363,7 @@ public abstract class BaseGeoPointTestCase extends LuceneTestCase {
   
   /** test we can search for a multi-polygon */
   public void testMultiPolygonBasics() throws Exception {
+    assumeTrue("Impl does not support polygons", supportsPolygons());
     Directory dir = newDirectory();
     RandomIndexWriter writer = new RandomIndexWriter(random(), dir);
 
@@ -381,6 +388,7 @@ public abstract class BaseGeoPointTestCase extends LuceneTestCase {
   
   /** null field name not allowed */
   public void testPolygonNullField() {
+    assumeTrue("Impl does not support polygons", supportsPolygons());
     IllegalArgumentException expected = expectThrows(IllegalArgumentException.class, () -> {
       newPolygonQuery(null, new Polygon(
           new double[] { 18, 18, 19, 19, 18 },
@@ -557,8 +565,8 @@ public abstract class BaseGeoPointTestCase extends LuceneTestCase {
           private int docBase;
 
           @Override
-          public boolean needsScores() {
-            return false;
+          public ScoreMode scoreMode() {
+            return ScoreMode.COMPLETE_NO_SCORES;
           }
 
           @Override
@@ -619,7 +627,6 @@ public abstract class BaseGeoPointTestCase extends LuceneTestCase {
   @Nightly
   public void testRandomBig() throws Exception {
     assumeFalse("Direct codec can OOME on this test", TestUtil.getDocValuesFormat(FIELD_NAME).equals("Direct"));
-    assumeFalse("Memory codec can OOME on this test", TestUtil.getDocValuesFormat(FIELD_NAME).equals("Memory"));
     doTestRandom(200000);
   }
 
@@ -742,7 +749,9 @@ public abstract class BaseGeoPointTestCase extends LuceneTestCase {
     }
     verifyRandomRectangles(lats, lons);
     verifyRandomDistances(lats, lons);
-    verifyRandomPolygons(lats, lons);
+    if (supportsPolygons()) {
+      verifyRandomPolygons(lats, lons);
+    }
   }
 
   protected void verifyRandomRectangles(double[] lats, double[] lons) throws Exception {
@@ -792,9 +801,7 @@ public abstract class BaseGeoPointTestCase extends LuceneTestCase {
 
     int iters = atLeast(25);
 
-    NumericDocValues docIDToID = MultiDocValues.getNumericValues(r, "id");
-
-    Bits liveDocs = MultiFields.getLiveDocs(s.getIndexReader());
+    Bits liveDocs = MultiBits.getLiveDocs(s.getIndexReader());
     int maxDoc = s.getIndexReader().maxDoc();
 
     for (int iter=0;iter<iters;iter++) {
@@ -817,8 +824,8 @@ public abstract class BaseGeoPointTestCase extends LuceneTestCase {
           private int docBase;
 
           @Override
-          public boolean needsScores() {
-            return false;
+          public ScoreMode scoreMode() {
+            return ScoreMode.COMPLETE_NO_SCORES;
           }
 
           @Override
@@ -833,8 +840,10 @@ public abstract class BaseGeoPointTestCase extends LuceneTestCase {
         });
 
       boolean fail = false;
+      NumericDocValues docIDToID = MultiDocValues.getNumericValues(r, "id");
       for(int docID=0;docID<maxDoc;docID++) {
-        int id = (int) docIDToID.get(docID);
+        assertEquals(docID, docIDToID.nextDoc());
+        int id = (int) docIDToID.longValue();
         boolean expected;
         if (liveDocs != null && liveDocs.get(docID) == false) {
           // document is deleted
@@ -847,6 +856,7 @@ public abstract class BaseGeoPointTestCase extends LuceneTestCase {
 
         if (hits.get(docID) != expected) {
           StringBuilder b = new StringBuilder();
+          b.append("docID=(" + docID + ")\n");
 
           if (expected) {
             b.append("FAIL: id=" + id + " should match but did not\n");
@@ -920,9 +930,7 @@ public abstract class BaseGeoPointTestCase extends LuceneTestCase {
 
     int iters = atLeast(25);
 
-    NumericDocValues docIDToID = MultiDocValues.getNumericValues(r, "id");
-
-    Bits liveDocs = MultiFields.getLiveDocs(s.getIndexReader());
+    Bits liveDocs = MultiBits.getLiveDocs(s.getIndexReader());
     int maxDoc = s.getIndexReader().maxDoc();
 
     for (int iter=0;iter<iters;iter++) {
@@ -955,8 +963,8 @@ public abstract class BaseGeoPointTestCase extends LuceneTestCase {
           private int docBase;
 
           @Override
-          public boolean needsScores() {
-            return false;
+          public ScoreMode scoreMode() {
+            return ScoreMode.COMPLETE_NO_SCORES;
           }
 
           @Override
@@ -971,8 +979,10 @@ public abstract class BaseGeoPointTestCase extends LuceneTestCase {
         });
 
       boolean fail = false;
+      NumericDocValues docIDToID = MultiDocValues.getNumericValues(r, "id");
       for(int docID=0;docID<maxDoc;docID++) {
-        int id = (int) docIDToID.get(docID);
+        assertEquals(docID, docIDToID.nextDoc());
+        int id = (int) docIDToID.longValue();
         boolean expected;
         if (liveDocs != null && liveDocs.get(docID) == false) {
           // document is deleted
@@ -1062,9 +1072,7 @@ public abstract class BaseGeoPointTestCase extends LuceneTestCase {
 
     final int iters = atLeast(75);
 
-    NumericDocValues docIDToID = MultiDocValues.getNumericValues(r, "id");
-
-    Bits liveDocs = MultiFields.getLiveDocs(s.getIndexReader());
+    Bits liveDocs = MultiBits.getLiveDocs(s.getIndexReader());
     int maxDoc = s.getIndexReader().maxDoc();
 
     for (int iter=0;iter<iters;iter++) {
@@ -1087,8 +1095,8 @@ public abstract class BaseGeoPointTestCase extends LuceneTestCase {
           private int docBase;
 
           @Override
-          public boolean needsScores() {
-            return false;
+          public ScoreMode scoreMode() {
+            return ScoreMode.COMPLETE_NO_SCORES;
           }
 
           @Override
@@ -1103,8 +1111,10 @@ public abstract class BaseGeoPointTestCase extends LuceneTestCase {
         });
 
       boolean fail = false;
+      NumericDocValues docIDToID = MultiDocValues.getNumericValues(r, "id");
       for(int docID=0;docID<maxDoc;docID++) {
-        int id = (int) docIDToID.get(docID);
+        assertEquals(docID, docIDToID.nextDoc());
+        int id = (int) docIDToID.longValue();
         boolean expected;
         if (liveDocs != null && liveDocs.get(docID) == false) {
           // document is deleted
@@ -1242,7 +1252,7 @@ public abstract class BaseGeoPointTestCase extends LuceneTestCase {
     // Else seeds may not reproduce:
     iwc.setMergeScheduler(new SerialMergeScheduler());
     int pointsInLeaf = 2 + random().nextInt(4);
-    iwc.setCodec(new FilterCodec("Lucene62", TestUtil.getDefaultCodec()) {
+    iwc.setCodec(new FilterCodec("Lucene80", TestUtil.getDefaultCodec()) {
       @Override
       public PointsFormat pointsFormat() {
         return new PointsFormat() {
@@ -1347,10 +1357,12 @@ public abstract class BaseGeoPointTestCase extends LuceneTestCase {
     lons[3] = rect.maxLon;
     lats[4] = rect.minLat;
     lons[4] = rect.minLon;
-    q1 = newPolygonQuery("field", new Polygon(lats, lons));
-    q2 = newPolygonQuery("field", new Polygon(lats, lons));
-    assertEquals(q1, q2);
-    assertFalse(q1.equals(newPolygonQuery("field2", new Polygon(lats, lons))));
+    if (supportsPolygons()) {
+      q1 = newPolygonQuery("field", new Polygon(lats, lons));
+      q2 = newPolygonQuery("field", new Polygon(lats, lons));
+      assertEquals(q1, q2);
+      assertFalse(q1.equals(newPolygonQuery("field2", new Polygon(lats, lons))));
+    }
   }
   
   /** return topdocs over a small set of points in field "point" */
@@ -1419,26 +1431,27 @@ public abstract class BaseGeoPointTestCase extends LuceneTestCase {
   
   public void testSmallSetRect() throws Exception {
     TopDocs td = searchSmallSet(newRectQuery("point", 32.778, 32.779, -96.778, -96.777), 5);
-    assertEquals(4, td.totalHits);
+    assertEquals(4, td.totalHits.value);
   }
 
   public void testSmallSetDateline() throws Exception {
     TopDocs td = searchSmallSet(newRectQuery("point", -45.0, -44.0, 179.0, -179.0), 20);
-    assertEquals(2, td.totalHits);
+    assertEquals(2, td.totalHits.value);
   }
 
   public void testSmallSetMultiValued() throws Exception {
     TopDocs td = searchSmallSet(newRectQuery("point", 32.755, 32.776, -96.454, -96.770), 20);
     // 3 single valued docs + 2 multi-valued docs
-    assertEquals(5, td.totalHits);
+    assertEquals(5, td.totalHits.value);
   }
   
   public void testSmallSetWholeMap() throws Exception {
     TopDocs td = searchSmallSet(newRectQuery("point", GeoUtils.MIN_LAT_INCL, GeoUtils.MAX_LAT_INCL, GeoUtils.MIN_LON_INCL, GeoUtils.MAX_LON_INCL), 20);
-    assertEquals(24, td.totalHits);
+    assertEquals(24, td.totalHits.value);
   }
   
   public void testSmallSetPoly() throws Exception {
+    assumeTrue("Impl does not support polygons", supportsPolygons());
     TopDocs td = searchSmallSet(newPolygonQuery("point",
         new Polygon(
         new double[]{33.073130, 32.9942669, 32.938386, 33.0374494,
@@ -1446,32 +1459,33 @@ public abstract class BaseGeoPointTestCase extends LuceneTestCase {
         new double[]{-96.7682647, -96.8280029, -96.6288757, -96.4929199,
                      -96.6041564, -96.7449188, -96.76826477, -96.7682647})),
         5);
-    assertEquals(2, td.totalHits);
+    assertEquals(2, td.totalHits.value);
   }
 
   public void testSmallSetPolyWholeMap() throws Exception {
+    assumeTrue("Impl does not support polygons", supportsPolygons());
     TopDocs td = searchSmallSet(newPolygonQuery("point",
                       new Polygon(
                       new double[] {GeoUtils.MIN_LAT_INCL, GeoUtils.MAX_LAT_INCL, GeoUtils.MAX_LAT_INCL, GeoUtils.MIN_LAT_INCL, GeoUtils.MIN_LAT_INCL},
                       new double[] {GeoUtils.MIN_LON_INCL, GeoUtils.MIN_LON_INCL, GeoUtils.MAX_LON_INCL, GeoUtils.MAX_LON_INCL, GeoUtils.MIN_LON_INCL})),
                       20);    
-    assertEquals("testWholeMap failed", 24, td.totalHits);
+    assertEquals("testWholeMap failed", 24, td.totalHits.value);
   }
 
   public void testSmallSetDistance() throws Exception {
     TopDocs td = searchSmallSet(newDistanceQuery("point", 32.94823588839368, -96.4538113027811, 6000), 20);
-    assertEquals(2, td.totalHits);
+    assertEquals(2, td.totalHits.value);
   }
   
   public void testSmallSetTinyDistance() throws Exception {
     TopDocs td = searchSmallSet(newDistanceQuery("point", 40.720611, -73.998776, 1), 20);
-    assertEquals(2, td.totalHits);
+    assertEquals(2, td.totalHits.value);
   }
 
   /** see https://issues.apache.org/jira/browse/LUCENE-6905 */
   public void testSmallSetDistanceNotEmpty() throws Exception {
     TopDocs td = searchSmallSet(newDistanceQuery("point", -88.56029371730983, -177.23537676036358, 7757.999232959935), 20);
-    assertEquals(2, td.totalHits);
+    assertEquals(2, td.totalHits.value);
   }
 
   /**
@@ -1479,11 +1493,11 @@ public abstract class BaseGeoPointTestCase extends LuceneTestCase {
    */
   public void testSmallSetHugeDistance() throws Exception {
     TopDocs td = searchSmallSet(newDistanceQuery("point", 32.94823588839368, -96.4538113027811, 6000000), 20);
-    assertEquals(16, td.totalHits);
+    assertEquals(16, td.totalHits.value);
   }
 
   public void testSmallSetDistanceDateline() throws Exception {
     TopDocs td = searchSmallSet(newDistanceQuery("point", 32.94823588839368, -179.9538113027811, 120000), 20);
-    assertEquals(3, td.totalHits);
+    assertEquals(3, td.totalHits.value);
   }
 }

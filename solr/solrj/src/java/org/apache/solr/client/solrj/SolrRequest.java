@@ -16,14 +16,20 @@
  */
 package org.apache.solr.client.solrj;
 
+import java.io.IOException;
+import java.io.Serializable;
+import java.security.Principal;
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.HashSet;
+import java.util.Set;
+import java.util.concurrent.TimeUnit;
+
+import org.apache.solr.client.solrj.request.RequestWriter;
 import org.apache.solr.common.params.SolrParams;
 import org.apache.solr.common.util.ContentStream;
 
-import java.io.IOException;
-import java.io.Serializable;
-import java.util.Collection;
-import java.util.Set;
-import java.util.concurrent.TimeUnit;
+import static java.util.Collections.unmodifiableSet;
 
 /**
  * 
@@ -31,12 +37,29 @@ import java.util.concurrent.TimeUnit;
  * @since solr 1.3
  */
 public abstract class SolrRequest<T extends SolrResponse> implements Serializable {
+  // This user principal is typically used by Auth plugins during distributed/sharded search
+  private Principal userPrincipal;
+
+  public void setUserPrincipal(Principal userPrincipal) {
+    this.userPrincipal = userPrincipal;
+  }
+
+  public Principal getUserPrincipal() {
+    return userPrincipal;
+  }
 
   public enum METHOD {
     GET,
     POST,
-    PUT
+    PUT,
+    DELETE
   };
+
+  public static final Set<String> SUPPORTED_METHODS = unmodifiableSet(new HashSet<>(Arrays.<String>asList(
+      METHOD.GET.toString(),
+      METHOD.POST.toString(),
+      METHOD.PUT.toString(),
+      METHOD.DELETE.toString())));
 
   private METHOD method = METHOD.GET;
   private String path = null;
@@ -45,7 +68,27 @@ public abstract class SolrRequest<T extends SolrResponse> implements Serializabl
   private StreamingResponseCallback callback;
   private Set<String> queryParams;
 
+  protected boolean usev2;
+  protected boolean useBinaryV2;
+
+  /**If set to true, every request that implements {@link V2RequestSupport} will be converted
+   * to a V2 API call
+   */
+  public SolrRequest setUseV2(boolean flag){
+    this.usev2 = flag;
+    return this;
+  }
+
+  /**If set to true use javabin instead of json (default)
+   */
+  public SolrRequest setUseBinaryV2(boolean flag){
+    this.useBinaryV2 = flag;
+    return this;
+  }
+
   private String basicAuthUser, basicAuthPwd;
+
+  private String basePath;
 
   public SolrRequest setBasicAuthCredentials(String user, String password) {
     this.basicAuthUser = user;
@@ -124,7 +167,22 @@ public abstract class SolrRequest<T extends SolrResponse> implements Serializabl
 
   public abstract SolrParams getParams();
 
-  public abstract Collection<ContentStream> getContentStreams() throws IOException;
+  /**
+   * @deprecated Please use {@link SolrRequest#getContentWriter(String)} instead.
+   */
+  @Deprecated
+  public Collection<ContentStream> getContentStreams() throws IOException {
+    return null;
+  }
+
+  /**
+   * If a request object wants to do a push write, implement this method.
+   *
+   * @param expectedType This is the type that the RequestWriter would like to get. But, it is OK to send any format
+   */
+  public RequestWriter.ContentWriter getContentWriter(String expectedType) {
+    return null;
+  }
 
   /**
    * Create a new SolrResponse to hold the response from the server
@@ -144,11 +202,11 @@ public abstract class SolrRequest<T extends SolrResponse> implements Serializabl
    * @throws IOException if there is a communication error
    */
   public final T process(SolrClient client, String collection) throws SolrServerException, IOException {
-    long startTime = TimeUnit.MILLISECONDS.convert(System.nanoTime(), TimeUnit.NANOSECONDS);
+    long startNanos = System.nanoTime();
     T res = createResponse(client);
     res.setResponse(client.request(this, collection));
-    long endTime = TimeUnit.MILLISECONDS.convert(System.nanoTime(), TimeUnit.NANOSECONDS);
-    res.setElapsedTime(endTime - startTime);
+    long endNanos = System.nanoTime();
+    res.setElapsedTime(TimeUnit.NANOSECONDS.toMillis(endNanos - startNanos));
     return res;
   }
 
@@ -166,4 +224,17 @@ public abstract class SolrRequest<T extends SolrResponse> implements Serializabl
     return process(client, null);
   }
 
+  public String getCollection() {
+    return getParams() == null ? null : getParams().get("collection");
+  }
+
+  public void setBasePath(String path) {
+    if (path.endsWith("/")) path = path.substring(0, path.length() - 1);
+
+    this.basePath = path;
+  }
+
+  public String getBasePath() {
+    return basePath;
+  }
 }

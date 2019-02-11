@@ -76,6 +76,8 @@ import org.apache.lucene.analysis.util.ResourceLoaderAware;
  * <p>
  * Parameters nBestCost and nBestExamples work with all tokenizer
  * modes, but it makes the most sense to use them with NORMAL mode.
+ *
+ * @since 3.6.0
  */
 public class JapaneseTokenizerFactory extends TokenizerFactory implements ResourceLoaderAware {
   private static final String MODE = "mode";
@@ -127,16 +129,17 @@ public class JapaneseTokenizerFactory extends TokenizerFactory implements Resour
   @Override
   public void inform(ResourceLoader loader) throws IOException {
     if (userDictionaryPath != null) {
-      InputStream stream = loader.openResource(userDictionaryPath);
-      String encoding = userDictionaryEncoding;
-      if (encoding == null) {
-        encoding = IOUtils.UTF_8;
-      }
-      CharsetDecoder decoder = Charset.forName(encoding).newDecoder()
+      try (InputStream stream = loader.openResource(userDictionaryPath)) {
+        String encoding = userDictionaryEncoding;
+        if (encoding == null) {
+          encoding = IOUtils.UTF_8;
+        }
+        CharsetDecoder decoder = Charset.forName(encoding).newDecoder()
           .onMalformedInput(CodingErrorAction.REPORT)
           .onUnmappableCharacter(CodingErrorAction.REPORT);
-      Reader reader = new InputStreamReader(stream, decoder);
-      userDictionary = UserDictionary.open(reader);
+        Reader reader = new InputStreamReader(stream, decoder);
+        userDictionary = UserDictionary.open(reader);
+      }
     } else {
       userDictionary = null;
     }

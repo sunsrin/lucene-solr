@@ -74,6 +74,11 @@ public class SynonymMap {
     private int maxHorizontalContext;
     private final boolean dedup;
 
+    /** Default constructor, passes {@code dedup=true}. */
+    public Builder() {
+      this(true);
+    }
+
     /** If dedup is true then identical rules (same input,
      *  same output) will be added only once. */
     public Builder(boolean dedup) {
@@ -109,8 +114,6 @@ public class SynonymMap {
       reuse.setLength(upto);
       return reuse.get();
     }
-    
-
 
     /** only used for asserting! */
     private boolean hasHoles(CharsRef chars) {
@@ -318,7 +321,8 @@ public class SynonymMap {
             throw new IllegalArgumentException("term: " + text + " analyzed to a zero-length token");
           }
           if (posIncAtt.getPositionIncrement() != 1) {
-            throw new IllegalArgumentException("term: " + text + " analyzed to a token with posinc != 1");
+            throw new IllegalArgumentException("term: " + text + " analyzed to a token (" + termAtt +
+                                               ") with position increment != 1 (got: " + posIncAtt.getPositionIncrement() + ")");
           }
           reuse.grow(reuse.length() + length + 1); /* current + word + separator */
           int end = reuse.length();

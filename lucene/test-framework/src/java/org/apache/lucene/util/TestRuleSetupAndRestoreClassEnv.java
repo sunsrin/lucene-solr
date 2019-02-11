@@ -16,6 +16,17 @@
  */
 package org.apache.lucene.util;
 
+import static org.apache.lucene.util.LuceneTestCase.INFOSTREAM;
+import static org.apache.lucene.util.LuceneTestCase.TEST_CODEC;
+import static org.apache.lucene.util.LuceneTestCase.TEST_DOCVALUESFORMAT;
+import static org.apache.lucene.util.LuceneTestCase.TEST_POSTINGSFORMAT;
+import static org.apache.lucene.util.LuceneTestCase.VERBOSE;
+import static org.apache.lucene.util.LuceneTestCase.assumeFalse;
+import static org.apache.lucene.util.LuceneTestCase.localeForLanguageTag;
+import static org.apache.lucene.util.LuceneTestCase.random;
+import static org.apache.lucene.util.LuceneTestCase.randomLocale;
+import static org.apache.lucene.util.LuceneTestCase.randomTimeZone;
+
 import java.io.PrintStream;
 import java.util.Arrays;
 import java.util.HashSet;
@@ -32,30 +43,19 @@ import org.apache.lucene.codecs.asserting.AssertingPostingsFormat;
 import org.apache.lucene.codecs.cheapbastard.CheapBastardCodec;
 import org.apache.lucene.codecs.compressing.CompressingCodec;
 import org.apache.lucene.codecs.lucene50.Lucene50StoredFieldsFormat;
-import org.apache.lucene.codecs.lucene62.Lucene62Codec;
+import org.apache.lucene.codecs.lucene80.Lucene80Codec;
 import org.apache.lucene.codecs.mockrandom.MockRandomPostingsFormat;
 import org.apache.lucene.codecs.simpletext.SimpleTextCodec;
 import org.apache.lucene.index.RandomCodec;
-import org.apache.lucene.search.similarities.ClassicSimilarity;
+import org.apache.lucene.search.similarities.AssertingSimilarity;
 import org.apache.lucene.search.similarities.RandomSimilarity;
 import org.apache.lucene.search.similarities.Similarity;
+import org.apache.lucene.util.LuceneTestCase.LiveIWCFlushMode;
 import org.apache.lucene.util.LuceneTestCase.SuppressCodecs;
 import org.junit.internal.AssumptionViolatedException;
 
 import com.carrotsearch.randomizedtesting.RandomizedContext;
 import com.carrotsearch.randomizedtesting.generators.RandomPicks;
-
-import static org.apache.lucene.util.LuceneTestCase.INFOSTREAM;
-import static org.apache.lucene.util.LuceneTestCase.LiveIWCFlushMode;
-import static org.apache.lucene.util.LuceneTestCase.TEST_CODEC;
-import static org.apache.lucene.util.LuceneTestCase.TEST_DOCVALUESFORMAT;
-import static org.apache.lucene.util.LuceneTestCase.TEST_POSTINGSFORMAT;
-import static org.apache.lucene.util.LuceneTestCase.VERBOSE;
-import static org.apache.lucene.util.LuceneTestCase.assumeFalse;
-import static org.apache.lucene.util.LuceneTestCase.localeForLanguageTag;
-import static org.apache.lucene.util.LuceneTestCase.random;
-import static org.apache.lucene.util.LuceneTestCase.randomLocale;
-import static org.apache.lucene.util.LuceneTestCase.randomTimeZone;
 
 /**
  * Setup and restore suite-level environment (fine grained junk that 
@@ -73,12 +73,16 @@ final class TestRuleSetupAndRestoreClassEnv extends AbstractBeforeAfterRule {
   Codec codec;
 
   /**
+   * Indicates whether the rule has executed its {@link #before()} method fully.
+   */
+  private boolean initialized;
+
+  /**
    * @see SuppressCodecs
    */
   HashSet<String> avoidCodecs;
 
   static class ThreadNameFixingPrintStreamInfoStream extends PrintStreamInfoStream {
-
     public ThreadNameFixingPrintStreamInfoStream(PrintStream out) {
       super(out);
     }
@@ -99,6 +103,10 @@ final class TestRuleSetupAndRestoreClassEnv extends AbstractBeforeAfterRule {
       stream.println(component + " " + messageID + " [" + getTimestamp() + "; " + name + "]: " + message);    
     }
   }
+  
+  public boolean isInitialized() {
+    return initialized;
+  }
 
   @Override
   protected void before() throws Exception {
@@ -113,7 +121,6 @@ final class TestRuleSetupAndRestoreClassEnv extends AbstractBeforeAfterRule {
     if (VERBOSE) {
       System.out.println("Loaded codecs: " + Codec.availableCodecs());
       System.out.println("Loaded postingsFormats: " + PostingsFormat.availablePostingsFormats());
-
     }
 
     savedInfoStream = InfoStream.getDefault();
@@ -181,8 +188,8 @@ final class TestRuleSetupAndRestoreClassEnv extends AbstractBeforeAfterRule {
       codec = new AssertingCodec();
     } else if ("Compressing".equals(TEST_CODEC) || ("random".equals(TEST_CODEC) && randomVal == 6 && !shouldAvoidCodec("Compressing"))) {
       codec = CompressingCodec.randomInstance(random);
-    } else if ("Lucene62".equals(TEST_CODEC) || ("random".equals(TEST_CODEC) && randomVal == 5 && !shouldAvoidCodec("Lucene62"))) {
-      codec = new Lucene62Codec(RandomPicks.randomFrom(random, Lucene50StoredFieldsFormat.Mode.values()));
+    } else if ("Lucene80".equals(TEST_CODEC) || ("random".equals(TEST_CODEC) && randomVal == 5 && !shouldAvoidCodec("Lucene80"))) {
+      codec = new Lucene80Codec(RandomPicks.randomFrom(random, Lucene50StoredFieldsFormat.Mode.values()));
     } else if (!"random".equals(TEST_CODEC)) {
       codec = Codec.forName(TEST_CODEC);
     } else if ("random".equals(TEST_POSTINGSFORMAT)) {
@@ -206,7 +213,7 @@ final class TestRuleSetupAndRestoreClassEnv extends AbstractBeforeAfterRule {
     TimeZone randomTimeZone = randomTimeZone(random());
     timeZone = testTimeZone.equals("random") ? randomTimeZone : TimeZone.getTimeZone(testTimeZone);
     TimeZone.setDefault(timeZone);
-    similarity = random().nextBoolean() ? new ClassicSimilarity() : new RandomSimilarity(random());
+    similarity = new AssertingSimilarity(new RandomSimilarity(random()));
 
     // Check codec restrictions once at class level.
     try {
@@ -235,6 +242,8 @@ final class TestRuleSetupAndRestoreClassEnv extends AbstractBeforeAfterRule {
     }
 
     LuceneTestCase.setLiveIWCFlushMode(flushMode);
+
+    initialized = true;
   }
 
   /**

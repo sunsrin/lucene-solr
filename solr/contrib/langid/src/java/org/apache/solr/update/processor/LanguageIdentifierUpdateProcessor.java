@@ -30,6 +30,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
+import java.io.Reader;
 import java.lang.invoke.MethodHandles;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -40,11 +41,11 @@ import java.util.regex.Pattern;
 
 
 /**
- * Identifies the language of a set of input fields.
- * Also supports mapping of field names based
- * on detected language.
  * <p>
- * See <a href="http://wiki.apache.org/solr/LanguageDetection">http://wiki.apache.org/solr/LanguageDetection</a>
+ *   Identifies the language of a set of input fields.
+ *   Also supports mapping of field names based on detected language.
+ * </p>
+ * See <a href="https://lucene.apache.org/solr/guide/7_4/detecting-languages-during-indexing.html">Detecting Languages During Indexing</a> in reference guide
  * @since 3.5
  * @lucene.experimental
  */
@@ -206,11 +207,10 @@ public abstract class LanguageIdentifierUpdateProcessor extends UpdateRequestPro
   }
 
   /**
-   * This is the main, testable process method called from processAdd()
-   * @param doc the SolrInputDocument to work on
-   * @return the modified SolrInputDocument
+   * This is the main process method called from processAdd()
+   * @param doc the SolrInputDocument to modify
    */
-  protected SolrInputDocument process(SolrInputDocument doc) {
+  protected void process(SolrInputDocument doc) {
     String docLang = null;
     HashSet<String> docLangs = new HashSet<>();
     String fallbackLang = getFallbackLang(doc, fallbackFields, fallbackValue);
@@ -239,7 +239,7 @@ public abstract class LanguageIdentifierUpdateProcessor extends UpdateRequestPro
         if(doc.containsKey(fieldName)) {
           String fieldLang;
           if(mapIndividual && mapIndividualFieldsSet.contains(fieldName)) {
-            List<DetectedLanguage> languagelist = detectLanguage(doc);
+            List<DetectedLanguage> languagelist = detectLanguage(solrDocReader(doc, new String[]{fieldName}));
             fieldLang = resolveLanguage(languagelist, docLang);
             docLangs.add(fieldLang);
             log.debug("Mapping field "+fieldName+" using individually detected language "+fieldLang);
@@ -252,7 +252,7 @@ public abstract class LanguageIdentifierUpdateProcessor extends UpdateRequestPro
           if (mappedOutputField != null) {
             log.debug("Mapping field {} to {}", doc.getFieldValue(docIdField), fieldLang);
             SolrInputField inField = doc.getField(fieldName);
-            doc.setField(mappedOutputField, inField.getValue(), inField.getBoost());
+            doc.setField(mappedOutputField, inField.getValue());
             if(!mapKeepOrig) {
               log.debug("Removing old field {}", fieldName);
               doc.removeField(fieldName);
@@ -269,8 +269,6 @@ public abstract class LanguageIdentifierUpdateProcessor extends UpdateRequestPro
     if(langsField != null && langsField.length() != 0) {
       doc.setField(langsField, docLangs.toArray());
     }
-
-    return doc;
   }
 
   /**
@@ -296,12 +294,21 @@ public abstract class LanguageIdentifierUpdateProcessor extends UpdateRequestPro
   }
 
   /**
-   * Detects language(s) from a string.
-   * Classes wishing to implement their own language detection module should override this method.
-   * @param content The content to identify
+   * Detects language(s) from all configured fields
+   * @param doc The solr document
    * @return List of detected language(s) according to RFC-3066
    */
-  protected abstract List<DetectedLanguage> detectLanguage(SolrInputDocument content);
+  protected List<DetectedLanguage> detectLanguage(SolrInputDocument doc) {
+    return detectLanguage(solrDocReader(doc, inputFields));
+  }
+
+  /**
+   * Detects language(s) from a reader, typically based on some fields in SolrInputDocument
+   * Classes wishing to implement their own language detection module should override this method.
+   * @param solrDocReader A reader serving the text from the document to detect
+   * @return List of detected language(s) according to RFC-3066
+   */
+  protected abstract List<DetectedLanguage> detectLanguage(Reader solrDocReader);
 
   /**
    * Chooses a language based on the list of candidates detected
@@ -399,4 +406,22 @@ public abstract class LanguageIdentifierUpdateProcessor extends UpdateRequestPro
     this.enabled = enabled;
   }
 
+  /**
+   * Returns a reader that streams String content from fields.
+   * This is more memory efficient than building a full string buffer
+   * @param doc the solr document
+   * @param fields the field names to read
+   * @return a reader over the fields
+   */
+  protected SolrInputDocumentReader solrDocReader(SolrInputDocument doc, String[] fields) {
+    return new SolrInputDocumentReader(doc, fields, maxTotalChars, maxFieldValueChars, " ");
+  }
+  
+  /**
+   * Concatenates content from input fields defined in langid.fl.
+   * For test purposes only
+   */
+  protected String concatFields(SolrInputDocument doc) {
+    return SolrInputDocumentReader.asString(solrDocReader(doc, inputFields));
+  }
 }

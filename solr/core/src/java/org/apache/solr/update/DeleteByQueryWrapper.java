@@ -27,6 +27,7 @@ import org.apache.lucene.index.Term;
 import org.apache.lucene.search.Explanation;
 import org.apache.lucene.search.IndexSearcher;
 import org.apache.lucene.search.Query;
+import org.apache.lucene.search.ScoreMode;
 import org.apache.lucene.search.Scorer;
 import org.apache.lucene.search.Weight;
 import org.apache.solr.schema.IndexSchema;
@@ -49,7 +50,7 @@ final class DeleteByQueryWrapper extends Query {
   }
   
   LeafReader wrap(LeafReader reader) {
-    return new UninvertingReader(reader, schema.getUninversionMap(reader));
+    return UninvertingReader.wrap(reader, schema.getUninversionMapper());
   }
   
   // we try to be well-behaved, but we are not (and IW's applyQueryDeletes isn't much better...)
@@ -65,10 +66,11 @@ final class DeleteByQueryWrapper extends Query {
   }
   
   @Override
-  public Weight createWeight(IndexSearcher searcher, boolean needsScores, float boost) throws IOException {
+  public Weight createWeight(IndexSearcher searcher, ScoreMode scoreMode, float boost) throws IOException {
     final LeafReader wrapped = wrap((LeafReader) searcher.getIndexReader());
     final IndexSearcher privateContext = new IndexSearcher(wrapped);
-    final Weight inner = in.createWeight(privateContext, needsScores, boost);
+    privateContext.setQueryCache(searcher.getQueryCache());
+    final Weight inner = in.createWeight(privateContext, scoreMode, boost);
     return new Weight(DeleteByQueryWrapper.this) {
       @Override
       public void extractTerms(Set<Term> terms) {
@@ -81,6 +83,11 @@ final class DeleteByQueryWrapper extends Query {
       @Override
       public Scorer scorer(LeafReaderContext context) throws IOException {
         return inner.scorer(privateContext.getIndexReader().leaves().get(0));
+      }
+
+      @Override
+      public boolean isCacheable(LeafReaderContext ctx) {
+        return inner.isCacheable(ctx);
       }
     };
   }
